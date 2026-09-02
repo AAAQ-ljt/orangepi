@@ -1,7 +1,8 @@
-# ===== 白名单:只跟踪 code/ 与 doc/,其余全部忽略 =====
+# ===== 白名单:只跟踪 code/、doc/、scripts/,其余全部忽略 =====
 /*
 !/code/
 !/doc/
+!/scripts/
 !.gitignore
 
 # ===== 通用忽略(code/ 内部同样生效)=====

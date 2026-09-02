@@ -7,8 +7,14 @@
 
 ## 1. 一句话总结
 
-小车是 **Orange Pi 5（RK3588，Ubuntu 20.04）**，通过**手机热点局域网**可 SSH 登录：
-`ssh root@10.68.1.43`，密码 `orangepi`（网络答对：Windows 本机已装 paramiko，直接用下面的脚本即可，无需交互输密码）。
+小车是 **Orange Pi 5（RK3588，Ubuntu 20.04）**，两种连接方式（**优先走服务器转发**，隧道不通再用热点直连）：
+
+| 方式 | 命令 | 场景 |
+|---|---|---|
+| 🥇 服务器转发（推荐） | `ssh -p 2222 root@121.40.149.155`（密码 `orangepi`） | 任何能上网的机器，不受热点 IP 变化影响 |
+| 🥈 热点局域网直连 | `ssh root@10.68.1.43`（密码 `orangepi`） | 与本机同一手机热点下，隧道故障时兜底 |
+
+Windows 本机已装 paramiko，直接用 `scripts\ssh_car.py`（免交互，见第 5 节）。
 
 ---
 
@@ -27,6 +33,25 @@
 
 ## 3. 网络拓扑与连接参数
 
+### 3.1 方式一：服务器转发（主链路）
+
+```
+[小车 OrangePi5] --WiFi(手机热点)---> [frp 隧道] <---公网--- [服务器 121.40.149.155:2222] <--- [任意机器]
+    sshd:22 ──frpc──▶ 121.40.149.155:7000           frps 转发 2222 → 小车 22
+```
+
+| 参数 | 值 |
+|---|---|
+| Host | `121.40.149.155` |
+| 端口 | `2222` |
+| 用户名 | `root` |
+| 密码 | `orangepi` |
+
+> 链路组成：小车 `frpc-ssh`（systemd 开机自启、断线自动重连）→ 服务器 `frps`。
+> 配置细节见 `doc\frp内网穿透配置.md`。
+
+### 3.2 方式二：热点局域网直连（备用）
+
 ```
 [小车 OrangePi5] ——WiFi—— [手机热点] ——WiFi—— [本机 Windows]
    10.68.1.43                              (电脑与小车在同一热点下)
@@ -40,10 +65,11 @@
 | 密码 | `orangepi` |
 
 **注意**：
-- IP 是热点 DHCP 分配的，**可能变化**。连不上时先让用户确认小车当前 IP（可在小车上跑 `hostname -I`，或找热点后台看已连接设备）。
-- 手机热点通常**禁 ICMP**，`ping` 不通**不代表**连不上，要用 **TCP 22 端口**判断：
+- 热点 DHCP 分配的 IP **可能变化**。连不上时先让用户确认小车当前 IP（小车上 `hostname -I`，或热点后台看设备列表）。
+- 手机热点通常**禁 ICMP**，`ping` 不通**不代表**连不上，要用 **TCP** 判断：
   ```powershell
   Test-NetConnection 10.68.1.43 -Port 22   # TcpTestSucceeded = True 即通
+  Test-NetConnection 121.40.149.155 -Port 2222
   ```
 
 ---
@@ -52,111 +78,69 @@
 
 | 项 | 情况 |
 |---|---|
-| Python | 3.10.10（pyenv-win 管理，命令 `python` 可用） |
-| paramiko | **已安装 v5.0.0**（`python -c "import paramiko; print(paramiko.__version__)"` 验证） |
-| 助手脚本 | `D:\5g\orangepi\doc\dsh_ssh.py`（临时目录还有一份备份副本在 `%TEMP%\dsh_ssh.py`） |
+| Python | 3.11（`python` 可用） |
+| paramiko | **已安装 5.0.0** |
+| 助手脚本 | `E:\develop_software\yolov11\scripts\ssh_car.py`（执行命令）、`scripts\ssh_put.py`（传文件） |
 
-若 paramiko 丢失/失效，重新安装：
-```powershell
-python -m pip install paramiko
-```
+若 paramiko 丢失/失效，重新安装：`python -m pip install paramiko`
 
 ---
 
-## 5. 连接方法（推荐：助手脚本）
+## 5. 连接方法（推荐：助手脚本，免交互）
 
-脚本路径：**`D:\5g\orangepi\doc\dsh_ssh.py`**（脚本内容见第 7 节，万一文件没了照着重建即可）。
-
-基本用法：
 ```powershell
-python D:\5g\orangepi\doc\dsh_ssh.py "要执行的命令"
+# 默认走服务器转发(推荐)
+python scripts/ssh_car.py uname -a
+python scripts/ssh_car.py "uname -a; uptime"
+
+# 隧道不通时,热点直连兜底
+python scripts/ssh_car.py --direct hostname -I
+
+# 命令超时(默认 30s)
+python scripts/ssh_car.py --timeout 60 "ps aux | head -10"
 ```
 
-示例：
+⚠️ 命令参数以 `-` 开头时（如 `hostname -I`），请在命令前加 `--` 分隔：
 ```powershell
-# 探活 + 看系统
-python D:\5g\orangepi\doc\dsh_ssh.py "uname -a; uptime"
-
-# 看进程
-python D:\5g\orangepi\doc\dsh_ssh.py "ps aux | head -30"
+python scripts/ssh_car.py hostname -- -I
 ```
 
-脚本内部逻辑（实现细节，供参考）：
-- `paramiko.SSHClient` + `AutoAddPolicy`（自动接受首次主机密钥，无需交互）
-- 用户名/密码硬编码在脚本顶部 `HOST/USER/PWD` 常量
-- 可选第二个参数为命令超时秒数（默认 30）
-- 输出：命令 stdout、stderr、`[exit code: N]`
+上传文件到小车：
+```powershell
+python scripts/ssh_put.py 本地文件 /root/远端路径          # 默认走隧道
+python scripts/ssh_put.py --direct 本地文件 /root/...      # 热点直连
+python scripts/ssh_put.py --server 本地文件 /opt/...       # 传给公网服务器
+```
+
+脚本内部逻辑：`paramiko.SSHClient` + `AutoAddPolicy`，用户名/密码硬编码在脚本顶部常量；输出 stdout、stderr、`[exit code: N]`。
 
 ---
 
 ## 6. 备选方案（paramiko 不可用时的降级路径）
 
-1. **OpenSSH 本机客户端**（`C:\Windows\System32\OpenSSH\ssh.exe` 存在）——但**无法脚本化输密码**，只适合人工交互，不适合 AI 自动连接。
+1. **OpenSSH 本机客户端**（`C:\Windows\System32\OpenSSH\ssh.exe`）——**无法脚本化输密码**，只适合人工交互，不适合 AI 自动连接。
 2. **plink（PuTTY）**——支持 `-pw` 传密码：
    ```powershell
-   plink -ssh -pw orangepi -batch root@10.68.1.43 "uname -a"
+   plink -ssh -pw orangepi -batch root@121.40.149.155 -P 2222 "uname -a"
    ```
-   首次连接需先接受主机密钥（`echo y | plink ...`），`-batch` 模式下会自动拒绝未知密钥。本机未安装，需要时从 `https://the.earth.li/~sgtatham/putty/latest/w64/plink.exe` 下载（该源速度慢，耐心等）。
-3. 原则上优先修好 paramiko（pip 装一次就行），方案 1/2 不必真的用。
+   首次连接需先接受主机密钥（`echo y | plink ...`）。本机未安装，需要时从 `https://the.earth.li/~sgtatham/putty/latest/w64/plink.exe` 下载。
+3. 原则上优先修好 paramiko，方案 1/2 不必真的用。
 
 ---
 
-## 7. 助手脚本全文（dsh_ssh.py）
+## 7. 注意事项（重要）
 
-```python
-import sys
-import paramiko
-
-HOST = "10.68.1.43"
-USER = "root"
-PWD = "orangepi"
-
-
-def main():
-    cmd = sys.argv[1] if len(sys.argv) > 1 else "echo connected"
-    timeout = float(sys.argv[2]) if len(sys.argv) > 2 else 30.0
-    c = paramiko.SSHClient()
-    c.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    c.connect(
-        HOST,
-        username=USER,
-        password=PWD,
-        timeout=15,
-        banner_timeout=15,
-        auth_timeout=15,
-    )
-    stdin, stdout, stderr = c.exec_command(cmd, timeout=timeout)
-    out = stdout.read().decode(errors="replace")
-    err = stderr.read().decode(errors="replace")
-    rc = stdout.channel.recv_exit_status()
-    sys.stdout.write(out)
-    if err:
-        sys.stdout.write("[stderr]\n" + err)
-    sys.stdout.write(f"\n[exit code: {rc}]\n")
-    c.close()
-    sys.exit(rc)
-
-
-if __name__ == "__main__":
-    main()
-```
+- ⚠️ **不要乱动小车上的正在运行的服务/进程**：实测负载 3~4、多个用户在线，说明有 ROS 等任务在跑，可能还有别的 AI/人在同时操作。只做只读检查，改配置前先记录原值。
+- 小车 IP 可能因热点重启变化——隧道模式不受影响，这也是推荐它的原因。
+- 小车是比赛/实验用车，SSH 只用于调试。
+- ⚠️ **安全**：`root/orangepi` 是官方默认密码，且现已通过公网 2222 暴露——**强烈建议尽快改密码或启用密钥登录**；若改密码，需同步更新 `scripts\ssh_car.py`、`scripts\ssh_put.py` 顶部常量与本文件。
 
 ---
 
-## 8. 注意事项（重要）
-
-- ⚠️ **不要乱动小车上的正在运行的服务/进程**：实测负载始终在 3~4，而且和在线人数无关（空闲 SSH 会话几乎不产生负载），说明小车系统里在跑真实任务（可能是 ROS / 视觉相关），关机、重启、杀进程前务必三思。只做只读检查（查看、复制），改配置前先记录原值。
-- **关于"多用户在线"**：`uptime` 的 users 数包含 2 个本地 tty 会话（`orangepi` 在 tty1/ttyFIQ0 开机自启，可忽略），真正远程 SSH 会话才需要在意。当前处于局域网连接测试阶段，偶尔多几个人同时连（实测见过 7 users → 稳定后 4 users，其中远程仅 2 个）是正常的；后续正常开发会保持 1-2 人连接。同一时刻可能有另一位开发者在线，改东西前后注意协调、避免互相踩。
-- 小车 IP 可能因热点重启变化，连不上先查 IP。
-- 小车是比赛/实验用车（项目目录 `D:\5g\orangepi` 下有比赛资料、MaidKit 代码等），SSH 只用于调试，控制小车请走项目里现有的代码/协议。
-- 密码 `orangepi` 是 Orange Pi 官方默认密码，安全性低——若担心被蹭网，建议用户之后改密码，但改完要同步更新本文件第 3/7 节。
-
----
-
-## 9. 快速验证清单（连接后跑什么）
+## 8. 快速验证清单（连接后跑什么）
 
 ```powershell
-python D:\5g\orangepi\doc\dsh_ssh.py "uname -a; hostname; uptime"
+python scripts/ssh_car.py "uname -a; hostname; uptime"
 # 期望：Linux orangepi5 ... aarch64；hostname=orangepi5；exit code 0
 ```
 

@@ -54,7 +54,7 @@
 |---|---|
 | Python | 3.10.10（pyenv-win 管理，命令 `python` 可用） |
 | paramiko | **已安装 v5.0.0**（`python -c "import paramiko; print(paramiko.__version__)"` 验证） |
-| 助手脚本 | `D:\5g\orangepi\dsh_ssh.py`（同目录还有一份备份在 `%TEMP%\dsh_ssh.py`） |
+| 助手脚本 | `D:\5g\orangepi\doc\dsh_ssh.py`（临时目录还有一份备份副本在 `%TEMP%\dsh_ssh.py`） |
 
 若 paramiko 丢失/失效，重新安装：
 ```powershell
@@ -65,20 +65,20 @@ python -m pip install paramiko
 
 ## 5. 连接方法（推荐：助手脚本）
 
-脚本路径：**`D:\5g\orangepi\dsh_ssh.py`**（脚本内容见第 7 节，万一文件没了照着重建即可）。
+脚本路径：**`D:\5g\orangepi\doc\dsh_ssh.py`**（脚本内容见第 7 节，万一文件没了照着重建即可）。
 
 基本用法：
 ```powershell
-python D:\5g\orangepi\dsh_ssh.py "要执行的命令"
+python D:\5g\orangepi\doc\dsh_ssh.py "要执行的命令"
 ```
 
 示例：
 ```powershell
 # 探活 + 看系统
-python D:\5g\orangepi\dsh_ssh.py "uname -a; uptime"
+python D:\5g\orangepi\doc\dsh_ssh.py "uname -a; uptime"
 
 # 看进程
-python D:\5g\orangepi\dsh_ssh.py "ps aux | head -30"
+python D:\5g\orangepi\doc\dsh_ssh.py "ps aux | head -30"
 ```
 
 脚本内部逻辑（实现细节，供参考）：
@@ -145,7 +145,8 @@ if __name__ == "__main__":
 
 ## 8. 注意事项（重要）
 
-- ⚠️ **不要乱动小车上的正在运行的服务/进程**：实测负载 3~4、7 个用户在线，说明有 ROS 等任务在跑，可能还有别的 AI/人在同时操作。只做只读检查（查看、复制），改配置前先记录原值。
+- ⚠️ **不要乱动小车上的正在运行的服务/进程**：实测负载始终在 3~4，而且和在线人数无关（空闲 SSH 会话几乎不产生负载），说明小车系统里在跑真实任务（可能是 ROS / 视觉相关），关机、重启、杀进程前务必三思。只做只读检查（查看、复制），改配置前先记录原值。
+- **关于"多用户在线"**：`uptime` 的 users 数包含 2 个本地 tty 会话（`orangepi` 在 tty1/ttyFIQ0 开机自启，可忽略），真正远程 SSH 会话才需要在意。当前处于局域网连接测试阶段，偶尔多几个人同时连（实测见过 7 users → 稳定后 4 users，其中远程仅 2 个）是正常的；后续正常开发会保持 1-2 人连接。同一时刻可能有另一位开发者在线，改东西前后注意协调、避免互相踩。
 - 小车 IP 可能因热点重启变化，连不上先查 IP。
 - 小车是比赛/实验用车（项目目录 `D:\5g\orangepi` 下有比赛资料、MaidKit 代码等），SSH 只用于调试，控制小车请走项目里现有的代码/协议。
 - 密码 `orangepi` 是 Orange Pi 官方默认密码，安全性低——若担心被蹭网，建议用户之后改密码，但改完要同步更新本文件第 3/7 节。
@@ -155,7 +156,7 @@ if __name__ == "__main__":
 ## 9. 快速验证清单（连接后跑什么）
 
 ```powershell
-python D:\5g\orangepi\dsh_ssh.py "uname -a; hostname; uptime"
+python D:\5g\orangepi\doc\dsh_ssh.py "uname -a; hostname; uptime"
 # 期望：Linux orangepi5 ... aarch64；hostname=orangepi5；exit code 0
 ```
 

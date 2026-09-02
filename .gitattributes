@@ -1,0 +1,2 @@
+# 脚本统一 LF 换行(部署到 Linux 服务器/小车不因 CRLF 出错)
+*.sh text eol=lf

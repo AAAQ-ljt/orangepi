@@ -1,0 +1,26 @@
+# ===== 白名单:只跟踪 code/ 与 doc/,其余全部忽略 =====
+/*
+!/code/
+!/doc/
+!.gitignore
+
+# ===== 通用忽略(code/ 内部同样生效)=====
+__pycache__/
+*.py[cod]
+*.so
+.venv/
+venv/
+.env
+*.log
+.DS_Store
+Thumbs.db
+.idea/
+
+# ===== 数据集/模型产物(进入 code/ 后也一律不提交)=====
+*.pt
+*.onnx
+*.rknn
+datasets/
+runs/
+*.mp4
+*.avi

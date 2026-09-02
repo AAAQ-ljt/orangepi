@@ -1,0 +1,11 @@
+# 重建环境规格(实际环境由 setup_yolo_env.ps1 创建在 E:\yolov11\env)
+# 复现:conda env create -p E:\yolov11\env -f environment.yml
+name: smartcar-yolo
+channels:
+  - defaults
+dependencies:
+  - python=3.11
+  - pip
+  - pip:
+      - ultralytics
+      - opencv-python

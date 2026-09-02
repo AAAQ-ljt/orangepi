@@ -1,0 +1,5 @@
+# YOLOv11 视觉环境核心依赖(pip)
+# 安装:激活环境后 pip install -r requirements.txt
+# 环境本体装在 E:\yolov11\env(见 setup_yolo_env.ps1 / environment.yml)
+ultralytics
+opencv-python

@@ -10,6 +10,9 @@ __pycache__/
 *.so
 .venv/
 venv/
+env/
+.conda-pkgs/
+.pip-cache/
 .env
 *.log
 .DS_Store

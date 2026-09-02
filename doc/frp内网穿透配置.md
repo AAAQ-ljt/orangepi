@@ -12,11 +12,12 @@
 |---|---|
 | 服务器地址 | `121.40.149.155` |
 | 控制端口 bind_port | `7000` |
-| SSH 转发端口 remote_port | `2222` |
+| SSH 转发端口 remote_port | `2222`（小车 22） |
+| **网页控制转发端口** | **`8080`（小车 80，nginx 网页控制/图传）** |
 | 认证 token | `375b12b2e5614357ce8225bcce93df4e` |
 | 小车端用户 | `root` / `orangepi` |
 
-连接效果：`ssh -p 2222 root@121.40.149.155`（任何能上网的机器）就能进小车。
+连接效果：`ssh -p 2222 root@121.40.149.155`（SSH）；浏览器 `http://121.40.149.155:8080`（小车网页控制）。
 
 ---
 
@@ -126,5 +127,6 @@ ufw allow 7000/tcp && ufw allow 2222/tcp    # 或 firewall-cmd --permanent --add
 | 小车 frpc-ssh（frp 0.39.0 ARM64，复用官方二进制） | ✅ systemd `frpc-ssh` enabled，日志 `login to server success` + `[ssh] start proxy success` |
 | 服务器本机隧道连通性（`/dev/tcp/127.0.0.1/2222`） | ✅ TUNNEL-OK（穿透到达小车 sshd） |
 | 公网实测 `ssh -p 2222 root@121.40.149.155` | ✅ 登录成功，落到小车（orangepi5 / aarch64） |
-| 阿里云安全组 | ✅ 已放行 7000 + 2222 入方向 |
-| 踩坑记录 | 解压 release 包覆盖 frps.ini 导致 token 丢失（见顶部警告） |
+| **公网实测 `http://121.40.149.155:8080`** | ✅ **HTTP 200，「室外5G远程控制网站」**（小车 80 → 8080 映射，tcp 类型） |
+| 阿里云安全组 | ✅ 已放行 7000 + 2222 + 8080 入方向 |
+| 踩坑记录 | 解压 release 包覆盖 frps.ini 导致 token 丢失（见顶部警告）；重启 frpc-ssh 会短暂断开自身隧道（属正常） |

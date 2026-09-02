@@ -1,0 +1,14 @@
+[Unit]
+Description=FRP Server Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/opt/frp/frps -c /opt/frp/frps.ini
+WorkingDirectory=/opt/frp
+Restart=always
+RestartSec=5
+User=root
+
+[Install]
+WantedBy=multi-user.target

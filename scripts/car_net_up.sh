@@ -16,8 +16,8 @@ if [ -z "$IP" ] || [ -z "$GW" ]; then
 fi
 ip addr flush dev wwan0
 ip addr add "$IP/32" dev wwan0 || exit 1
-# 蜂窝兜底路由:metric 1000 → WiFi(600)优先,WiFi 断自动切蜂窝; /32 需要 onlink
-ip route replace default via "$GW" dev wwan0 metric 1000 onlink || true
+# 蜂窝主路由:metric 100 → 优先于 WiFi(600); WiFi 仅兜底; /32 需要 onlink
+ip route replace default via "$GW" dev wwan0 metric 100 onlink || true
 if [ -n "$DNS" ]; then
   resolvectl dns wwan0 "$DNS" 2>/dev/null || echo "nameserver $DNS" >> /etc/resolv.conf
 fi

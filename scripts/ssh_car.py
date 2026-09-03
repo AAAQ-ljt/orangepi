@@ -37,9 +37,9 @@ def main() -> None:
         port=target["port"],
         username=target["user"],
         password=target["pwd"],
-        timeout=15,
-        banner_timeout=15,
-        auth_timeout=15,
+        timeout=30,
+        banner_timeout=30,
+        auth_timeout=45,
     )
     _, stdout, stderr = c.exec_command(cmd, timeout=args.timeout)
     out = stdout.read().decode(errors="replace")

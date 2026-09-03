@@ -1,0 +1,13 @@
+[Unit]
+Description=Car 5G QMI dialup (SIM8262E-M2, APN cmnet)
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+ExecStart=/root/car_net_up.sh
+Restart=always
+RestartSec=15
+
+[Install]
+WantedBy=multi-user.target

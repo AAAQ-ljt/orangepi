@@ -27,6 +27,7 @@ Thumbs.db
 *.onnx
 *.rknn
 datasets/
+dev/tests/yolo*/
 runs/
 *.mp4
 *.avi

@@ -38,15 +38,18 @@ def main() -> int:
     try:
         time.sleep(1.2)
         send_message(5055, is_barrier=True, center_x=320)
-        time.sleep(0.2)
+        time.sleep(0.1)
         send_message(5055, is_barrier=False, center_x=320)
-        time.sleep(0.2)
+        time.sleep(0.1)
         send_message(5055, center_x=300)
-        time.sleep(0.2)
+        time.sleep(0.1)
         send_message(5055, center_x=340)
-        time.sleep(0.2)
-        send_message(5055, has_zebra_crossing=True, center_x=330)
-        time.sleep(0.5)
+        time.sleep(0.1)
+        # 连续多帧 zebra，满足防抖
+        for _ in range(4):
+            send_message(5055, has_zebra_crossing=True, center_x=330)
+            time.sleep(0.1)
+        time.sleep(0.3)
     finally:
         proc.terminate()
         try:

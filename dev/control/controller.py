@@ -13,10 +13,11 @@ from control.udp_server import UDPServer
 
 class Controller:
     def __init__(self, driver: Driver, port: int = 5000,
-                 target_x: float = 320.0):
+                 target_x: float = 320.0,
+                 zebra_stop_seconds: float = 10.0):
         self.driver = driver
         self.port = port
-        self.fsm = FSM()
+        self.fsm = FSM(zebra_stop_seconds=zebra_stop_seconds)
         self.planner = Planner(target_x=target_x)
         self.server = UDPServer(port=port)
         self._stop = threading.Event()

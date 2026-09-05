@@ -25,6 +25,8 @@ def main() -> int:
                         help="期望车道中心 x")
     parser.add_argument("--max-us", type=int, default=settings.ESC_DEBUG_MAX_US,
                         help="电调最大脉宽，调试默认 1540us")
+    parser.add_argument("--zebra-seconds", type=float, default=10.0,
+                        help="斑马线停车时长，调试可调小")
     args = parser.parse_args()
 
     if args.real:
@@ -33,7 +35,8 @@ def main() -> int:
         print("[MAIN] DRY-RUN mode, no hardware movement")
 
     driver = Driver(real=args.real, esc_max_us=args.max_us)
-    controller = Controller(driver, port=args.port, target_x=args.target_x)
+    controller = Controller(driver, port=args.port, target_x=args.target_x,
+                            zebra_stop_seconds=args.zebra_seconds)
 
     def _signal_handler(_signum, _frame):
         print("\n[MAIN] signal received, stopping safely")

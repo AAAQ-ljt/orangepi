@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
+from config import settings
 from hardware.mock import MockPCA9685
 from hardware.pca9685 import PCA9685
 
@@ -17,10 +18,12 @@ class ControlTarget:
 
 
 class Driver:
-    def __init__(self, pca=None, real: bool = False):
+    def __init__(self, pca=None, real: bool = False,
+                 esc_max_us: Optional[int] = None):
         self.real = real
+        self.esc_max_us = esc_max_us if esc_max_us is not None else settings.ESC_DEBUG_MAX_US
         if real:
-            self.pca = pca if pca is not None else PCA9685()
+            self.pca = pca if pca is not None else PCA9685(esc_max_us=self.esc_max_us)
             self.pca.init()
         else:
             self.pca = pca if pca is not None else MockPCA9685()
@@ -37,7 +40,7 @@ class Driver:
     def execute(self, target: ControlTarget) -> None:
         if not self.armed:
             # 未解锁时只允许安全停止
-            self.pca.set_steering_angle(90)
+            self.pca.set_steering_angle(settings.SERVO_CENTER_ANGLE)
             self.pca.set_esc_percent(0)
             return
 

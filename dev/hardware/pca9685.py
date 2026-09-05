@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from typing import Optional
 
+from config import settings
+
 try:
     from adafruit_extended_bus import ExtendedI2C as I2C
     from adafruit_pca9685 import PCA9685 as _PCA9685
@@ -19,12 +21,21 @@ class PCA9685:
     CH_PAN = 2
     CH_TILT = 3
 
-    def __init__(self, bus_id: int = 5, address: int = 0x40, freq: int = 50):
+    def __init__(self,
+                 bus_id: int = 5,
+                 address: int = 0x40,
+                 freq: int = 50,
+                 esc_stop_us: int = settings.ESC_STOP_US,
+                 esc_min_us: int = settings.ESC_MIN_US,
+                 esc_max_us: int = settings.ESC_DEBUG_MAX_US):
         if not _HAS_HW:
             raise RuntimeError("PCA9685 hardware libraries not available")
         self.bus_id = bus_id
         self.address = address
         self.freq = freq
+        self.esc_stop_us = esc_stop_us
+        self.esc_min_us = esc_min_us
+        self.esc_max_us = esc_max_us
         self._i2c: Optional[I2C] = None
         self._pca: Optional[_PCA9685] = None
 
@@ -56,15 +67,14 @@ class PCA9685:
     def set_steering_angle(self, angle: float) -> None:
         self.write_us(self.CH_STEERING, self.angle_to_us(angle))
 
-    def set_esc_percent(self, percent: float, stop_us: int = 1500,
-                        min_us: int = 1400, max_us: int = 2000) -> None:
+    def set_esc_percent(self, percent: float) -> None:
         percent = max(-100.0, min(100.0, float(percent)))
         if percent == 0:
-            pulse = float(stop_us)
+            pulse = float(self.esc_stop_us)
         elif percent > 0:
-            pulse = stop_us + (percent / 100.0) * (max_us - stop_us)
+            pulse = self.esc_stop_us + (percent / 100.0) * (self.esc_max_us - self.esc_stop_us)
         else:
-            pulse = stop_us + (percent / 100.0) * (stop_us - min_us)
+            pulse = self.esc_stop_us + (percent / 100.0) * (self.esc_stop_us - self.esc_min_us)
         self.write_us(self.CH_ESC, pulse)
 
     def set_pan_angle(self, angle: float) -> None:
@@ -76,7 +86,7 @@ class PCA9685:
     def center_all(self) -> None:
         if self._pca is None:
             return
-        self.set_steering_angle(90)
+        self.set_steering_angle(settings.SERVO_CENTER_ANGLE)
         self.set_pan_angle(90)
         self.set_tilt_angle(90)
         self.set_esc_percent(0)

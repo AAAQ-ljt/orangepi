@@ -8,7 +8,7 @@ from control.driver import ControlTarget
 class Planner:
     def __init__(self, target_x: float = 320.0,
                  max_steer: float = 30.0,
-                 cruise_throttle: float = 25.0):
+                 cruise_throttle: float = 100.0):
         self.target_x = target_x
         self.max_steer = max_steer
         self.cruise_throttle = cruise_throttle
@@ -33,7 +33,7 @@ class Planner:
             throttle = 0.0
         elif msg.blue_cone_count > 0:
             # 有锥桶先降速，后续再细化绕障
-            throttle = self.cruise_throttle * 0.4
+            throttle = self.cruise_throttle * 0.5
         else:
             throttle = self.cruise_throttle
 

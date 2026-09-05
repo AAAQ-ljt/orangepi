@@ -2,6 +2,7 @@
 """2026 智能车控制端入口。
 
 默认 dry-run（不碰硬件）；显式加 --real 才会驱动 PCA9685。
+运动前必须加 --arm 解锁，否则即使 real 模式也不会输出动力。
 调试阶段默认把电调最大脉宽限制在 1540us，避免速度过快。
 """
 from __future__ import annotations
@@ -19,6 +20,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="2026 智能车控制端")
     parser.add_argument("--real", action="store_true",
                         help="真实硬件模式（默认 dry-run，不驱动电机）")
+    parser.add_argument("--arm", action="store_true",
+                        help="解锁动力输出（必须与 --real 同时使用才会动）")
     parser.add_argument("--port", type=int, default=settings.UDP_PORT,
                         help="UDP 监听端口")
     parser.add_argument("--target-x", type=float, default=settings.TARGET_X,
@@ -35,6 +38,12 @@ def main() -> int:
         print("[MAIN] DRY-RUN mode, no hardware movement")
 
     driver = Driver(real=args.real, esc_max_us=args.max_us)
+    if args.real and args.arm:
+        driver.arm()
+        print("[MAIN] ARMED, motor/servo output enabled")
+    elif args.real:
+        print("[MAIN] NOT ARMED, motor/servo output disabled (use --arm)")
+
     controller = Controller(driver, port=args.port, target_x=args.target_x,
                             zebra_stop_seconds=args.zebra_seconds)
 

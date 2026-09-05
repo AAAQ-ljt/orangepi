@@ -1,6 +1,7 @@
-# ===== 白名单:只跟踪 code/、doc/、scripts/,其余全部忽略 =====
+# ===== 白名单:只跟踪 code/、dev/、doc/、scripts/,其余全部忽略 =====
 /*
 !/code/
+!/dev/
 !/doc/
 !/scripts/
 !.gitignore

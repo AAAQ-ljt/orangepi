@@ -57,8 +57,12 @@ def main() -> int:
         if frame is None:
             print(f"[VISION] cannot read {args.test_image}")
             return 1
-        outputs = model.infer(frame)
+        img = model.preprocess(frame)
+        t0 = time.time()
+        outputs = model.infer(img)
+        infer_ms = (time.time() - t0) * 1000
         print(f"[VISION] outputs shapes: {[np.asarray(o).shape for o in outputs]}")
+        print(f"[VISION] infer time: {infer_ms:.1f} ms")
         result = postprocess(outputs, conf_threshold=args.conf)
         print(f"[VISION] result: {result}")
         model.release()
@@ -77,24 +81,41 @@ def main() -> int:
             return 1
 
         print(f"[VISION] sending to {args.udp_ip}:{args.udp_port}")
+        frame_count = 0
+        loop_start = time.time()
         while True:
+            t_read = time.time()
             ret, frame = cap.read()
             if not ret or frame is None:
                 time.sleep(0.05)
                 continue
+            read_ms = (time.time() - t_read) * 1000
 
-            try:
-                outputs = model.infer(frame)
-                result = postprocess(outputs, conf_threshold=args.conf)
-                msg = result_to_message(result, time.time())
-                data = json.dumps(msg, ensure_ascii=False).encode("utf-8")
-                sock.sendto(data, (args.udp_ip, args.udp_port))
-                print(f"[VISION] center={result.center_x:.1f} "
-                      f"zebra={result.has_zebra_crossing} cone={result.blue_cone_count} "
-                      f"A={result.has_sign_a} B={result.has_sign_b} "
-                      f"L={result.has_left_sign} R={result.has_right_sign}")
-            except Exception as exc:
-                print(f"[VISION] infer error: {exc}")
+            t_pre = time.time()
+            img = model.preprocess(frame)
+            pre_ms = (time.time() - t_pre) * 1000
+
+            t_inf = time.time()
+            outputs = model.infer(img)
+            inf_ms = (time.time() - t_inf) * 1000
+
+            t_post = time.time()
+            result = postprocess(outputs, conf_threshold=args.conf)
+            post_ms = (time.time() - t_post) * 1000
+
+            frame_count += 1
+            elapsed = time.time() - loop_start
+            fps = frame_count / elapsed if elapsed > 0 else 0
+
+            msg = result_to_message(result, time.time())
+            data = json.dumps(msg, ensure_ascii=False).encode("utf-8")
+            sock.sendto(data, (args.udp_ip, args.udp_port))
+
+            print(f"[VISION] #{frame_count} fps={fps:.1f} "
+                  f"read={read_ms:.0f}ms pre={pre_ms:.0f}ms inf={inf_ms:.0f}ms post={post_ms:.0f}ms "
+                  f"center={result.center_x:.1f} zebra={result.has_zebra_crossing} "
+                  f"cone={result.blue_cone_count} A={result.has_sign_a} B={result.has_sign_b} "
+                  f"L={result.has_left_sign} R={result.has_right_sign}")
 
     except KeyboardInterrupt:
         print("\n[VISION] interrupted")

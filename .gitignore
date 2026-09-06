@@ -32,3 +32,4 @@ runs/
 *.mp4
 *.avi
 *.pid
+dev/models/

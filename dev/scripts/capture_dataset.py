@@ -84,6 +84,7 @@ def main() -> int:
     parser.add_argument("--device", type=int, default=0)
     parser.add_argument("--width", type=int, default=640)
     parser.add_argument("--height", type=int, default=480)
+    parser.add_argument("--show", action="store_true", help="显示 OpenCV 预览窗口")
     args = parser.parse_args()
 
     try:

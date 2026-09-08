@@ -10,6 +10,11 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 IMG_ROOT="$SCRIPT_DIR"
+
+# 清理可能残留的拍照/录像进程，避免占用摄像头
+pkill -9 -f "capture_dataset.py" 2>/dev/null || true
+pkill -9 -f "record_video.py" 2>/dev/null || true
+sleep 1
 DEVICE=0
 SERVICE="ffmpeg-stream.service"
 
@@ -58,6 +63,14 @@ bash "$ROOT_DIR/scripts/safe_pwm_init.sh"
 # 关闭对应推流服务
 echo "[CAM0] stopping $SERVICE"
 systemctl stop "$SERVICE" || true
+# 等待服务完全退出，释放摄像头
+for i in $(seq 1 30); do
+  STATE="$(systemctl is-active "$SERVICE" 2>/dev/null || true)"
+  if [ "$STATE" = "inactive" ] || [ "$STATE" = "failed" ]; then
+    break
+  fi
+  sleep 0.2
+done
 
 cleanup() {
   echo "[CAM0] restoring $SERVICE"

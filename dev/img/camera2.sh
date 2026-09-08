@@ -58,6 +58,13 @@ systemctl stop "$SERVICE" || true
 
 cleanup() {
   echo "[CAM2] restoring $SERVICE"
+  # 等待服务完全退出再启动，避免 start 被 cancel
+  for i in $(seq 1 25); do
+    if ! systemctl is-active --state=deactivating "$SERVICE" 2>/dev/null; then
+      break
+    fi
+    sleep 0.2
+  done
   systemctl start "$SERVICE" || true
 }
 trap cleanup EXIT

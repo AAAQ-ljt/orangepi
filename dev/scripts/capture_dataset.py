@@ -87,6 +87,9 @@ def main() -> int:
     parser.add_argument("--show", action="store_true", help="显示 OpenCV 预览窗口")
     args = parser.parse_args()
 
+    if args.show and not os.environ.get("DISPLAY"):
+        print("[CAPTURE] WARNING: DISPLAY not set, preview window may not show. Saving will continue.")
+
     try:
         out_dir = resolve_output_dir(args)
     except ValueError as exc:

@@ -37,7 +37,7 @@ bash img/camera2.sh video --folder test2
 
 ### 情况 1：通过 SSH 远程操作，想在自己电脑上看到画面
 
-必须使用 **SSH X11 转发** 连接小车：
+必须使用 **SSH X11 转发**，并且是从**你自己的电脑**连接到小车：
 
 ```bash
 ssh -X -p 2222 root@121.40.149.155
@@ -48,10 +48,14 @@ ssh -X -p 2222 root@121.40.149.155
 连接后直接运行：
 
 ```bash
+cd /root/dev/img
 bash camera0.sh photo --folder test1 --show
 ```
 
-不需要手动执行额外的 x11 命令。
+注意：
+
+- 不要在小车上再 `ssh -X` 到小车自己，这样 X11 转发通常不会到你电脑；
+- 如果小车有 HDMI 显示器，直接在车上本地终端运行，不用 SSH。
 
 ### 情况 2：小车直接接显示器/HDMI，在车上操作
 

@@ -62,7 +62,7 @@ echo "[CAM2] stopping $SERVICE"
 systemctl stop "$SERVICE" || true
 # 等待服务完全退出，释放摄像头
 for i in $(seq 1 30); do
-  STATE="$(systemctl is-active "$SERVICE" 2>/dev/null || true)"
+  STATE="$(systemctl is-active "$SERVICE" >/dev/null 2>&1 || true)"
   if [ "$STATE" = "inactive" ] || [ "$STATE" = "failed" ]; then
     break
   fi
@@ -73,7 +73,7 @@ cleanup() {
   echo "[CAM2] restoring $SERVICE"
   # 等待服务完全退出再启动，避免 start 被 cancel
   for i in $(seq 1 25); do
-    if ! systemctl is-active --state=deactivating "$SERVICE" 2>/dev/null; then
+    if ! systemctl is-active --state=deactivating "$SERVICE" >/dev/null 2>&1; then
       break
     fi
     sleep 0.2

@@ -132,12 +132,20 @@ def main() -> int:
             cv2.imwrite(filename, frame, [cv2.IMWRITE_JPEG_QUALITY, 90])
             print(f"[CAPTURE] saved {filename}")
 
+            if args.show:
+                cv2.imshow("capture", frame)
+                key = cv2.waitKey(30)
+                if key in (ord("q"), 27):
+                    print("[CAPTURE] user quit")
+                    break
+
             time.sleep(max(0.05, args.interval))
     except KeyboardInterrupt:
         print("\n[CAPTURE] interrupted by user")
     finally:
         if cap is not None:
             cap.release()
+        cv2.destroyAllWindows()
         print("[CAPTURE] restoring ffmpeg")
         start_ffmpeg()
         print("[CAPTURE] done")

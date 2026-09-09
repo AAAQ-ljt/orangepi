@@ -115,6 +115,11 @@ def main() -> int:
 
         print("[CAPTURE] capturing... Ctrl+C to stop")
         counter = 0
+
+        if args.show:
+            cv2.namedWindow("capture", cv2.WINDOW_NORMAL)
+            cv2.startWindowThread()
+            print("[CAPTURE] preview window enabled")
         while True:
             ret, frame = cap.read()
             if not ret or frame is None:

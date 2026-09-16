@@ -1,0 +1,14 @@
+# 把 5G 模组的网卡名固定为 wwan0
+# 部署位置：/etc/systemd/network/10-wwan0.link
+#
+# 背景（2026-09-16 实测）：systemd/udev 会把内核名 wwan0 改成 wwx<MAC>，
+# 导致所有写死 wwan0 的脚本（我们早期的脚本、厂商的 simcom-cm）全部失效——
+# 现象就是"拨号卡住/连不上网"，但 lsusb 里模组一切正常。
+#
+# 有了这个文件，开机就固定叫 wwan0；car-net.sh 里也做了运行时自动探测，双保险。
+
+[Match]
+Driver=qmi_wwan
+
+[Link]
+Name=wwan0

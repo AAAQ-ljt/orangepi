@@ -4,6 +4,9 @@ Documentation=file:/root/dev/scripts/net/car-net.sh
 After=network.target NetworkManager.service
 Wants=NetworkManager.service
 Before=frpc-ssh.service
+# 失败自动重试（比如开机时蜂窝还没就绪）：30s 后重来，最多 10 次
+StartLimitIntervalSec=600
+StartLimitBurst=10
 
 [Service]
 Type=oneshot
@@ -11,6 +14,8 @@ RemainAfterExit=yes
 # 上电联网策略：先流量卡，没有再 WiFi；任一连上就不再折腾另一路
 ExecStart=/root/dev/scripts/net/car-net.sh auto
 TimeoutStartSec=180
+Restart=on-failure
+RestartSec=30
 
 [Install]
 WantedBy=multi-user.target

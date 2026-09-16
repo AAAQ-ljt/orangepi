@@ -1,0 +1,7 @@
+[Unit]
+Description=Watchdog for camera RTSP push streams (restart when the push connection dies)
+Documentation=file:/root/dev/scripts/net/stream-watch.sh
+
+[Service]
+Type=oneshot
+ExecStart=/root/dev/scripts/net/stream-watch.sh

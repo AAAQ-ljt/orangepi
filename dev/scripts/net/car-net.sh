@@ -41,6 +41,36 @@ WIFI_IF=""; WWAN_IF="wwan0"; QMI_DEV="/dev/cdc-wdm0"
 # shellcheck disable=SC1090
 [[ -f "$CONF" ]] && source "$CONF"
 
+# 模组网卡名并不固定：systemd/udev 有时会把内核名 wwan0 改成 wwx<MAC>
+# （2026-09-16 实测：改名后所有写死 wwan0 的脚本全部失效，连厂商拨号器也一起卡住）
+detect_wwan_if() {
+  local cand
+  cand=$(ls /sys/class/net 2>/dev/null | grep -E '^(wwan|wwx)' | head -1)
+  [[ -n "$cand" ]] && { echo "$cand"; return 0; }
+  echo "$WWAN_IF"
+}
+# 以实际存在的接口为准；配置里写的名字不存在就自动探测
+if [[ ! -d "/sys/class/net/${WWAN_IF:-wwan0}" ]]; then
+  _detected="$(detect_wwan_if)"
+  [[ -n "$_detected" && "$_detected" != "$WWAN_IF" ]] && WWAN_IF="$_detected"
+fi
+
+# 把网卡名固定回 wwan0（厂商 simcom-cm 只认这个名字；也能让老脚本继续可用）
+ensure_wwan0_name() {
+  [[ "$WWAN_IF" == "wwan0" ]] && return 0
+  info "网卡当前叫 $WWAN_IF，改名回 wwan0（厂商拨号器只认这个名）"
+  ip link set "$WWAN_IF" down 2>/dev/null
+  if ip link set "$WWAN_IF" name wwan0 2>/dev/null; then
+    WWAN_IF="wwan0"
+    ip link set wwan0 up 2>/dev/null
+    log "renamed $1 -> wwan0"
+    return 0
+  fi
+  warn "改名失败（接口可能被占用），继续使用 $WWAN_IF"
+  ip link set "$WWAN_IF" up 2>/dev/null
+  return 1
+}
+
 if [[ -t 1 ]]; then
   R=$'\e[31m'; G=$'\e[32m'; Y=$'\e[33m'; C=$'\e[36m'; B=$'\e[1m'; N=$'\e[0m'
 else
@@ -114,6 +144,9 @@ modem_hard_reset() {
     if [[ -e "$QMI_DEV" && -d "/sys/class/net/$WWAN_IF" ]]; then
       ok "模组已重新枚举（$QMI_DEV 就绪）"
       sleep 3
+      _detected="$(detect_wwan_if)"      # 复位后名字可能又变，重新探测
+      [[ -n "$_detected" ]] && WWAN_IF="$_detected"
+      ensure_wwan0_name || true
       [[ -e /sys/class/net/$WWAN_IF/qmi/raw_ip ]] && echo Y > "/sys/class/net/$WWAN_IF/qmi/raw_ip" 2>/dev/null
       ip link set "$WWAN_IF" up 2>/dev/null
       return 0
@@ -130,6 +163,7 @@ modem_hard_reset() {
 # 但它可能只用固定 APN，所以放在 APN 轮询之后。
 vendor_dial() {
   [[ -x "$VENDOR_DIALER" ]] || { warn "找不到厂商拨号器：$VENDOR_DIALER"; return 1; }
+  ensure_wwan0_name || true     # 厂商程序写死了 wwan0，先保证名字对
   if pgrep -f "simcom-cm" >/dev/null 2>&1; then
     info "厂商拨号器已在运行（可能卡住了，先重启它）"
     pkill -f "simcom-cm" 2>/dev/null || true

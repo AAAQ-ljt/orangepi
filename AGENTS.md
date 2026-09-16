@@ -238,6 +238,8 @@ StartGateState(blocked: bool, armed: bool, released: bool, blue_ratio: float, ti
 |---|---|
 | **以为安全组被"覆盖"了** | 端口从某些网络连不上，先分清是**安全组**还是**你本地网络**：换个观测点（小车本身）测同一端口。2026-09-16 实测：SG 一直正常，是校园网出口封了 22/2222 这类 SSH 端口 |
 | 用团队自己写的 qmicli 脚本给 SIM8262E-M2 拨号 | 该模组时序特殊，手写 qmicli 容易 `CID allocation failed`；**先试 APN 轮询（`car-net.sh cellular up`），失败再用厂商 `simcom-cm`，最后 `cellular recover` 做 USB 硬复位** |
+| **以为模组坏了/拨号脚本有问题，其实是网卡被改名** | systemd 会把 `wwan0` 改成 `wwx<MAC>`，所有写死 `wwan0` 的脚本（含厂商二进制）全部失效。已修：脚本运行时自动探测 + `/etc/systemd/network/10-wwan0.link` 固定名字。排查：`dmesg \| grep -E 'qmi\|wwan' \| tail` |
+| 以为"服务 active"就等于"推流正常" | ffmpeg 推 RTSP **不会自动重连**：网络一断进程还活着但流已死。已加 `stream-watch.timer`（30s 检查到媒体服务器的连接，断了就重启服务） |
 | 用 `nmcli dev status` 的 `connected` 判断网络可用 | DHCP 拿到地址后 NM 会停在 **`ip-check`** 十几秒，此时网络其实已经可用；用"接口有没有 IPv4 地址"判断，否则会把刚连上的 WiFi 主动掐掉 |
 | 以为手机热点在旁边就一定能连上 | 关联成功 ≠ 拿到 IP：热点 DHCP 不给租约时会报 `ip-config-unavailable`；`car-net.sh wifi up` 已重试 3 次，仍失败可在账本加静态地址 |
 | 强杀/断电对待蜂窝连接 | 会留下**未释放的 CID** → 下次拨号必然失败；退出前用 `car-net.sh cellular down`（关机已自动挂上） |

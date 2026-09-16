@@ -1,0 +1,11 @@
+[Unit]
+Description=Periodically run the camera stream watchdog
+
+[Timer]
+OnBootSec=90s
+OnUnitActiveSec=30s
+AccuracySec=5s
+Unit=stream-watch.service
+
+[Install]
+WantedBy=timers.target

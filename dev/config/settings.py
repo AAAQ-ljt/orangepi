@@ -1,33 +1,100 @@
 """控制端参数配置。
 
+约定：
+- **所有阈值、限幅、坐标目标都集中在本文件**，不要在业务代码里散落硬编码；
+- 标注"现场可调"的参数在标定后请把实测值写回这里，并注明日期；
+- 单位统一见 AGENTS.md §5.2（像素/角度/百分比）。
+
 调试阶段默认把电调最大脉宽限制在 1540us，避免小车速度过快。
 比赛前再调整为 full speed。
 """
 from __future__ import annotations
 
-# ---- 电调/电机 ----
+# ---------------------------------------------------------------- 图像坐标
+IMG_W = 640
+IMG_H = 480
+
+# ---------------------------------------------------------------- 电调/电机
 ESC_STOP_US = 1500      # 停止脉宽
 ESC_START_US = 1534     # 实测启动脉宽
 ESC_DEBUG_MAX_US = 1540 # 调试阶段最大脉宽（安全限速）
 ESC_MAX_US = 2000       # 比赛/全速最大脉宽
 ESC_MIN_US = 1400       # 最大倒车脉宽
 
-# ---- 舵机 ----
+# ---------------------------------------------------------------- 舵机
 SERVO_CENTER_ANGLE = 90
 SERVO_MIN_ANGLE = 60
 SERVO_MAX_ANGLE = 120
 
-# ---- 视觉/控制 ----
-TARGET_X = 320.0
+# ---------------------------------------------------------------- 视觉/控制
+TARGET_X = 320.0        # 期望车道中心像素值（摄像头偏装时现场标定）
 UDP_PORT = 5000
 
-# ---- 可靠性 ----
-# 转向平滑系数：0~1，越小越平滑
-STEERING_SMOOTHING = 0.6
-# 连续多久没收到 UDP 就触发安全停车（秒）
-FAILSAFE_TIMEOUT = 2.0
+# 转向限速：每秒钟最多改变多少度（防止从 0 直接跳满舵）
+STEERING_SLEW_DEG_PER_S = 240.0
+
+# ---------------------------------------------------------------- 可靠性
+FAILSAFE_TIMEOUT = 2.0      # 连续多久没收到 UDP 就安全停车（秒）
+ZEBRA_STOP_SECONDS = 10.0   # 斑马线停车时长（规则：10s，不足会被罚时）
+
 # 状态切换防抖帧数
 ZEBRA_HYSTERESIS_FRAMES = 3
 CONE_HYSTERESIS_FRAMES = 3
 SIGN_HYSTERESIS_FRAMES = 3
-TRAFFIC_LIGHT_HYSTERESIS_FRAMES = 3
+TRAFFIC_LIGHT_HYSTERESIS_FRAMES = 5     # 绿灯要连续 5 帧（禁止单帧决策）
+
+# ---------------------------------------------------------------- 日志/调试
+PRINT_EVERY_N = 10                      # 视觉进程每 N 帧打印一行状态
+STATUS_FILE = "/tmp/smartcar_status.json"   # 车端状态文件（本地测试可覆盖）
+
+# ---------------------------------------------------------------- 发车遮挡检测
+# §3.1.7：挡板被移开 = 发车信号。必须边沿触发（先见板 → 再连续多帧不见板）。
+START_GATE_ROI = (0.15, 0.85, 0.20, 0.95)   # (x0, x1, y0, y1) 比例，取画面中下部
+START_BLUE_HSV_LOW = (95, 80, 60)           # 蓝色挡板 HSV 下限【现场可调】
+START_BLUE_HSV_HIGH = (135, 255, 255)       # 蓝色挡板 HSV 上限【现场可调】
+START_BLUE_RATIO_THRESH = 0.22              # HSV 蓝色像素占比阈值【现场可调】
+START_ARM_FRAMES = 3                        # 连续 N 帧判定"有遮挡"才武装
+START_RELEASE_FRAMES = 5                    # 武装后连续 N 帧"无遮挡"才发车（去抖）
+START_TIMEOUT_S = 90.0                      # 超时仅告警（不自动发车，保守）
+START_USE_EDGE_DENSITY = False              # 是否同时要求边缘密度判据（备选，默认关）
+START_EDGE_DENSITY_THRESH = 0.02            # 边缘密度阈值（START_USE_EDGE_DENSITY=True 时生效）
+
+# ---------------------------------------------------------------- 扫线
+LANE_ROI_TOP_RATIO = 0.45       # ROI 上边界占画面高度比例
+LANE_ROI_BOTTOM_MARGIN = 16     # 距画面底部保留的像素（避免拍到车头）
+LANE_ROW_STEP = 2               # 每隔多少行扫一次
+LANE_WEIGHT_PEAK = 8.0          # 纵向权重峰值（中间行权重最大，对应"看得不远不近"）
+LANE_WHITE_S_MAX = 70           # 白线饱和度上限（HSV）
+LANE_WHITE_V_MIN = 120          # 白线亮度下限（绝对下限，实际阈值自适应）
+LANE_WHITE_ADAPT_RATIO = 0.75   # 自适应阈值 = max(V_MIN, ratio * V_95)
+LANE_MAX_ERROR_PX = 160         # 误差限幅（像素）
+LANE_ERROR_SCALE = 4.0          # 误差归一化除数（沿官方惯例，便于复用其 PID 起点）
+LANE_MIN_VALID_ROWS = 5         # 有效行太少则置信度直接判 0
+LANE_EDGE_MARGIN = 8            # 距画面左右边缘多少像素内的"白点"不算车道线（防画面边框/墙体伪影）
+
+# ---------------------------------------------------------------- 误差滤波
+ERROR_FILTER_WINDOW = 5         # 滑动窗口长度
+ERROR_FILTER_OUTLIER = 50.0     # 与窗口中位数偏差超过该值判为离群（官方 Tracking 用 50）
+
+# ---------------------------------------------------------------- PID（巡线）
+# 起点沿用官方上届巡线的"纯 PD"结构与经验比例（kp≈0.235 / kd≈0.6），
+# 按我们的误差单位（px/4、限幅 ±40）与舵机角度限幅（±30°）等比换算。
+# ⚠️ 这只是**起点**，必须现场整定；官方积分项恒为 0，我们默认也保持 0。
+LANE_KP = 0.45
+LANE_KI = 0.0
+LANE_KD = 1.20
+LANE_INTEGRAL_LIMIT = 20.0      # 积分限幅（误差单位·秒）
+LANE_DERIV_ALPHA = 0.5          # 微分低通系数（0~1，越小越平滑）
+LANE_STEER_LIMIT_DEG = 30.0     # 转向角度增量限幅
+
+# ---------------------------------------------------------------- 仲裁层
+ARBITER_CONF_THRESH = 0.35          # 扫线置信度阈值
+ARBITER_LOW_CONF_FRAMES = 3         # 连续 N 帧低置信度才降级
+ARBITER_HOLD_S = 0.8                # 降级后允许靠"上一帧有效值"维持多久
+ARBITER_STOP_S = 1.5                # 超过该时长仍无有效信息 → 要求停车
+ARBITER_HOLD_THROTTLE_SCALE = 0.5   # 降级期间的油门比例
+
+# ---------------------------------------------------------------- 油门
+CRUISE_THROTTLE = 100.0     # 常态巡线油门（百分比）
+CONE_THROTTLE_SCALE = 0.5   # 见到锥桶时的油门比例
+ZEBRA_THROTTLE_SCALE = 0.6  # 接近斑马线时的油门比例（P1-2 接入减速曲线前先用比例）

@@ -28,8 +28,8 @@ def main() -> int:
                         help="期望车道中心 x")
     parser.add_argument("--max-us", type=int, default=settings.ESC_DEBUG_MAX_US,
                         help="电调最大脉宽，调试默认 1540us")
-    parser.add_argument("--zebra-seconds", type=float, default=10.0,
-                        help="斑马线停车时长，调试可调小")
+    parser.add_argument("--zebra-seconds", type=float, default=settings.ZEBRA_STOP_SECONDS,
+                        help="斑马线停车时长（规则要求 10s；调试可调小，但比赛必须 ≥10）")
     args = parser.parse_args()
 
     if args.real:

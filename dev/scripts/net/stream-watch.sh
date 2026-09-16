@@ -44,16 +44,23 @@ restart_service() {
 
 for svc in "${SERVICES[@]}"; do
   systemctl is-enabled --quiet "$svc" 2>/dev/null || continue     # 没启用的别管
-  if ! systemctl is-active --quiet "$svc"; then
-    restart_service "$svc" "服务未运行"
+
+  # 只救"崩了"的服务（state=failed）。
+  # **绝不能救"被人主动停掉"的服务**：自动驾驶要停掉占用下摄的那路推流，
+  # 拍照/台架脚本也会临时停推流 —— 看门狗若把它们拉起来，就会去抢摄像头，
+  # 把视觉进程/采集脚本的摄像头抢走（2026-09-16 实测踩到）。
+  if systemctl is-failed --quiet "$svc" 2>/dev/null; then
+    restart_service "$svc" "服务处于 failed（崩溃）"
     continue
   fi
+  systemctl is-active --quiet "$svc" || continue                  # inactive = 有人主动停的，不管
+
   pid=$(systemctl show -p MainPID --value "$svc" 2>/dev/null)
   if [[ -z "$pid" || "$pid" == "0" ]]; then
     restart_service "$svc" "拿不到主进程 PID"
     continue
   fi
-  # 该进程到媒体服务器端口还有 ESTABLISHED 连接吗？
+  # 该进程到媒体服务器端口还有 ESTABLISHED 连接吗？（进程活着但流已死的情况）
   if ss -tnp state established "( dport = :$PORT )" 2>/dev/null | grep -q "pid=$pid"; then
     :
   else

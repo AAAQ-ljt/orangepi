@@ -1,0 +1,22 @@
+[Unit]
+Description=FFmpeg Sub Camera Stream Service (self-hosted mediamtx)
+Documentation=file:/root/dev/scripts/car-mode.sh
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/default/smartcar-media
+ExecStart=/usr/bin/ffmpeg \
+  -thread_queue_size 512 \
+  -f v4l2 -input_format mjpeg -video_size 640x480 -framerate 30 -i /dev/video2 \
+  -c:v libx264 -preset ultrafast -tune zerolatency -pix_fmt yuv420p \
+  -profile:v baseline -level 3.0 \
+  -g 30 -keyint_min 30 -sc_threshold 0 -bf 0 -refs 1 \
+  -rtsp_transport tcp -f rtsp ${MEDIA_RTSP}/cam_car0027_sub
+Restart=always
+RestartSec=3
+User=root
+
+[Install]
+WantedBy=multi-user.target

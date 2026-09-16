@@ -1,0 +1,20 @@
+[Unit]
+Description=mediamtx (self-hosted RTSP/WebRTC/HLS media server for smart car)
+Documentation=https://github.com/bluenviron/mediamtx
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/mediamtx
+ExecStart=/opt/mediamtx/mediamtx /opt/mediamtx/mediamtx.yml
+Restart=always
+RestartSec=3
+User=root
+
+# 轻量限制：2 核 1.6G 的机器上别让媒体服务把资源吃干净
+MemoryMax=256M
+CPUQuota=120%
+
+[Install]
+WantedBy=multi-user.target

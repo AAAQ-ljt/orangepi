@@ -1,0 +1,85 @@
+###############################################
+# 智能车自建图传服务（mediamtx v1.21）配置  2026-09-15
+#
+# 链路：小车 --RTSP 推流--> 本机 --WebRTC(WHEP)/HLS--> 浏览器
+#   - 8554/TCP  RTSP 推流入口（必须账号，且只允许发布 cam_* / talk_*）
+#   - 8889/TCP  WebRTC 信令（网页 WHEP 走这里，与官方页面协议一致，前端无需改动）
+#   - 8189 UDP+TCP  WebRTC 媒体（ICE）
+#   - 8888/TCP  HLS 备用播放（WebRTC 不通时给裁判用）
+#   - 9997      管理 API（仅本机，用于查流状态）
+#
+# 安全组需放行：8554/tcp、8889/tcp、8189/tcp、8189/udp、8888/tcp
+# 查流状态：curl -s http://127.0.0.1:9997/v3/paths/list
+###############################################
+logLevel: info
+logDestinations: [stdout]
+
+api: true
+apiAddress: 127.0.0.1:9997
+
+###############################################
+# RTSP：小车推流入口
+rtsp: true
+rtspAddress: :8554
+rtspTransports: [tcp]        # 只允许 TCP 推流，公网下比 UDP 稳
+rtspEncryption: "no"
+
+# 不用 RTMP / SRT，减少暴露面
+rtmp: false
+srt: false
+
+###############################################
+# HLS：备用播放（延迟 1~3s）
+hls: true
+hlsAddress: :8888
+hlsVariant: lowLatency
+hlsSegmentCount: 7
+hlsSegmentDuration: 1s
+hlsAlwaysRemux: false
+
+###############################################
+# WebRTC：网页主用（低延迟）
+webrtc: true
+webrtcAddress: :8889
+webrtcEncryption: false
+webrtcLocalUDPAddress: :8189
+webrtcLocalTCPAddress: :8189           # ICE over TCP：安全组只开 TCP 也能用
+webrtcAdditionalHosts: [121.40.149.155]  # 告诉浏览器我们的公网地址
+webrtcIPsFromInterfaces: true
+
+###############################################
+# 认证：读开放（裁判/司机打开网页即可看画面），发布必须带账号
+authInternalUsers:
+  - user: any                    # 任何来源：只读
+    pass:
+    ips: []
+    permissions:
+      - action: read
+      - action: playback
+  - user: any                    # 本机：管理 API
+    pass:
+    ips: ["127.0.0.1", "::1"]
+    permissions:
+      - action: api
+      - action: metrics
+  - user: car                    # 小车：只允许发布 cam_*
+    pass: Ct7vL92xQm4
+    ips: []
+    permissions:
+      - action: publish
+        path: ~^cam_
+  - user: talk                   # 语音对讲回传（预留）
+    pass: Ct7vL92xQm4
+    ips: []
+    permissions:
+      - action: publish
+        path: ~^talk_
+
+pathDefaults:
+  source: publisher
+
+###############################################
+# 路径：mediamtx v1.21 必须显式声明路径，
+# all_others 作为通配（具体允许谁发布，由上面的 auth 正则约束）
+paths:
+  all_others:

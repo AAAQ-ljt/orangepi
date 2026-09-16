@@ -20,7 +20,8 @@
 #
 # auto 选项
 #   --dry-run         控制进程不使能动力（默认不带 --real），用于验证视觉/状态机
-#   --camera N        我们使用哪一路摄像头（0=/dev/video0 主摄，2=/dev/video2 副摄）
+#   --camera N        我们使用哪一路摄像头（0=云台主摄 /dev/video0，2=下摄 /dev/video2）
+#                     默认 2：巡线扫线用下摄；此时保留云台主摄推流给裁判看
 #   --model PATH      RKNN 模型路径（不给则只跑扫线+发车检测）
 #   --max-us N        电调最大脉宽（默认 1540，调试限速）
 #   --port N          UDP 端口（默认 5000）
@@ -35,8 +36,8 @@ LOG_DIR="$ROOT_DIR/logs"
 STATUS_FILE="/tmp/smartcar_status.json"
 MEDIA_ENV="/etc/default/smartcar-media"
 
-# 摄像头 -> 推流服务（同一设备只能被一个进程占用）
-DEV_MAIN="/dev/video0"; DEV_SUB="/dev/video2"
+# 摄像头角色（2026-09-16 实测确认）：0 = icspring = 云台主摄；2 = Global Shutter = 下摄（巡线用）
+DEV_GIMBAL="/dev/video0"; DEV_DOWN="/dev/video2"
 SVC_MAIN="ffmpeg-stream.service"; SVC_SUB="ffmpeg-stream-sub.service"
 
 # 手动模式需要的服务（退出自动驾驶时全部拉起）
@@ -298,7 +299,7 @@ cmd_manual() {
 
 cmd_auto() {
   require_root
-  local dry_run=1 camera=0 model="" max_us=1540 port=5000 minimal=0 skip_confirm=0 no_lane=0
+  local dry_run=1 camera=2 model="" max_us=1540 port=5000 minimal=0 skip_confirm=0 no_lane=0
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -316,10 +317,9 @@ cmd_auto() {
     shift
   done
 
-  local camera_dev="$DEV_MAIN"
-  [[ "$camera" == "2" ]] && camera_dev="$DEV_SUB"
-  local camera_svc="$SVC_MAIN"
-  [[ "$camera" == "2" ]] && camera_svc="$SVC_SUB"
+  # 默认用下摄（巡线）；--camera 0 可切云台主摄
+  local camera_dev="$DEV_DOWN" camera_svc="$SVC_SUB"
+  if [[ "$camera" == "0" ]]; then camera_dev="$DEV_GIMBAL"; camera_svc="$SVC_MAIN"; fi
 
   echo "================= 进入自动驾驶 ================="
   printf '模式        : %s\n' "$([[ $dry_run -eq 1 ]] && echo "${C_YEL}DRY-RUN（电机不使能，仅验证视觉/状态机）${C_RST}" || echo "${C_RED}REAL —— 电机将上电${C_RST}")"

@@ -81,6 +81,9 @@ def main() -> int:
         help="配合 --folder 使用的根目录，默认是命令执行时的当前目录",
     )
     parser.add_argument("--interval", type=float, default=0.5, help="拍摄间隔秒数")
+    parser.add_argument("--count", type=int, default=0,
+                        help="最多拍摄多少张后自动停止（0=不限，靠 Ctrl+C 停）。"
+                             "非交互/被脚本调用时**务必设上限**，否则进程可能被 orphan 后一直写盘")
     parser.add_argument("--device", type=int, default=0)
     parser.add_argument("--width", type=int, default=640)
     parser.add_argument("--height", type=int, default=480)
@@ -113,7 +116,8 @@ def main() -> int:
             print("[CAPTURE] ERROR: cannot open camera")
             return 1
 
-        print("[CAPTURE] capturing... Ctrl+C to stop")
+        print("[CAPTURE] capturing... Ctrl+C to stop"
+              + (f"（本次最多 {args.count} 张）" if args.count > 0 else ""))
         counter = 0
 
         if args.show:
@@ -131,6 +135,10 @@ def main() -> int:
             filename = os.path.join(out_dir, f"frame_{ts}_{counter:04d}.jpg")
             cv2.imwrite(filename, frame, [cv2.IMWRITE_JPEG_QUALITY, 90])
             print(f"[CAPTURE] saved {filename}")
+
+            if args.count > 0 and counter >= args.count:
+                print(f"[CAPTURE] 已达到 --count {args.count}，停止")
+                break
 
             if args.show:
                 cv2.imshow("capture", frame)

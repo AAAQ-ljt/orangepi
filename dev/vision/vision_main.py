@@ -46,7 +46,8 @@ def main() -> int:
                         help="RKNN 模型路径；不给则只跑扫线+发车检测")
     parser.add_argument("--udp-ip", default="127.0.0.1")
     parser.add_argument("--udp-port", type=int, default=settings.UDP_PORT)
-    parser.add_argument("--camera", type=int, default=0)
+    parser.add_argument("--camera", type=int, default=2,
+                        help="摄像头 index：2=下摄（默认，巡线扫线用 /dev/video2），0=云台主摄 /dev/video0")
     parser.add_argument("--width", type=int, default=settings.IMG_W)
     parser.add_argument("--height", type=int, default=settings.IMG_H)
     parser.add_argument("--conf", type=float, default=0.25)

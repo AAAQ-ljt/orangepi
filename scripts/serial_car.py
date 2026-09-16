@@ -60,6 +60,13 @@ class SerialConsole:
         self.ser.flush()
 
     # ------------------------------------------------------------------ 登录
+    def interrupt(self) -> None:
+        """发送 Ctrl+C 并清缓冲：打断卡住的命令或提示符。"""
+        self.ser.write(b"\x03")
+        self.ser.flush()
+        time.sleep(0.5)
+        self._drain(0.5)
+
     def ensure_login(self, timeout: float = 10.0) -> bool:
         self._send_line("")
         end = time.time() + timeout
@@ -67,6 +74,13 @@ class SerialConsole:
         while time.time() < end:
             seen += self._read_available(0.4)
             low = seen.lower()
+            # sudo 停在密码提示上：自动补密码（否则会话会一直卡住）
+            if "password for" in low:
+                self.ser.write((self.password + "\n").encode())
+                self.ser.flush()
+                time.sleep(1.0)
+                seen = ""
+                continue
             if "login:" in low and "password:" not in low.split("login:")[-1]:
                 self._send_line(self.user)
                 time.sleep(0.4)

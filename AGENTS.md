@@ -9,7 +9,7 @@
 ## 0. 三十秒背景
 
 **项目**：2026 全国大学生智能汽车竞赛 · 室外 5G 远程驾驶无人车赛。
-**硬件**：Orange Pi 5（RK3588S）+ XT-NetRC 阿克曼底盘 + PCA865 + 双摄（CSI 下摄 / USB 云台摄）+ SIM8200 5G。
+**硬件**：Orange Pi 5（RK3588S）+ XT-NetRC 阿克曼底盘 + PCA9685 + 双摄（**两路都是 USB**：`/dev/video0`=icspring **云台主摄** / `/dev/video2`=Global Shutter **下摄副摄，巡线用**）+ SIM8200 5G。
 **目标**：**完赛，并尽量快**。规则里"停车超 20s 不动 = 比赛失败"，"停错车位/无轮入区 +100s"，"撞锥 +20s"，"压线 +10s/次"——所以**可靠性优先于速度**。
 **当前阶段**：车端骨架已通（约 1300 行），**唯一硬阻塞是训练数据没有标注**；巡线、减速停准、停车入库、红绿灯触发都还没实现。
 
@@ -100,6 +100,42 @@ D:\5g\orangepi\
 ├── train/               ← 原始图片与切分脚本（**不入库**）
 └── python/              ← 早期 PC 联调脚本（历史，一般不用改）
 ```
+
+### 3.1 车端 `/root` 目录规范（保持整洁）
+
+原则：**我们的东西只在 `/root/dev`；官方目录只读；运行期产物集中管理；不留一次性脚本。**
+
+```text
+/root/
+├── <官方目录>            # car_Tracking / car_Navigation / opi-control / ParkingVision /
+│                        # hardware_Test / SIM8200_for_RPI / frp … 保持原样（不改不删）
+├── talk_player_loop.sh  # 官方语音下行循环（内容已切到自建 mediamtx，改动在 git 里）
+├── car_net_up.sh        # 团队早期 5G 拨号脚本（已被 car-net.sh 取代，保留作历史参考）
+└── dev/                 # ★ 我们的比赛代码（= 仓库 dev/，用 scripts/ssh_sync.py 同步）
+    ├── main.py  vision/  control/  hardware/  common/  config/  tests/   # 运行时模块
+    ├── scripts/
+    │   ├── net/         # 网络子系统：car-net.sh + car-net.conf + wifi-ledger.conf
+    │   │                #   + systemd 单元 + stream-watch 看门狗 + 10-wwan0.link
+    │   ├── car-mode.sh  # 工作模式切换（手动/自驾/急停/图传）
+    │   ├── car-test/    # 硬件自检 test_all.sh
+    │   ├── car-frp/  server-frp/   # frp 两端配置留存（可复现）
+    │   └── capture_dataset.py / record_video.py / cam-identify.py / safe_pwm_init.sh …
+    ├── img/             # 拍照/录像脚本 + 采集数据（**数据不入 git**）
+    ├── logs/            # 运行日志（不入 git；可随时清空）
+    ├── models/          # 模型（不入 git）
+    ├── backup-*/        # 官方配置备份（只读保留，回滚用）
+    └── attic/           # 归档：淘汰的脚本/数据打成 tar.gz 放着，需要时再翻
+```
+
+规矩：
+
+1. 新脚本只放三处：`dev/scripts/net|ops|diag`（车端运维/诊断）、`dev/vision|control|hardware`（运行时）、`dev/img`（采集）；
+2. **不在 `/root` 下新建文件/目录**（一次性的诊断脚本也一样，进 `dev/scripts/` 或 `attic/`）；
+3. 采集数据、日志、模型不进 git，也不散落在别处；
+4. **删文件前先验证引用**：
+   `grep -rl "<文件名>" /etc/systemd/system /root/dev /root/*.sh 2>/dev/null`，
+   确认无引用后**先归档到 `dev/attic/`** 再删；
+5. 官方目录/services（含 `rc.local` 里的 `simcom-cm`）默认不动，要动必须先备份并把改动写进文档。
 
 ---
 
@@ -246,7 +282,7 @@ StartGateState(blocked: bool, armed: bool, released: bool, blue_ratio: float, ti
 | 同时让蜂窝和 WiFi 都自动连 | 两条默认路由互抢，表现为"时通时断"；用 `car-net.sh policy` 保证**只占一条上行**（蜂窝 100 < WiFi 600） |
 | 换服务器时只改了一处 | 推流地址与 frp 隧道地址是两套配置，容易半切换；统一改 `car-net.conf` 后 `car-net.sh apply` |
 | **Git Bash 会把 `/root/xxx` 这类参数转成 Windows 路径** | 远端收到的是 `C:/Program Files/Git/root/...`，报 `No such file`。用 `ssh_put.py`/`ssh_sync.py` 传绝对路径前加 **`MSYS_NO_PATHCONV=1`** |
-| 把 `/dev/videoX` 当成"CSI 下摄" | 本车两路都是 **USB**：`video0`=icspring（**固定主摄**，巡线用）、`video2`=Global Shutter（**云台副摄**，仅红绿灯环节用） |
+| 摄像头 index 搞反（会把云台画面当赛道） | **实测确认（2026-09-16）**：`/dev/video0`(index 0) = icspring = **主摄＝云台摄像头**（推流 `cam_car0027`，红绿灯环节看灯）；`/dev/video2`(index 2) = Global Shutter = **副摄＝下摄**（推流 `cam_car0027_sub`，**巡线扫线用它**）。自动驾驶默认 `--camera 2`；不确定时跑 `dev/scripts/cam-identify.py` 复验 |
 | 以为摄像头能跑 30fps | 实测 640×480 只有 **~15fps**（驱动谎报 30）。视觉进程 14 FPS 是摄像头限制，不是我们的代码慢 |
 | 用"当前无挡板"直接发车 | **上电即冲**。必须边沿触发（`start_gate.py`） |
 | `is_barrier` 之类字段硬编码成常量 | 会让 FSM 走进错误分支；协议字段必须来自真实感知 |

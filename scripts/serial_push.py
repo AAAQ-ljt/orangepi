@@ -46,6 +46,8 @@ def sha256(data: bytes) -> str:
 
 def push(console: SerialConsole, local: str, remote: str, mode: str, chunk: int) -> bool:
     remote = normalize_remote(remote)
+    # 先刷新 sudo 凭据（否则各条 sudo 命令会停在密码提示上，把串口会话卡死）
+    console.run(f"echo {console.password} | sudo -S -v", timeout=25)
     with open(local, "rb") as fh:
         raw = fh.read()
     # 统一 LF：脚本在 Linux 上带 CR 会炸

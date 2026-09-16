@@ -2,10 +2,30 @@
 
 本目录用于存放采集到的图片/视频，所有输出强制保存在本目录内。
 
+## 摄像头角色（2026-09-16 实测确认）
+
+| 脚本 | 设备 | 角色 |
+|---|---|---|
+| `camera0.sh` | `/dev/video0`（icspring） | **主摄 ＝ 云台摄像头**（红绿灯环节抬头看灯；推流 `cam_car0027`） |
+| `camera2.sh` | `/dev/video2`（Global Shutter） | **副摄 ＝ 下摄**（朝向赛道地面，**巡线扫线用**；推流 `cam_car0027_sub`） |
+
+> ⚠️ 采集训练数据时，**扫线/赛道类数据用 `camera2.sh`**（下摄视角，与部署时视觉输入一致）。
+
 ## 运行位置
 
 - 如果在 `/root/dev` 目录：`bash img/camera0.sh ...`
 - 如果已经在 `/root/dev/img` 目录：`bash camera0.sh ...`
+
+## ⚠️ 别忘了限制张数
+
+`photo` 模式默认**一直拍到 Ctrl+C**。如果是远程/脚本调用（SSH 断开后进程会被 orphan 继续跑），
+一定要加 `--count`：
+
+```bash
+bash img/camera0.sh photo --folder lane --count 100     # 拍 100 张自动停
+```
+
+（2026-09-16 就踩过这个坑：一次远程调用没加 `--count`，SSH 断开后进程继续写，几分钟灌了 800 张 37MB。）
 
 ## 摄像头0（/dev/video0）
 

@@ -109,23 +109,38 @@ stop_ours() {
 
 restore_manual() {
   info "恢复手动遥控模式"
-  local failed=0
   local streams_ok=1
+  local skipped=()
   media_reachable || streams_ok=0
   for svc in "${MANUAL_SERVICES[@]}"; do
     if [[ "$svc" == ffmpeg-stream* && $streams_ok -eq 0 ]]; then
       warn "跳过 $svc（媒体服务器 $(media_host):8554 不可达，避免无谓的重启循环）"
+      skipped+=("$svc"); continue
+    fi
+    systemctl start "$svc" 2>/dev/null || true
+  done
+  sleep 2
+
+  # 逐项核对（与台架脚本同一套做法）：恢复"远程控制阶段"必须可验证，不能只说"启动了"
+  echo "--- 恢复结果逐项核对 ---"
+  local all_ok=1
+  for svc in "${MANUAL_SERVICES[@]}"; do
+    if [[ " ${skipped[*]-} " == *" $svc "* ]]; then
+      printf '  ⚠️  %-24s 跳过（媒体服务器不可达）\n' "${svc%.service}"
       continue
     fi
-    systemctl start "$svc" 2>/dev/null || { warn "$svc 启动失败"; failed=1; }
+    if svc_active "$svc"; then
+      printf '  ✅ %-24s active\n' "${svc%.service}"
+    else
+      printf '  ❌ %-24s 未启动\n' "${svc%.service}"
+      all_ok=0
+    fi
   done
-  sleep 1
-  if svc_active opi-control.service; then
-    ok "opi-control 已就绪（PCA9685 已回安全值：舵机中位、电调 1500us）"
+  if [[ $all_ok -eq 1 ]]; then
+    ok "已恢复**远程控制阶段**（可正常遥控/看图传）"
   else
-    err "opi-control 未启动！手动遥控可能不可用，请立刻检查：systemctl status opi-control"
+    err "有服务未起来！请立刻检查：systemctl status <服务名>；手动遥控可能不可用"
   fi
-  [[ $failed -eq 0 ]] || warn "有服务未能启动，请用 car-mode.sh status 复查"
 }
 
 # ------------------------------------------------------------------ 体检

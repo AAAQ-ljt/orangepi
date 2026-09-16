@@ -1,0 +1,282 @@
+# AGENTS.md — 智能车项目 AI 作业手册
+
+> 本文件是**所有 AI 助手（ZCode / Claude / 其他 agent）在本仓库工作时的第一读物**，等价于团队开发规范。
+> 人类队员也请先读这一份。原始的长版规范已合并进本文件（`doc/开发规范.md` 已删除）。
+> 最后更新：2026-09-15
+
+---
+
+## 0. 三十秒背景
+
+**项目**：2026 全国大学生智能汽车竞赛 · 室外 5G 远程驾驶无人车赛。
+**硬件**：Orange Pi 5（RK3588S）+ XT-NetRC 阿克曼底盘 + PCA865 + 双摄（CSI 下摄 / USB 云台摄）+ SIM8200 5G。
+**目标**：**完赛，并尽量快**。规则里"停车超 20s 不动 = 比赛失败"，"停错车位/无轮入区 +100s"，"撞锥 +20s"，"压线 +10s/次"——所以**可靠性优先于速度**。
+**当前阶段**：车端骨架已通（约 1300 行），**唯一硬阻塞是训练数据没有标注**；巡线、减速停准、停车入库、红绿灯触发都还没实现。
+
+**先看两篇文档再动手**：
+- `doc/执行路线图.md` —— 现在该做什么（P0/P1/P2 批次、基线盘点、待确认清单、风险）
+- `doc/具体实施方案.md` —— 技术方案与决策（含类别表契约 §3.1.3）
+
+---
+
+## 1. 硬性规则（违反即视为严重错误）
+
+### 1.1 安全（人身与硬件）
+
+1. **任何可能驱动电机的操作，必须先确认四轮悬空或场地空旷**。真车跑车必须有人在旁、急停可达。
+2. 真车运行必须显式 `--real --arm`；**默认参数永远是 dry-run**（`main.py` 不带 `--real` 不碰硬件）。
+3. 调试期电调限速 `--max-us 1540`（`ESC_DEBUG_MAX_US`）；**未经验证不得改成 `ESC_MAX_US=2000`**。
+4. **所有退出路径都必须安全停车**：电调归零、舵机回中、释放 PCA9685 与摄像头、恢复 ffmpeg 推流。
+   统一收敛到一个 `cleanup()`，捕获 `SIGINT/SIGTERM/SIGABRT/SIGQUIT`。**绝不允许某条退出路径只 `return` 不释放**。
+5. 禁止在信号回调里做阻塞操作（sleep、网络请求）。
+6. 软件里**不得写死**能让车"上电即冲出去"的逻辑。发车必须是**边沿触发**（见 `dev/vision/start_gate.py`）：
+   "先确认有遮挡 → 再等遮挡消失"的跳变才算发车信号，**绝不能用"当前无遮挡"直接发车**。
+
+### 1.2 车端环境（官方资产不可破坏）
+
+1. **不碰官方目录与官方服务**：`/root/opi-control`、`/root/car_Keyboard_Control`、`/root/ParkingVision`、`/root/frp`、nginx、`ffmpeg-stream(.service/-sub)`、`talk-player`、`car-dial`。
+   我们的代码只放 `/root/dev`（本地对应 `dev/`）。改动前**先备份**。
+2. **摄像头是独占设备**：任何程序打开摄像头前**必须**先 `systemctl stop ffmpeg-stream.service ffmpeg-stream-sub.service`，退出时**必须**恢复。
+   Python 里用 `dev/vision/camera_guard.py` 的上下文管理器，不要手写。
+3. **systemd / 驱动级改动必须经队长确认**，不得擅自 `systemctl disable/enable` 官方服务。
+4. 车上不要执行格式化、`rm -rf`、批量清理等不可逆操作；改配置前记录原值。
+
+### 1.3 仓库与提交
+
+1. 远端唯一：`AAAQ-ljt/orangepi`；分支 `master`。**每天收工前 push**。
+2. `.gitignore` 是**白名单**：只跟踪 `code/`、`dev/`、`doc/`、`scripts/`（+ 本文件与 `.gitattributes`）。其余一律不入库。
+3. **禁止提交**：模型权重（`*.pt/*.onnx/*.rknn`）、数据集、`runs/`、视频（`*.mp4/*.avi`）、日志、`*.pid`。
+4. **禁止提交**任何密钥/令牌/密码到新文件（现有文档里的 frp token 属历史遗留，不要扩散）。
+5. 提交信息写"做了什么、为什么"，不要 `1`、`update` 这类无意义信息。
+
+### 1.4 AI 编码红线
+
+1. 不写**没有退出条件**的循环；不创建无法退出的后台线程。
+2. 不在主循环里做阻塞 I/O（网络请求、大文件写入、同步播放音频、每帧 `cv2.imwrite`）。
+3. 不忽略异常：至少打印日志并让上层能感知。
+4. 不在没有 mock / 测试的情况下把高风险运动代码直接上真车。
+5. 不为了"跑通"而删掉安全判断（超时兜底、failsafe、限幅、去抖）。
+
+---
+
+## 2. 当前该做什么（按优先级）
+
+> 权威版本在 `doc/执行路线图.md`；这里只放摘要，**动手前先看那篇的对应条目和出口标准**。
+
+| 批次 | 任务 | 状态 |
+|---|---|---|
+| **P0-1** | **标注 + 补齐采集矩阵**（`traffic_light_off`、远距离、负样本、红锥桶、蓝板压中线）→ 切分 → `data.yaml` | ⬜ 未开始（唯一硬阻塞，越早越好） |
+| **P0-2** | **修发车逻辑**：边沿触发 + 去抖 + 超时兜底（`start_gate.py` + FSM + 协议） | 🟡 本轮落地 |
+| **P0-3** | 采购光电传感器（≥1m、阈值可调） | ⬜ 需人工 |
+| **P0-4** | 现场几何实测（赛道宽、停车区黄线、斑马线 30cm 停区、是否有编码器、红灯长等 vs 20s 判失败） | ⬜ 需到场 |
+| **P1-1** | 扫线 + 误差滤波 + PID（`lane_scan.py` / `filters.py` / `pid.py`） | 🟡 本轮落地 |
+| **P1-2** | 距离估计与减速停准（框底边 → 地面坐标 → 速度曲线） | ⬜ |
+| **P1-3** | FSM 主体重构（斑马线 10s、红绿灯光电、锥桶绕行、停车五阶段） | ⬜ |
+| **P1-4** | 停车：蓝板接地点 + IPM 判左右 → 五阶段入库 | ⬜ |
+| **P1-5** | 日志降频 + 语音播放非阻塞 | 🟡 本轮落地 |
+| **P2-*** | 阈值现场标定、双摄分时复用、语义分割（条件触发）、性能优化、技术手册 | ⬜ |
+
+---
+
+## 3. 仓库结构
+
+```text
+D:\5g\orangepi\
+├── AGENTS.md            ← 本文件（agent 作业手册）
+├── dev/                 ← 比赛代码（本地 ⇄ 车上 /root/dev）
+│   ├── main.py          ← 控制端入口（--real --arm 才动硬件）
+│   ├── config/          ← settings.py（阈值/限幅集中在此，禁止散落硬编码）
+│   ├── common/          ← protocol.py（UDP 消息契约）、通用工具
+│   ├── vision/          ← 视觉进程：lane_scan / start_gate / rknn_detector / postprocess / camera_guard
+│   ├── control/         ← 控制进程：fsm / planner / pid / filters / lane_arbiter / driver / udp_server
+│   ├── hardware/        ← pca9685 / imu / audio / mock（mock 必须与真实实现同接口）
+│   ├── scripts/         ← 车端调试/诊断/运维脚本（sh + py）
+│   ├── img/             ← 摄像头拍照/录像包装脚本
+│   ├── tests/           ← 本地单测（不碰硬件，用 mock）
+│   └── tools/           ← 模型转换等离线工具
+├── doc/                 ← 全部文档，**入口是 doc/README.md（文档地图）**
+├── code/                ← PC 训练环境（README.md 是环境唯一说明；权重/数据集不入库）
+├── scripts/             ← PC 侧 ssh 助手（ssh_car.py / ssh_put.py / ssh_get.py / ssh_server.py）
+├── train/               ← 原始图片与切分脚本（**不入库**）
+└── python/              ← 早期 PC 联调脚本（历史，一般不用改）
+```
+
+---
+
+## 4. 开发流程
+
+### 4.1 本地（Windows，无车）
+
+本机默认 python **没有** numpy/cv2/pytest。用带依赖的解释器：
+
+```bash
+PY="E:/venvs/smartcar-ultra/Scripts/python.exe"   # numpy 2.2 + cv2 5.0
+cd dev && export PYTHONPATH=.
+
+# 单测（纯函数 + __main__ 风格，不需要 pytest）
+for t in test_filters test_pid test_lane_arbiter test_protocol test_start_gate test_lane_scan test_control; do
+  "$PY" tests/$t.py
+done
+"$PY" tests/test_integration.py        # 端到端：起控制端 + UDP 打假数据（dry-run）
+
+# 视觉单模块自测（不需要摄像头/模型）
+"$PY" vision/vision_main.py --test-image 某张赛道图.jpg   # 打印 lane / start gate 判据
+"$PY" main.py --port 5000                                 # dry-run 控制端
+```
+
+- 所有新模块**必须能在没有摄像头、没有 PCA9685、没有模型的机器上 import 并测试**（用 mock 与合成图）。
+- 测试文件命名 `test_*.py`，用断言 + `if __name__ == "__main__"` 直接跑，别引入新的测试框架依赖。
+- 提交前**必须**跑通上面全部 8 个文件。
+
+### 4.2 连车（免交互）
+
+```bash
+python scripts/ssh_car.py "uname -a"                   # 走 frp 隧道（推荐）
+python scripts/ssh_car.py --direct hostname -I          # 热点直连兜底
+MSYS_NO_PATHCONV=1 python scripts/ssh_sync.py --dry-run  # 预览 dev/ → /root/dev 的差异（增量同步）
+MSYS_NO_PATHCONV=1 python scripts/ssh_sync.py            # 真正同步（只传变化的文件）
+python scripts/ssh_put.py dev/xxx.py /root/dev/xxx.py   # 单文件上传
+python scripts/ssh_get.py /root/dev/log.txt .            # 下载
+```
+
+⚠️ 传**绝对远端路径**时务必加 `MSYS_NO_PATHCONV=1`（Git Bash 的路径转换坑，见 §6）。
+详细参数、排障见 `doc/远程连接与服务器手册.md`。
+
+### 4.3 车上运行
+
+```bash
+# ★ 模式切换统一入口（上电默认是"手动遥控"）
+bash /root/dev/scripts/car-mode.sh status          # 看当前模式/服务/进程/温度/摄像头占用
+bash /root/dev/scripts/car-mode.sh auto            # 进入自动驾驶【默认 DRY-RUN，电机不动】
+bash /root/dev/scripts/car-mode.sh auto --real     # 真正跑车（要输入 GO 确认；务必轮子架空或场地空旷）
+bash /root/dev/scripts/car-mode.sh manual          # 回到手动遥控（任何退出路径也会自动恢复）
+bash /root/dev/scripts/car-mode.sh estop           # 紧急停止：立刻归零
+bash /root/dev/scripts/car-mode.sh stream up       # 图传推流（自建服务器）拉起/检查
+bash /root/dev/scripts/car-mode.sh logs vision     # 看视觉日志
+
+# 其它
+bash /root/dev/scripts/safe_pwm_init.sh            # 只确保 PCA9685 回到安全值
+bash /root/dev/scripts/run_capture.sh --folder lane  # 拍照（自动停/恢复推流）
+```
+
+- 需要看画面：先 `bash x11.sh`，再跑 `python3 vision/debug_view.py`（`vision_main.py` **没有** `--debug` 参数）。
+- 日志：`/root/dev/logs/{vision,control}.log`、`/tmp/smartcar_status.json`。
+- `start_autonomous.sh` / `stop_autonomous.sh` 现在是 `car-mode.sh` 的薄包装，保留只为兼容旧文档。
+- **绝不要**在不清楚车是否在动、是否有人在遥控的情况下跑 `auto --real`。
+
+### 4.4 提交前自查
+
+- [ ] 本地测试全绿
+- [ ] 没有新增硬编码阈值/I​P/密码（阈值进 `config/settings.py`）
+- [ ] 所有资源获取都有对应的释放路径
+- [ ] 退出路径都安全停车
+- [ ] 没有提交权重/数据/日志
+- [ ] 改动的文档已同步（尤其类别表 = 契约）
+
+---
+
+## 5. 代码约定
+
+### 5.1 分层与边界
+
+```text
+vision 进程：摄像头 → 扫线(每帧) + 元素检测(离散事件) → UDP JSON
+control 进程：UDP → FSM(任务状态) → Planner(观测量→控制量) → Driver(PCA9685)
+```
+
+- **硬件操作只允许出现在 `hardware/`**，业务代码不得直接碰 GPIO/PWM/I2C。
+- **观测量契约在 `common/protocol.py`**；新增字段要同时改 `from_dict`/`to_dict`，并保持对旧字段的兼容（`from_dict` 必须容忍缺失/`null`）。
+- **阈值、限幅、坐标目标全部进 `config/settings.py`**，标注单位与用途，现场可改。
+- 每个硬件模块提供同接口 mock（`hardware/mock.py`）。
+
+### 5.2 坐标系与单位（容易搞错，统一在此）
+
+| 量 | 约定 |
+|---|---|
+| `center_x` / `left_x` / `right_x` | **像素**，基于 640 宽画面（`IMG_W=640`），y 向下 |
+| `TARGET_X` | 期望车道中心像素值，当前 320（摄像头偏装时现场标定） |
+| 转向 | 舵机**角度** 0~180，90 为中位；`SERVO_MIN/MAX_ANGLE` 限幅 |
+| 油门 | `-100~100` 百分比；`ESC_STOP_US=1500`，`ESC_DEBUG_MAX_US=1540` |
+| 误差单位（PID 输入） | `error_units = clamp(center_x - TARGET_X, ±160) / 4`（沿官方惯例，便于复用其 PID 起点参数） |
+| PID 输出 | 转向**角度增量**，限幅 ±`LANE_STEER_LIMIT_DEG` |
+
+### 5.3 视觉模块接口
+
+```python
+LaneObservation(center_x: float, confidence: float, left_x, right_x, valid_rows, source)
+StartGateState(blocked: bool, armed: bool, released: bool, blue_ratio: float, timed_out: bool)
+```
+
+- 扫线**每帧都跑**（轻量，给控制环 30~50Hz 的连续性）；元素检测只出**离散事件**（15~30FPS 足够）。
+- 置信度低不是"丢帧就算"，必须**连续 N 帧**低置信度才降级（防抖）。
+- 竞速真正怕的不是帧率低，而是**误检**（误刹车/误停车）。**先保误检率，再提帧率。**
+
+### 5.4 控制约定
+
+- PID **必须带 `dt`**、输出限幅、可选积分限幅；`reset()` 要清 `integral`/`prev_error`（官方参考实现漏了这条，换来的是切状态时的"踢腿"）。
+- 误差进入 PID 前先过 `ErrorFilter`（中位数离群剔除 + 越新权重越大）。
+- 转向输出**必须限速**（slew rate），不允许从 0 直接跳到满舵。
+- 控制环不得因为视觉丢帧而抖动：仲裁层负责"降级 → 保持 → 停车"。
+
+---
+
+## 6. 已知陷阱（踩过的坑，别再犯）
+
+| 坑 | 后果 / 正确做法 |
+|---|---|
+| **Git Bash 会把 `/root/xxx` 这类参数转成 Windows 路径** | 远端收到的是 `C:/Program Files/Git/root/...`，报 `No such file`。用 `ssh_put.py`/`ssh_sync.py` 传绝对路径前加 **`MSYS_NO_PATHCONV=1`** |
+| 把 `/dev/videoX` 当成"CSI 下摄" | 本车两路都是 **USB**：`video0`=icspring（主推流）、`video2`=Global Shutter（副推流）。哪路是下摄**尚未确认** |
+| 以为摄像头能跑 30fps | 实测 640×480 只有 **~15fps**（驱动谎报 30）。视觉进程 14 FPS 是摄像头限制，不是我们的代码慢 |
+| 用"当前无挡板"直接发车 | **上电即冲**。必须边沿触发（`start_gate.py`） |
+| `is_barrier` 之类字段硬编码成常量 | 会让 FSM 走进错误分支；协议字段必须来自真实感知 |
+| 每帧 `print` 完整状态 | 15~25FPS 下日志本身就吃掉可观 CPU；改为每 N 帧或写状态文件 |
+| 同步 `subprocess.run` 播放音频 | 阻塞整个控制循环，期间 failsafe 失效；改后台线程 |
+| 用 YOLO 的"车道线检测框中心"当车道中心 | 只在上届 seg 模型下成立；本届用**扫线**为主力（`lane_scan.py`） |
+| 把"左右"做进类别标签 | `fliplr` 增广会把标签翻错；左右是**空间关系**，用几何判定 |
+| Roboflow 里做 train/val/test 划分 | 它随机划分会把连续帧拆到两边 → 验证集虚高；**必须按拍摄片段整组切分** |
+| 用上届模型权重 | `dev/models/best11nseg.rknn` 类别与本届不符，只能验证工具链 |
+| 停车判定看"黄框是否可见" | 裁判放法不可预测；用**外框 + 蓝板接地点 + IPM** 的几何先验 |
+| 用 `cx < 图像宽/2` 判左右车位 | 车斜着进场时必错；要比 IPM 俯视图里 `board_x` 与外框中点 |
+| 停车/斑马线"看到就断油" | 会滑过停车点（压线 +10s、未停够 10s 再 +20s）；需要**距离估计 + 减速曲线** |
+| 两个模型同时无脑调 RKNN | NPU 争抢导致总吞吐下降；先"单推理线程 + 任务队列"，必要时再 core mask 隔离 |
+| 主循环里 `cv::imwrite` / X11 `imshow` | 卡住控制回路 / headless 下直接崩；调试预览用开关控制 |
+| 依赖 `main.py --dry-run` 参数 | 该参数不存在，dry-run 是**默认行为** |
+
+---
+
+## 7. 参考实现（官方上届 C++ 代码，只读参考）
+
+`2025年比赛资料/智能车代码包+软件操作手册/` 下两套（opencv 版、yolo 版）。值得移植的：
+
+| 移植项 | 出处 | 价值 |
+|---|---|---|
+| 逐行扫线 + 纵向加权误差 | `opencv版本…/code/image.cpp:1224-1331` + `image.h:40-56` | 比"检测框中心"鲁棒，天然兼容单侧线丢失 |
+| 误差滤波器 | `yolo版本…/HardWare/ErrorFilter.h` | 中位数离群 + 新值加权，抗 YOLO 跳变 |
+| PD 参数起点 | `yolo版本…/Controller/State/src/TrackingState.cpp:12-22` | 巡线 kp 0.2~0.25 / kd 0.5~0.8（纯 PD） |
+| 状态机防抖阈值 | 同上各 State | 挡板 3 帧、斑马线 3 帧、停车牌 3 帧投票 |
+
+**不要照抄它们的坑**：`laneChangeCount` 初值写死导致半数状态不可达、泊车用 `exit(0)` 收尾不给电调中立、PID 无 dt / 无积分抗饱和、无看门狗、变道泊车全靠固定时间开环。
+
+---
+
+## 8. 文档地图（详见 `doc/README.md`）
+
+| 我要… | 看这篇 |
+|---|---|
+| 知道现在该干什么 | `doc/执行路线图.md` |
+| 理解方案与决策 | `doc/具体实施方案.md` |
+| 采数据 / 标注 / 训练 / 转 RKNN | `doc/数据与模型方案.md` |
+| 连车 / frp / 服务器 | `doc/远程连接与服务器手册.md` |
+| 调试入口 / 系统调优 | `doc/运行调试与系统调优方案.md` |
+| 红绿灯、停车专项设计 | `doc/专项方案/` |
+| 上车自检 | `doc/小车部件测试手册.md` |
+| 比赛规则与已核对几何 | `doc/比赛规则/规则概要.md` |
+| 车上 `/root` 官方目录 | `doc/官方目录索引.md` |
+
+---
+
+## 9. 与人类队员的约定
+
+- AI 可以：写/改 `dev/`、`doc/`、`scripts/`、`code/` 内的代码与文档；跑本地测试；通过 `scripts/ssh_car.py` 做**只读**检查与上传我们自己的文件。
+- AI 必须**先问人**：改 systemd / 驱动 / 官方服务；上车跑真车运动（`--arm`）；删除非本会话创建的文件；改供电相关。
+- 车端问题时优先看日志：`journalctl -u <service> -n 50`、`/tmp/vision_main.log`、`/tmp/smartcar_status.json`。

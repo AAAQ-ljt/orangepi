@@ -137,10 +137,15 @@ MSYS_NO_PATHCONV=1 python scripts/ssh_sync.py --dry-run  # 预览 dev/ → /root
 MSYS_NO_PATHCONV=1 python scripts/ssh_sync.py            # 真正同步（只传变化的文件）
 python scripts/ssh_put.py dev/xxx.py /root/dev/xxx.py   # 单文件上传
 python scripts/ssh_get.py /root/dev/log.txt .            # 下载
+
+# 网络全断时（或本地网络封了 SSH 端口）—— 走串口，不经网络
+python scripts/serial_car.py "ip -4 a show wwan0"        # 串口执行命令（COM8@1500000，自动登录）
+python scripts/serial_push.py dev/scripts/net/car-net.sh /root/dev/scripts/net/car-net.sh --mode 755
 ```
 
-⚠️ 传**绝对远端路径**时务必加 `MSYS_NO_PATHCONV=1`（Git Bash 的路径转换坑，见 §6）。
-详细参数、排障见 `doc/远程连接与服务器手册.md`。
+⚠️ 传**绝对远端路径**时务必加 `MSYS_NO_PATHCONV=1`（Git Bash 的路径转换坑，见 §6；
+`serial_push.py`/`ssh_sync.py` 已内置纠正，`ssh_put.py` 还没有）。
+详细参数、排障见 `doc/远程连接与服务器手册.md` 与 `doc/车端网络方案.md`。
 
 ### 4.3 车上运行
 
@@ -157,6 +162,13 @@ bash /root/dev/scripts/car-mode.sh logs vision     # 看视觉日志
 # 其它
 bash /root/dev/scripts/safe_pwm_init.sh            # 只确保 PCA9685 回到安全值
 bash /root/dev/scripts/run_capture.sh --folder lane  # 拍照（自动停/恢复推流）
+
+# 网络（蜂窝优先 / WiFi 账本兜底 / 服务器可切换）—— 详见 doc/车端网络方案.md
+bash /root/dev/scripts/net/car-net.sh status        # 出口/蜂窝/WiFi/隧道/图传一眼看清
+bash /root/dev/scripts/net/car-net.sh auto          # 上电策略（开机自动执行，也可手动跑）
+bash /root/dev/scripts/net/car-net.sh cellular up   # 拨号（APN 轮询 → 厂商兜底）
+bash /root/dev/scripts/net/car-net.sh cellular down # 优雅断开（释放 QMI 会话与 CID）
+bash /root/dev/scripts/net/car-net.sh apply         # 把 car-net.conf 的服务器配置应用到系统
 ```
 
 - 需要看画面：先 `bash x11.sh`，再跑 `python3 vision/debug_view.py`（`vision_main.py` **没有** `--debug` 参数）。
@@ -224,8 +236,13 @@ StartGateState(blocked: bool, armed: bool, released: bool, blue_ratio: float, ti
 
 | 坑 | 后果 / 正确做法 |
 |---|---|
+| **以为安全组被"覆盖"了** | 端口从某些网络连不上，先分清是**安全组**还是**你本地网络**：换个观测点（小车本身）测同一端口。2026-09-16 实测：SG 一直正常，是校园网出口封了 22/2222 这类 SSH 端口 |
+| 用团队自己写的 qmicli 脚本给 SIM8262E-M2 拨号 | 该模组时序特殊，手写 qmicli 容易 `CID allocation failed`；**先试 APN 轮询（`car-net.sh cellular up`），失败再用厂商 `simcom-cm` 兜底** |
+| 强杀/断电对待蜂窝连接 | 会留下**未释放的 CID** → 下次拨号必然失败；退出前用 `car-net.sh cellular down`（关机已自动挂上） |
+| 同时让蜂窝和 WiFi 都自动连 | 两条默认路由互抢，表现为"时通时断"；用 `car-net.sh policy` 保证**只占一条上行**（蜂窝 100 < WiFi 600） |
+| 换服务器时只改了一处 | 推流地址与 frp 隧道地址是两套配置，容易半切换；统一改 `car-net.conf` 后 `car-net.sh apply` |
 | **Git Bash 会把 `/root/xxx` 这类参数转成 Windows 路径** | 远端收到的是 `C:/Program Files/Git/root/...`，报 `No such file`。用 `ssh_put.py`/`ssh_sync.py` 传绝对路径前加 **`MSYS_NO_PATHCONV=1`** |
-| 把 `/dev/videoX` 当成"CSI 下摄" | 本车两路都是 **USB**：`video0`=icspring（主推流）、`video2`=Global Shutter（副推流）。哪路是下摄**尚未确认** |
+| 把 `/dev/videoX` 当成"CSI 下摄" | 本车两路都是 **USB**：`video0`=icspring（**固定主摄**，巡线用）、`video2`=Global Shutter（**云台副摄**，仅红绿灯环节用） |
 | 以为摄像头能跑 30fps | 实测 640×480 只有 **~15fps**（驱动谎报 30）。视觉进程 14 FPS 是摄像头限制，不是我们的代码慢 |
 | 用"当前无挡板"直接发车 | **上电即冲**。必须边沿触发（`start_gate.py`） |
 | `is_barrier` 之类字段硬编码成常量 | 会让 FSM 走进错误分支；协议字段必须来自真实感知 |

@@ -237,7 +237,9 @@ StartGateState(blocked: bool, armed: bool, released: bool, blue_ratio: float, ti
 | 坑 | 后果 / 正确做法 |
 |---|---|
 | **以为安全组被"覆盖"了** | 端口从某些网络连不上，先分清是**安全组**还是**你本地网络**：换个观测点（小车本身）测同一端口。2026-09-16 实测：SG 一直正常，是校园网出口封了 22/2222 这类 SSH 端口 |
-| 用团队自己写的 qmicli 脚本给 SIM8262E-M2 拨号 | 该模组时序特殊，手写 qmicli 容易 `CID allocation failed`；**先试 APN 轮询（`car-net.sh cellular up`），失败再用厂商 `simcom-cm` 兜底** |
+| 用团队自己写的 qmicli 脚本给 SIM8262E-M2 拨号 | 该模组时序特殊，手写 qmicli 容易 `CID allocation failed`；**先试 APN 轮询（`car-net.sh cellular up`），失败再用厂商 `simcom-cm`，最后 `cellular recover` 做 USB 硬复位** |
+| 用 `nmcli dev status` 的 `connected` 判断网络可用 | DHCP 拿到地址后 NM 会停在 **`ip-check`** 十几秒，此时网络其实已经可用；用"接口有没有 IPv4 地址"判断，否则会把刚连上的 WiFi 主动掐掉 |
+| 以为手机热点在旁边就一定能连上 | 关联成功 ≠ 拿到 IP：热点 DHCP 不给租约时会报 `ip-config-unavailable`；`car-net.sh wifi up` 已重试 3 次，仍失败可在账本加静态地址 |
 | 强杀/断电对待蜂窝连接 | 会留下**未释放的 CID** → 下次拨号必然失败；退出前用 `car-net.sh cellular down`（关机已自动挂上） |
 | 同时让蜂窝和 WiFi 都自动连 | 两条默认路由互抢，表现为"时通时断"；用 `car-net.sh policy` 保证**只占一条上行**（蜂窝 100 < WiFi 600） |
 | 换服务器时只改了一处 | 推流地址与 frp 隧道地址是两套配置，容易半切换；统一改 `car-net.conf` 后 `car-net.sh apply` |

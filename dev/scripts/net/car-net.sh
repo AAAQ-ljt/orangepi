@@ -33,6 +33,7 @@ CELL_TIMEOUT=30; WIFI_TIMEOUT=45
 WIFI_LEDGER="$CONF_DIR/wifi-ledger.conf"
 APN_LIST="cmnet,3gnet,ctnet"
 CELL_METRIC=100; WIFI_METRIC=600
+VENDOR_DIAL_FALLBACK=yes; MODEM_HARD_RESET=yes; MODEM_USB_ID=""
 MEDIA_RTSP=""; FRP_SERVER_ADDR=""; FRP_SERVER_PORT=7000; FRP_TOKEN=""
 FRP_SSH_PORT=2222; FRP_WEB_PORT=8080; FRP_DOMAIN_PORT=""
 WIFI_IF=""; WWAN_IF="wwan0"; QMI_DEV="/dev/cdc-wdm0"
@@ -78,6 +79,50 @@ wifi_active()  { nmcli -t -f DEVICE,STATE 2>/dev/null | grep -q "^${WIFI_IF}:con
 
 # ------------------------------------------------------------------ 蜂窝
 VENDOR_DIALER="/root/SIM8200_for_RPI/Goonline/simcom-cm"   # 厂商拨号器（对本模组已验证可用）
+MODEM_USB_ID=""            # 例：2-1（USB 总线2端口1）；留空则自动探测（按 idVendor 1e0e:9001）
+
+# 找到 5G 模组的 USB 设备路径（sysfs 名，如 2-1）
+find_modem_usb() {
+  [[ -n "$MODEM_USB_ID" ]] && { echo "$MODEM_USB_ID"; return 0; }
+  local d
+  for d in /sys/bus/usb/devices/*-*; do
+    [[ -f "$d/idVendor" && -f "$d/idProduct" ]] || continue
+    if [[ "$(cat "$d/idVendor" 2>/dev/null)" == "1e0e" ]]; then
+      basename "$d"; return 0
+    fi
+  done
+  return 1
+}
+
+# 硬复位模组：USB 解绑/绑定（等价于重新插拔），能清掉所有卡死的 QMI 状态。
+# 这是"兜底也要能连上"的最后手段——只要模组硬件没坏，复位后就能重新拨号。
+modem_hard_reset() {
+  local usb
+  usb=$(find_modem_usb) || { warn "找不到 5G 模组的 USB 设备（idVendor 1e0e），跳过硬复位"; return 1; }
+  info "硬复位模组：USB $usb unbind/bind"
+  log "modem hard reset ($usb)"
+  # 先把可能占着 QMI 的进程清掉，否则复位后又被占用
+  pkill -f "simcom-cm" 2>/dev/null || true
+  pkill -f "qmicli" 2>/dev/null || true
+  sleep 2
+  echo "$usb" > /sys/bus/usb/drivers/usb/unbind 2>/dev/null || { warn "unbind 失败（缺权限？）"; return 1; }
+  sleep 4
+  echo "$usb" > /sys/bus/usb/drivers/usb/bind 2>/dev/null || { warn "bind 失败"; return 1; }
+  # 等 QMI 控制口重新出现（模组重启 + udev 建节点，通常 10~25s）
+  local waited=0
+  while (( waited < 45 )); do
+    if [[ -e "$QMI_DEV" && -d "/sys/class/net/$WWAN_IF" ]]; then
+      ok "模组已重新枚举（$QMI_DEV 就绪）"
+      sleep 3
+      [[ -e /sys/class/net/$WWAN_IF/qmi/raw_ip ]] && echo Y > "/sys/class/net/$WWAN_IF/qmi/raw_ip" 2>/dev/null
+      ip link set "$WWAN_IF" up 2>/dev/null
+      return 0
+    fi
+    sleep 2; waited=$((waited+2))
+  done
+  warn "复位后 45s 内没等到 $QMI_DEV / $WWAN_IF"
+  return 1
+}
 
 # 厂商拨号器：SIM8262E-M2 的 QMI 时序比较特殊，官方这个小程序是"已验证可用"的路径。
 # 它可能自带默认 APN，所以换卡时不一定成功 —— 失败了再走我们的 APN 轮询。
@@ -174,8 +219,18 @@ cellular_up() {
     vendor_dial && return 0
   fi
 
-  err "两条路径都没拨通（检查：卡是否插好/欠费/天线/模组供电；APN 可在 car-net.conf 里改）"
-  log "cellular FAILED"
+  # ③ 最后手段：硬复位模组再走一遍（等价重新插拔，清掉卡死的 QMI 状态）
+  if [[ "${MODEM_HARD_RESET:-yes}" == "yes" ]]; then
+    warn "仍未拨通，尝试硬复位模组……"
+    if modem_hard_reset; then
+      sleep 2
+      apn_dial && return 0
+      vendor_dial && return 0
+    fi
+  fi
+
+  err "三条路径都没拨通（检查：卡是否插好/欠费/天线/模组供电；APN 可在 car-net.conf 里改）"
+  log "cellular FAILED (apn+vendor+reset)"
   return 1
 }
 
@@ -208,13 +263,14 @@ cellular_down() {
 # ------------------------------------------------------------------ WiFi 账本
 ledger_entries() {
   [[ -f "$WIFI_LEDGER" ]] || return 0
-  grep -vE '^\s*(#|$)' "$WIFI_LEDGER" | while IFS='|' read -r ssid pwd prio; do
+  grep -vE '^\s*(#|$)' "$WIFI_LEDGER" | while IFS='|' read -r ssid pwd prio static; do
     ssid="$(echo "${ssid:-}" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
     pwd="$(echo "${pwd:-}" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
     prio="$(echo "${prio:-50}" | tr -d ' ')"
+    static="$(echo "${static:-}" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
     [[ -z "$prio" ]] && prio=50
     [[ -z "$ssid" ]] && continue
-    printf '%s|%s|%s\n' "$ssid" "$pwd" "$prio"
+    printf '%s|%s|%s|%s\n' "$ssid" "$pwd" "$prio" "$static"
   done
 }
 
@@ -227,20 +283,30 @@ wifi_sync() {
   local iface; iface=$(wifi_iface)
   [[ -z "$iface" ]] && { err "找不到 WiFi 网卡"; return 1; }
   local n=0
-  while IFS='|' read -r ssid pwd prio; do
+  while IFS='|' read -r ssid pwd prio static; do
     local exists=no
     nmcli -t -f NAME con show 2>/dev/null | grep -Fxq "$ssid" && exists=yes
     if [[ -z "$pwd" && "$exists" == "no" ]]; then
       warn "跳过 $ssid：账本里没有密码"
       continue
     fi
-    if [[ "$exists" == "yes" ]]; then
-      nmcli con modify "$ssid" ipv4.route-metric "$WIFI_METRIC" connection.autoconnect no >/dev/null 2>&1
-    else
+    if [[ "$exists" == "no" ]]; then
       nmcli con add type wifi con-name "$ssid" ifname "$iface" ssid "$ssid" \
         wifi-sec.key-mgmt wpa-psk wifi-sec.psk "$pwd" \
         ipv4.route-metric "$WIFI_METRIC" connection.autoconnect no >/dev/null 2>&1 \
         && ok "已创建连接：$ssid（优先级 $prio）" || { warn "创建失败：$ssid"; continue; }
+    fi
+    # 静态地址（可选第 4 列，格式 IP/前缀,网关）——热点 DHCP 不给地址时用这个绕过去
+    if [[ -n "$static" ]]; then
+      local addr="${static%%,*}" gw="${static#*,}"
+      if nmcli con modify "$ssid" ipv4.method manual ipv4.addresses "$addr" \
+           ${gw:+ipv4.gateway "$gw"} ipv4.route-metric "$WIFI_METRIC" >/dev/null 2>&1; then
+        ok "$ssid 使用静态地址 $addr${gw:+（网关 $gw）}"
+      else
+        warn "$ssid 静态地址写入失败：$static"
+      fi
+    else
+      nmcli con modify "$ssid" ipv4.method auto ipv4.route-metric "$WIFI_METRIC" connection.autoconnect no >/dev/null 2>&1
     fi
     n=$((n+1))
   done < <(ledger_entries)
@@ -273,33 +339,74 @@ wifi_list() {
   nmcli -t -f SSID,SIGNAL,SECURITY dev wifi list 2>/dev/null | head -12 | sed 's/^/  /'
 }
 
+# 按账本优先级挑一个"当前能搜到"的热点
+pick_best_ssid() {
+  local visible
+  visible=$(nmcli -t -f SSID dev wifi list 2>/dev/null | sort -u)
+  local best="" best_prio=9999 ssid pwd prio static
+  while IFS='|' read -r ssid pwd prio static; do
+    grep -Fxq "$ssid" <<< "$visible" || continue
+    if (( prio < best_prio )); then best="$ssid"; best_prio=$prio; fi
+  done < <(ledger_entries)
+  [[ -n "$best" ]] && echo "$best"
+}
+
+# 上次连接失败的原因（从 NM 日志里抓，便于判断是密码错还是 DHCP 没给地址）
+wifi_fail_reason() {
+  journalctl -u NetworkManager --since '2 min ago' --no-pager 2>/dev/null \
+    | grep -oE "\-> failed \(reason '[a-z0-9-]+'\)" | tail -1 | sed "s/-> failed (reason //; s/)//"
+}
+
+# 判定 WiFi 是否真的可用：**拿到 IPv4 地址**才算（不能用 NM 的 connected 状态——
+# DHCP 拿到地址后 NM 还会做连通性检查、停在 ip-check 十几秒，那时其实已经能用了）
+wifi_up_ok() {
+  local iface="$1" ip st
+  ip=$(iface_ip "$iface")
+  [[ -n "$ip" ]] || return 1
+  st=$(nmcli -t -f DEVICE,STATE dev status 2>/dev/null | awk -F: -v d="$iface" '$1==d{print $2}')
+  case "$st" in
+    connected|ip-check|ip-config) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 wifi_up() {
   local iface; iface=$(wifi_iface)
   [[ -z "$iface" ]] && { err "找不到 WiFi 网卡"; return 1; }
-  # 按账本优先级挑一个"当前能搜到"的热点
-  local visible best="" best_prio=9999
-  visible=$(nmcli -t -f SSID dev wifi list 2>/dev/null | sort -u)
-  while IFS='|' read -r ssid pwd prio; do
-    grep -qx "$ssid" <<< "$visible" || continue
-    if (( prio < best_prio )); then best="$ssid"; best_prio=$prio; fi
-  done < <(ledger_entries)
-  if [[ -z "$best" ]]; then
-    warn "账本里没有当前能搜到的热点（可用 wifi list 查看）"
-    return 1
-  fi
-  info "连接优先热点：$best"
-  nmcli con up "$best" >/dev/null 2>&1 &
-  local pid=$! waited=0
-  while (( waited < WIFI_TIMEOUT )); do
-    if wifi_active; then ok "WiFi 已连接（$(iface_ip "$iface")）"; return 0; fi
-    sleep 1; waited=$((waited+1))
+
+  local attempt best
+  for attempt in 1 2 3; do
+    best=$(pick_best_ssid)
+    if [[ -z "$best" ]]; then
+      warn "账本里没有当前能搜到的热点（可用 wifi list 查看）"
+      return 1
+    fi
+    info "第 $attempt/3 次尝试连接：$best"
+    timeout $((WIFI_TIMEOUT / 2 + 10)) nmcli --wait "$((WIFI_TIMEOUT / 2))" con up "$best" >/dev/null 2>&1 || true
+
+    local waited=0
+    while (( waited < WIFI_TIMEOUT )); do
+      if wifi_up_ok "$iface"; then
+        ok "WiFi 已连接（$(iface_ip "$iface")）"
+        return 0
+      fi
+      sleep 2; waited=$((waited+2))
+    done
+    local why; why=$(wifi_fail_reason)
+    warn "第 $attempt 次失败${why:+（$why）}"
+    log "wifi attempt $attempt on '$best' failed ${why:+($why)}"
+    # 只有在确实没拿到地址时才断开重试，避免把刚拿到地址的连接掐掉
+    if ! wifi_up_ok "$iface"; then
+      nmcli dev disconnect "$iface" >/dev/null 2>&1 || true
+    fi
+    sleep 3
   done
-  kill "$pid" 2>/dev/null || true
-  err "WiFi 连接超时（$WIFI_TIMEOUT s）"
+  err "WiFi 重试 3 次仍未连上；若是 'ip-config-unavailable'（热点没给 DHCP 地址），"
+  err "可给账本该热点加第 4 列静态地址，例如：Aaaq|密码|10|10.129.7.50/24,10.129.7.169"
   return 1
 }
 
-# ------------------------------------------------------------------ 策略：只占一条上行
+# 策略：只占一条上行（蜂窝优先；有蜂窝就关掉 WiFi 自动连，反之亦然）
 apply_policy() {
   local iface; iface=$(wifi_iface)
   local cell_ip; cell_ip=$(cellular_ip)
@@ -309,7 +416,7 @@ apply_policy() {
       nmcli con modify "$name" connection.autoconnect no >/dev/null 2>&1
     done < <(nmcli -t -f NAME,TYPE con show 2>/dev/null | awk -F: '$2=="802-11-wireless"{print $1}')
     nmcli dev disconnect "$iface" >/dev/null 2>&1
-  elif wifi_active; then
+  elif [[ -n "$(iface_ip "$iface")" ]]; then
     ok "上行 = WiFi（$(iface_ip "$iface")）"
     while IFS= read -r name; do
       nmcli con modify "$name" connection.autoconnect yes >/dev/null 2>&1
@@ -317,7 +424,7 @@ apply_policy() {
   else
     warn "当前没有任何上行链路"
   fi
-  # 路由优先级兜底（蜂窝 100 < WiFi 600）
+  # 路由优先级兜底（蜂窝 100 < WiFi 600，蜂窝优先）
   local gw
   gw=$(ip route show default dev "$WWAN_IF" 2>/dev/null | awk '{print $3}' | head -1)
   [[ -n "$gw" ]] && ip route replace default via "$gw" dev "$WWAN_IF" metric "$CELL_METRIC" onlink 2>/dev/null
@@ -426,7 +533,7 @@ cmd_status() {
   cell_ip=$(cellular_ip); wifi_ip=$(iface_ip "$(wifi_iface)"); def=$(default_iface)
   local cell_out="" wifi_state="未连接"
   if [[ -n "$cell_ip" ]]; then net_ok "$WWAN_IF" && cell_out="(出网 OK)"; fi
-  wifi_active && wifi_state="已连"
+  [[ -n "$wifi_ip" ]] && wifi_state="已连"
   printf '默认出口      : %s\n' "${def:-无}"
   printf '蜂窝 %-8s : %s\n' "$WWAN_IF" "${cell_ip:-无地址} $cell_out"
   printf 'WiFi %-8s : %s\n' "$(wifi_iface)" "${wifi_ip:-无地址} ($wifi_state)"
@@ -456,8 +563,10 @@ main() {
     cellular) case "${1:-status}" in
                 up) require_root; cellular_up ;;
                 down) require_root; cellular_down ;;
+                recover) require_root; modem_hard_reset && { sleep 2; apn_dial || vendor_dial; } ;;
+                reset) require_root; modem_hard_reset ;;
                 status) printf '蜂窝 %s: %s\n' "$WWAN_IF" "$(cellular_ip || echo 无地址)" ;;
-                *) err "用法：car-net.sh cellular up|down|status"; exit 1 ;;
+                *) err "用法：car-net.sh cellular up|down|recover|reset|status"; exit 1 ;;
               esac ;;
     wifi)     case "${1:-list}" in
                 sync)   require_root; wifi_sync ;;

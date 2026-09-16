@@ -1,0 +1,18 @@
+[Unit]
+Description=Car network graceful teardown (release QMI client/CID before power off)
+Documentation=file:/root/dev/scripts/net/car-net.sh
+DefaultDependencies=no
+Before=shutdown.target
+After=network.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/true
+# 关机/重启时优雅断开蜂窝：停会话、释放 CID、清地址与路由，
+# 避免留下僵尸 CID（那正是下一次上电拨号失败的原因）
+ExecStop=/root/dev/scripts/net/car-net.sh cellular down
+TimeoutStopSec=45
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,16 @@
+[Unit]
+Description=Car network supervisor (cellular first, WiFi ledger fallback)
+Documentation=file:/root/dev/scripts/net/car-net.sh
+After=network.target NetworkManager.service
+Wants=NetworkManager.service
+Before=frpc-ssh.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# 上电联网策略：先流量卡，没有再 WiFi；任一连上就不再折腾另一路
+ExecStart=/root/dev/scripts/net/car-net.sh auto
+TimeoutStartSec=180
+
+[Install]
+WantedBy=multi-user.target

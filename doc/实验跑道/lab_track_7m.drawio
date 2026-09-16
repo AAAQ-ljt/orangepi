@@ -1,0 +1,161 @@
+<mxfile host="app.diagrams.net" agent="ZCode gen_lab_track.py" version="24.7.17" type="device">
+  <diagram id="lab-track-1to1" name="跑道 1:1（打印用）">
+    <mxGraphModel dx="1400" dy="800" grid="0" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="27559" pageHeight="5512" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="s0" value="" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#924C4A;strokeColor=none;" vertex="1" parent="1">
+          <mxGeometry x="0.00" y="0.00" width="27559.06" height="5511.81" as="geometry" />
+        </mxCell>
+        <mxCell id="s1" value="" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=none;" vertex="1" parent="1">
+          <mxGeometry x="0.00" y="196.85" width="27559.06" height="157.48" as="geometry" />
+        </mxCell>
+        <mxCell id="s2" value="" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=none;" vertex="1" parent="1">
+          <mxGeometry x="0.00" y="5157.48" width="27559.06" height="157.48" as="geometry" />
+        </mxCell>
+        <mxCell id="s3" value="" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=none;" vertex="1" parent="1">
+          <mxGeometry x="5511.81" y="895.67" width="1181.10" height="413.39" as="geometry" />
+        </mxCell>
+        <mxCell id="s4" value="" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=none;" vertex="1" parent="1">
+          <mxGeometry x="5511.81" y="1722.44" width="1181.10" height="413.39" as="geometry" />
+        </mxCell>
+        <mxCell id="s5" value="" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=none;" vertex="1" parent="1">
+          <mxGeometry x="5511.81" y="2549.21" width="1181.10" height="413.39" as="geometry" />
+        </mxCell>
+        <mxCell id="s6" value="" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=none;" vertex="1" parent="1">
+          <mxGeometry x="5511.81" y="3375.98" width="1181.10" height="413.39" as="geometry" />
+        </mxCell>
+        <mxCell id="s7" value="" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=none;" vertex="1" parent="1">
+          <mxGeometry x="5511.81" y="4202.76" width="1181.10" height="413.39" as="geometry" />
+        </mxCell>
+        <mxCell id="s8" value="" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#FEFF00;strokeColor=none;" vertex="1" parent="1">
+          <mxGeometry x="23622.05" y="354.33" width="393.70" height="4803.15" as="geometry" />
+        </mxCell>
+        <mxCell id="s9" value="" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#FEFF00;strokeColor=none;" vertex="1" parent="1">
+          <mxGeometry x="27165.35" y="354.33" width="393.70" height="4803.15" as="geometry" />
+        </mxCell>
+        <mxCell id="s10" value="" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#FEFF00;strokeColor=none;" vertex="1" parent="1">
+          <mxGeometry x="23622.05" y="2559.06" width="3937.01" height="393.70" as="geometry" />
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+  <diagram id="lab-track-annot" name="尺寸标注（1:10）">
+    <mxGraphModel dx="1400" dy="800" grid="0" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="3836" pageHeight="1311" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="a0" value="" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#924C4A;strokeColor=none;" vertex="1" parent="1">
+          <mxGeometry x="340.00" y="460.00" width="2755.91" height="551.18" as="geometry" />
+        </mxCell>
+        <mxCell id="a1" value="" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=none;" vertex="1" parent="1">
+          <mxGeometry x="340.00" y="479.69" width="2755.91" height="15.75" as="geometry" />
+        </mxCell>
+        <mxCell id="a2" value="" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=none;" vertex="1" parent="1">
+          <mxGeometry x="340.00" y="975.75" width="2755.91" height="15.75" as="geometry" />
+        </mxCell>
+        <mxCell id="a3" value="" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=none;" vertex="1" parent="1">
+          <mxGeometry x="891.18" y="549.57" width="118.11" height="41.34" as="geometry" />
+        </mxCell>
+        <mxCell id="a4" value="" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=none;" vertex="1" parent="1">
+          <mxGeometry x="891.18" y="632.24" width="118.11" height="41.34" as="geometry" />
+        </mxCell>
+        <mxCell id="a5" value="" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=none;" vertex="1" parent="1">
+          <mxGeometry x="891.18" y="714.92" width="118.11" height="41.34" as="geometry" />
+        </mxCell>
+        <mxCell id="a6" value="" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=none;" vertex="1" parent="1">
+          <mxGeometry x="891.18" y="797.60" width="118.11" height="41.34" as="geometry" />
+        </mxCell>
+        <mxCell id="a7" value="" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=none;" vertex="1" parent="1">
+          <mxGeometry x="891.18" y="880.28" width="118.11" height="41.34" as="geometry" />
+        </mxCell>
+        <mxCell id="a8" value="" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#FEFF00;strokeColor=none;" vertex="1" parent="1">
+          <mxGeometry x="2702.20" y="495.43" width="39.37" height="480.31" as="geometry" />
+        </mxCell>
+        <mxCell id="a9" value="" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#FEFF00;strokeColor=none;" vertex="1" parent="1">
+          <mxGeometry x="3056.54" y="495.43" width="39.37" height="480.31" as="geometry" />
+        </mxCell>
+        <mxCell id="a10" value="" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#FEFF00;strokeColor=none;" vertex="1" parent="1">
+          <mxGeometry x="2702.20" y="715.91" width="393.70" height="39.37" as="geometry" />
+        </mxCell>
+        <mxCell id="n1" value="1400（起点→斑马线前缘）" style="endArrow=classic;startArrow=classic;html=1;rounded=0;strokeWidth=1;strokeColor=#C0392B;fontColor=#C0392B;fontSize=11;labelBackgroundColor=#FFFFFF;align=center;verticalAlign=middle;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="340.0" y="414.0" as="sourcePoint" />
+            <mxPoint x="891.2" y="414.0" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="n2" value="300" style="endArrow=classic;startArrow=classic;html=1;rounded=0;strokeWidth=1;strokeColor=#C0392B;fontColor=#C0392B;fontSize=11;labelBackgroundColor=#FFFFFF;align=center;verticalAlign=middle;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="891.2" y="414.0" as="sourcePoint" />
+            <mxPoint x="1009.3" y="414.0" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="n3" value="4300" style="endArrow=classic;startArrow=classic;html=1;rounded=0;strokeWidth=1;strokeColor=#C0392B;fontColor=#C0392B;fontSize=11;labelBackgroundColor=#FFFFFF;align=center;verticalAlign=middle;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="1009.3" y="414.0" as="sourcePoint" />
+            <mxPoint x="2702.2" y="414.0" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="n4" value="1000（停车区）" style="endArrow=classic;startArrow=classic;html=1;rounded=0;strokeWidth=1;strokeColor=#C0392B;fontColor=#C0392B;fontSize=11;labelBackgroundColor=#FFFFFF;align=center;verticalAlign=middle;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="2702.2" y="414.0" as="sourcePoint" />
+            <mxPoint x="3095.9" y="414.0" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="n5" value="总长 7000" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=13;fontColor=#C0392B;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="340.00" y="374.00" width="2755.91" height="26.00" as="geometry" />
+        </mxCell>
+        <mxCell id="n6" value="50" style="endArrow=classic;startArrow=classic;html=1;rounded=0;strokeWidth=1;strokeColor=#C0392B;fontColor=#C0392B;fontSize=11;labelBackgroundColor=#FFFFFF;align=center;verticalAlign=middle;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="294.0" y="460.0" as="sourcePoint" />
+            <mxPoint x="294.0" y="479.7" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="n7" value="40 白线" style="endArrow=classic;startArrow=classic;html=1;rounded=0;strokeWidth=1;strokeColor=#C0392B;fontColor=#C0392B;fontSize=11;labelBackgroundColor=#FFFFFF;align=center;verticalAlign=middle;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="294.0" y="479.7" as="sourcePoint" />
+            <mxPoint x="294.0" y="495.4" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="n8" value="1220 红底" style="endArrow=classic;startArrow=classic;html=1;rounded=0;strokeWidth=1;strokeColor=#C0392B;fontColor=#C0392B;fontSize=11;labelBackgroundColor=#FFFFFF;align=center;verticalAlign=middle;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="294.0" y="495.4" as="sourcePoint" />
+            <mxPoint x="294.0" y="975.7" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="n9" value="40 白线" style="endArrow=classic;startArrow=classic;html=1;rounded=0;strokeWidth=1;strokeColor=#C0392B;fontColor=#C0392B;fontSize=11;labelBackgroundColor=#FFFFFF;align=center;verticalAlign=middle;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="294.0" y="975.7" as="sourcePoint" />
+            <mxPoint x="294.0" y="991.5" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="n10" value="50" style="endArrow=classic;startArrow=classic;html=1;rounded=0;strokeWidth=1;strokeColor=#C0392B;fontColor=#C0392B;fontSize=11;labelBackgroundColor=#FFFFFF;align=center;verticalAlign=middle;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="294.0" y="991.5" as="sourcePoint" />
+            <mxPoint x="294.0" y="1011.2" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="n11" value="总宽 1400" style="text;html=1;strokeColor=none;fillColor=none;align=right;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=13;fontColor=#C0392B;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="94.00" y="460.00" width="160.00" height="26.00" as="geometry" />
+        </mxCell>
+        <mxCell id="n12" value="赛道宽 1220" style="endArrow=classic;startArrow=classic;html=1;rounded=0;strokeWidth=1;strokeColor=#C0392B;fontColor=#C0392B;fontSize=11;labelBackgroundColor=#FFFFFF;align=center;verticalAlign=middle;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="3165.9" y="495.4" as="sourcePoint" />
+            <mxPoint x="3165.9" y="975.7" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="n13" value="黄胶带 100mm 宽" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=11;fontColor=#333333;" vertex="1" parent="1">
+          <mxGeometry x="3185.91" y="731.65" width="200.00" height="24.00" as="geometry" />
+        </mxCell>
+        <mxCell id="n14" value="斑马线：白条 105mm（沿行驶方向 300mm）× 5 条，条间隙 105mm，中间那条压在赛道中线上（规则 §2.2.3：10.5×29.7cm 白纸平铺、间隙 10.5cm）&lt;br&gt;停车区：黄胶带 100mm 宽（入口 / 尾端 / 沿中线各一条），1m（沿行驶方向）× 赛道宽，中线胶带把停车区分成上下两格&lt;br&gt;挡板（40cm×50cm 蓝板）与付款码（10cm×10cm、与行驶方向成 45°）&lt;b&gt;都用实物道具&lt;/b&gt;，所以图上不印 —— 裁判在某一格入口放板，车停未被遮挡的那一格&lt;br&gt;颜色：红底 #924C4A / 白线 #FFFFFF / 黄胶带 #FEFF00（取自规则插图）&lt;br&gt;打印：1:1 整幅输出 7000×1400mm，材料用哑光写真/背胶，不要拼接、不要覆亮膜（反光会干扰摄像头）" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=12;fontColor=#444444;" vertex="1" parent="1">
+          <mxGeometry x="300.00" y="1045.18" width="2835.91" height="190.00" as="geometry" />
+        </mxCell>
+        <mxCell id="n15" value="单位 mm；本页 1:10，用于看图/改图 —— 打印请用第 1 页（1:1）或同目录的 PDF" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=12;fontColor=#888888;" vertex="1" parent="1">
+          <mxGeometry x="340.00" y="330.00" width="2755.91" height="26.00" as="geometry" />
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

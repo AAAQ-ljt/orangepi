@@ -131,6 +131,14 @@ def test_timeout_only_warns_never_releases():
     assert st.timed_out and not st.released, "超时只能告警，绝不自动发车"
 
 
+def test_bench_rule_never_runs_without_board():
+    """台架测试的安全规则（板在→停 / 板开→跑 / 板回→停）：没见过板绝不给动力。"""
+    from scripts.bench_board_test import NEUTRAL_US, decide_output
+    assert decide_output(blocked=False, seen_board=False, speed_us=1550) == NEUTRAL_US
+    assert decide_output(blocked=True, seen_board=True, speed_us=1550) == NEUTRAL_US
+    assert decide_output(blocked=False, seen_board=True, speed_us=1550) == 1550
+
+
 def test_reset_clears_state():
     gate = StartGate(arm_frames=2, release_frames=2, verbose=False)
     gate.update(_blue_frame())
@@ -148,5 +156,6 @@ if __name__ == "__main__":
     test_dominance_cue_covers_dark_board()
     test_flicker_resets_release_counter()
     test_timeout_only_warns_never_releases()
+    test_bench_rule_never_runs_without_board()
     test_reset_clears_state()
     print("test_start_gate: all passed")

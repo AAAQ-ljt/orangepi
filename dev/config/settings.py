@@ -49,10 +49,16 @@ STATUS_FILE = "/tmp/smartcar_status.json"   # 车端状态文件（本地测试�
 
 # ---------------------------------------------------------------- 发车遮挡检测
 # §3.1.7：挡板被移开 = 发车信号。必须边沿触发（先见板 → 再连续多帧不见板）。
+# 2026-09-16 加固：两路判据（最大蓝色连通域面积 + 蓝色主导度），覆盖"板先放好"与"启动后才放板"两种时序。
 START_GATE_ROI = (0.15, 0.85, 0.20, 0.95)   # (x0, x1, y0, y1) 比例，取画面中下部
 START_BLUE_HSV_LOW = (95, 80, 60)           # 蓝色挡板 HSV 下限【现场可调】
 START_BLUE_HSV_HIGH = (135, 255, 255)       # 蓝色挡板 HSV 上限【现场可调】
-START_BLUE_RATIO_THRESH = 0.22              # HSV 蓝色像素占比阈值【现场可调】
+START_BLUE_AREA_THRESH = 0.06               # 判据①：最大蓝色连通域面积 / ROI 面积【现场可调】
+START_BLUE_AREA_THRESH_LOW = 0.03           # 判据②（主导度）成立时的面积放宽线
+START_BLUE_DOMINANCE_THRESH = 35.0          # 判据②：最蓝 10% 像素的 mean(clip(B-max(R,G),0,255))【现场可调】
+START_USE_DETAIL = False                    # 判据③：近距离"画面细节骤降"（默认关，贴脸场景才需要）
+START_DETAIL_DROP_RATIO = 0.45              # 判据③：相对基线下降多少算贴脸
+START_REPORT_EVERY_S = 5.0                  # 未见板时每隔多久打印一次当前读数（供操作员定位问题）
 START_ARM_FRAMES = 3                        # 连续 N 帧判定"有遮挡"才武装
 START_RELEASE_FRAMES = 5                    # 武装后连续 N 帧"无遮挡"才发车（去抖）
 START_TIMEOUT_S = 90.0                      # 超时仅告警（不自动发车，保守）

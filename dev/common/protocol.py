@@ -10,7 +10,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 
 @dataclass
@@ -32,6 +32,9 @@ class PerceptionMessage:
     board_blocked: bool = False
     start_released: bool = False
     traffic_light_state: Optional[str] = None
+    # 统一元素列表（模型可插拔：元素名由 vision/elements.py 的 profile 决定）
+    # 每项形如 {"name": "zebra", "conf": 0.83, "xyxy": [x1,y1,x2,y2], "color": None}
+    elements: List[Dict[str, Any]] = field(default_factory=list)
     raw: Dict[str, Any] = field(default_factory=dict)
 
     # ---- 兼容旧代码：is_barrier 语义等同 board_blocked ----
@@ -98,6 +101,7 @@ class PerceptionMessage:
             board_blocked=board_blocked,
             start_released=_bool("start_released", False),
             traffic_light_state=traffic,
+            elements=[e for e in (data.get("elements") or []) if isinstance(e, dict)],
             raw=dict(data),
         )
 

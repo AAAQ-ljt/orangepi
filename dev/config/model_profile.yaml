@@ -1,0 +1,60 @@
+# 模型 profile：把「模型输出」与「元素语义」解耦
+#
+# 控制端只认统一元素名（zebra / cone / parking_area / blue_board / parking_sign / light），
+# 换模型（上一届的 → 我们自己训练的）只需要改这里的 profile，控制代码零改动。
+#
+# 用法：vision_main.py --profile legacy|smartcar2026
+#   legacy       ：上一届 YOLO11-seg（9 类）——**当前用于联调**
+#   smartcar2026 ：我们自己训练的 8 类检测（训练好之后切过来）
+#
+# map 里值为 none 的类：模型会输出，但控制端不使用（例如上一届的车道线类，
+# 我们的巡线走 OpenCV 扫线，不用模型出车道线）。
+
+profiles:
+  legacy:
+    task: segment
+    imgsz: 640
+    conf: 0.25
+    names:
+      0: lane_change_sign_left
+      1: lane_change_sign_right
+      2: left_lane
+      3: obstacle_cone_blue
+      4: obstacle_cone_yellow
+      5: parking_sign_A
+      6: parking_sign_B
+      7: right_lane
+      8: zebra_crossing
+    map:
+      lane_change_sign_left: none
+      lane_change_sign_right: none
+      left_lane: none
+      right_lane: none
+      obstacle_cone_blue: cone
+      obstacle_cone_yellow: cone
+      parking_sign_A: parking_sign
+      parking_sign_B: parking_sign
+      zebra_crossing: zebra
+
+  smartcar2026:
+    task: detect
+    imgsz: 640
+    conf: 0.25
+    names:
+      0: blue_board
+      1: crosswalk
+      2: traffic_light_off
+      3: traffic_light_red
+      4: traffic_light_green
+      5: obstacle_cone_blue
+      6: obstacle_cone_red
+      7: parking_area
+    map:
+      blue_board: blue_board
+      crosswalk: zebra
+      traffic_light_off: light          # 本阶段不消费（红绿灯占位，见开发方案 §8）
+      traffic_light_red: light
+      traffic_light_green: light
+      obstacle_cone_blue: cone
+      obstacle_cone_red: cone
+      parking_area: parking_area

@@ -175,3 +175,18 @@ ARBITER_HOLD_THROTTLE_SCALE = 0.5   # 降级期间的油门比例
 CRUISE_THROTTLE = 100.0     # 常态巡线油门（百分比）
 CONE_THROTTLE_SCALE = 0.5   # 见到锥桶时的油门比例
 ZEBRA_THROTTLE_SCALE = 0.6  # 接近斑马线时的油门比例（P1-2 接入减速曲线前先用比例）
+
+# ---- 以下参数由合并另一台机器的 Hough 通道带进来（2026-09-19 合并）----
+LANE_CANNY_HIGH_MAX = 240
+LANE_CANNY_HIGH_MIN = 40
+LANE_CANNY_LOW_MAX = 150
+LANE_CANNY_LOW_MIN = 20
+LANE_ERR_FAST_UNITS = 4.0    # |误差| 低于它（≈16px）→ 提速（oldCode <5px@320宽 ≈ 4 单位）
+LANE_ERR_SLOW_UNITS = 12.0   # |误差| 高于它（≈48px）→ 减速（oldCode >15px@320宽）
+LANE_HOUGH_ALLOW_SINGLE = 1     # 单侧丢线时用宽度先验推中心（0=直接拒收，第一轮行为）
+LANE_HOUGH_CENTER_JUMP_PX = 160 # 有效期内单帧中心最大跳变（防单帧误配把中心拉飞）
+LANE_HOUGH_HALF_W_DEFAULT_PX = 240  # 单侧兜底的半宽默认值（无历史帧时）；有历史帧用实测配对宽度
+LANE_HOUGH_HOLD_FRAMES = 5      # 上一帧中心的有效期（帧）；过期后参考中心回到图像中心
+LANE_HOUGH_SINGLE_SIDE_CONF = 0.35  # 单侧降级置信度 → 仲裁层半油门
+THROTTLE_FAST_SCALE = 1.0    # 提速档（调试期保持 1.0——1600us 已是上限，没有提速空间）
+THROTTLE_SLOW_SCALE = 0.85   # 减速档（弯道/大偏差时降功率保稳定）【现场可调】

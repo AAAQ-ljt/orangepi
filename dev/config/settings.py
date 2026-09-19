@@ -34,13 +34,13 @@ SERVO_MAX_ANGLE = 120
 
 # ---------------------------------------------------------------- 云台（主摄）
 # CH2=pan / CH3=tilt，角度 0~180（90=中位/1500us）。
-# **巡线视角**：把主摄往下压、看车前 1~3m 的地面（下摄角度太平时只有这一条路）。
-# 2026-09-19 规则确认：**裁判只在手动环节看图传，自动驾驶环节不看** → 巡线期间云台可以压下去。
+# ⚠️ 分工（用户 2026-09-19 明确）：**巡线只用下摄（/dev/video2，--camera 2）**，云台不参与巡线；
+# 云台留给「红绿灯阶段抬头看灯 / 看远处」用。
 GIMBAL_PAN_CENTER = 90
 GIMBAL_TILT_CENTER = 90
 GIMBAL_TILT_MIN = 40            # 机械限位（保护云台，别硬顶）
 GIMBAL_TILT_MAX = 140
-GIMBAL_TILT_LANE = None         # 巡线仰角（现场用 lane_probe --sweep-tilt 扫出来后写进 site.yaml）
+GIMBAL_TILT_LANE = None         # 云台在「看灯/看远处」阶段的仰角（用 lane_probe --sweep-tilt 扫）
 
 # ---------------------------------------------------------------- 视觉/控制
 TARGET_X = 320.0        # 期望车道中心像素值（摄像头偏装时现场标定）
@@ -83,8 +83,8 @@ START_USE_EDGE_DENSITY = False              # 是否同时要求边缘密度判�
 START_EDGE_DENSITY_THRESH = 0.02            # 边缘密度阈值（START_USE_EDGE_DENSITY=True 时生效）
 
 # ---------------------------------------------------------------- 扫线
-LANE_ROI_TOP_RATIO = 0.45       # ROI 上边界占画面高度比例
-LANE_ROI_BOTTOM_MARGIN = 16     # 距画面底部保留的像素（避免拍到车头）
+LANE_ROI_TOP_RATIO = 0.35   # ROI 上沿（0.35 → y=168）【现场可调】
+LANE_ROI_BOTTOM_MARGIN = 200   # ROI 下沿（200 → y=280）【现场可调】
 LANE_ROW_STEP = 2               # 每隔多少行扫一次
 LANE_WEIGHT_PEAK = 8.0          # 纵向权重峰值（中间行权重最大，对应"看得不远不近"）
 LANE_WHITE_S_MAX = 70           # 白线饱和度上限（HSV）
@@ -102,6 +102,42 @@ LANE_MAX_LINE_W_PX = 60         # 白线连通段最大宽度：更宽的是地�
 # 判据用**尺度无关的细长比**：长度 = bbox 长边；厚度 = 面积/长度；细长比 = 长度/厚度。
 # ⚠️ 不要改回"厚度 ≤ N 像素"的绝对阈值：前视浅角度下白线的投影厚度本来就大，
 #    绝对阈值会把真线一起滤掉（2026-09-16 因此把置信度从 0.6 打到 0.1、车完全不动）。
+LANE_MASK_OPEN_PX = 3           # 掩膜开运算核（去颗粒雪点）；0=关闭
+
+# ---- 边缘 + Hough 直线扫线（2026-09-19 操场重写，移植参考实现 oldCode/src/vision/vision.cpp）----
+# 参考实现用 Canny 边缘 + HoughLinesP，完全绕开"颜色/亮度分不开反光"的问题；
+# 关键先验是**车道线的斜率有物理范围**（把地面纹理、颗粒、反光的边缘全滤掉）。
+LANE_CANNY_LOW = 60             # Canny 低阈值（参考实现初始值）
+LANE_CANNY_HIGH = 140           # Canny 高阈值
+LANE_CANNY_ADAPT = 1            # 自适应：边缘太多就提高阈值、太少就降低（参考实现同款）
+LANE_CANNY_TARGET_LO = 2000     # 边缘像素数低于它 → 阈值下调
+LANE_CANNY_TARGET_HI = 2500     # 边缘像素数高于它 → 阈值上调
+# 自适应钳位（参考实现没钳位会漂到 0/255；2026-09-19 整理时补上）
+LANE_CANNY_LOW_MIN = 20
+LANE_CANNY_LOW_MAX = 150
+LANE_CANNY_HIGH_MIN = 40
+LANE_CANNY_HIGH_MAX = 240
+LANE_HOUGH_THRESH = 50          # HoughLinesP 阈值（参考实现）
+LANE_HOUGH_MIN_LEN = 30         # 最短线段
+LANE_HOUGH_MAX_GAP = 5          # 线段内最大允许间隙
+LANE_SLOPE_MIN = 0.5            # 车道线斜率 |dx/dy| 下限（等价参考实现的 |dy/dx| ≤ 2）
+LANE_SLOPE_MAX = 4.0            # 斜率上限（等价参考实现 |dy/dx| ≥ 0.25）
+LANE_MIN_SEG_LEN_SUM = 120      # 一侧所有支持线段的总长度下限（不够就是没真线）
+LANE_LOOKAHEAD_RATIO = 0.6      # 前瞻带占 ROI 的比例（0.6 = 看 ROI 上部 60% 的行）
+# ---- 配对枚举与时序连续性（2026-09-19 整理轮新增，配 vision/lane_hough.py）----
+# 田径跑道上平行白线到处都是，"各侧取最长线段"会配错对、浅斜率线外推后中心
+# 飞出画面（实测 cx=874/-10）。lane_hough v2 枚举左右候选对，用下面几条共同把关。
+LANE_HOUGH_ALLOW_SINGLE = 1     # 单侧丢线时用宽度先验推中心（0=直接拒收，第一轮行为）
+LANE_HOUGH_SINGLE_SIDE_CONF = 0.35  # 单侧降级置信度 → 仲裁层半油门
+LANE_HOUGH_HALF_W_DEFAULT_PX = 240  # 单侧兜底的半宽默认值（无历史帧时）；有历史帧用实测配对宽度
+LANE_HOUGH_HOLD_FRAMES = 5      # 上一帧中心的有效期（帧）；过期后参考中心回到图像中心
+LANE_HOUGH_CENTER_JUMP_PX = 160 # 有效期内单帧中心最大跳变（防单帧误配把中心拉飞）
+# ---- 直线拟合（2026-09-19 操场重写：车道线在画面里是直线，拟合比逐行跟踪稳得多）----
+LANE_FIT_TOL_PX = 6.0           # 内点判据：点到直线的距离上限（像素）
+LANE_FIT_ITERS = 120            # RANSAC 迭代次数
+LANE_FIT_ROW_STEP = 2           # 取候选点时的行步长
+LANE_FIT_MIN_SPAN_PX = 40       # 内点必须覆盖的纵向跨度（太小说明只是局部碎点）
+LANE_CONVERGE_MAX_RATIO = 0.98  # 透视校验：远端宽度 / 近端宽度 必须小于它（要收敛）
 LANE_LINE_MIN_LEN_PX = 20       # 连通域最长边至少这么长才算「线」
 LANE_LINE_MIN_ELONG = 3.0       # 细长比下限（块状反光约 1~2.5，白线通常 >5）【现场可调】
 LANE_LINE_MAX_THICK_PX = 80     # 次级保险：只挡"整片亮区"，不要用它做精细判据
@@ -115,37 +151,8 @@ LANE_TRACK_SEED_STEP = 8        # 多种子扫描的取样步长（越大越快�
 # 配对宽度闸门：车道是 1.22m，在画面里的投影宽度有物理上下界。
 # 2026-09-19 加：多种子跟踪在"画面里没有真线"时也能凑出很长的路径（反光/斑马线），
 # 所以要求"左右都在、且配对宽度落在这个区间"才算有效行——宁可不给中心，也不给错中心。
-LANE_PAIR_W_MIN_PX = 110
-LANE_PAIR_W_MAX_PX = 620
-
-# ---------------------------------------------------------------- Hough 循线（vision/lane_hough.py）
-# 2026-09-19 起的**主力通道**：Canny 边缘 + 霍夫直线，**不依赖颜色**。
-# 依据：HSV 白线方案在打印跑道上被反光打败（白线 S 与红底重叠、反光比线亮 40 级），
-# 而线的本质是"明暗交界的直线"——Canny 找的是梯度，反光斑内部没有边缘、形不成直线。
-# 逻辑移植自 2025 届实车跑通的 oldCode picture()（F:/smart_car/smart-car/oldCode）。
-HOUGH_ROI_TOP_RATIO = 0.50       # Canny/Hough 作用的 ROI 上沿（占比画面高）
-HOUGH_ROI_BOTTOM_RATIO = 0.90    # ROI 下沿（留出车头）
-HOUGH_BAND_TOP_RATIO = 0.55      # 误差带：对这段行的 (左线x+右线x)/2 求平均（oldCode 用 130~230/240）
-HOUGH_BAND_BOTTOM_RATIO = 0.96   # 误差带下沿可以超出 ROI——直线方程允许外推
-HOUGH_CANNY_LO = 60              # Canny 低阈值初值（oldCode MIN_YU）【现场可调】
-HOUGH_CANNY_HI = 140             # Canny 高阈值初值（oldCode MAX_YU）【现场可调】
-HOUGH_CANNY_LO_LIMIT = (30, 150) # 自适应钳位（oldCode 没钳位会漂到 0/255，这里补上）
-HOUGH_CANNY_HI_LIMIT = (80, 240)
-HOUGH_EDGE_DENSITY_HI = 0.095    # ROI 边缘像素占比高于它 → 提阈值（画面太"吵"）
-HOUGH_EDGE_DENSITY_LO = 0.075    # 低于它 → 降阈值（线快看不见了）
-HOUGH_CANNY_STEP = (2, 4)        # 每次自适应的步长 (lo, hi)（oldCode 同款 2/4）
-HOUGH_RHO = 1                    # HoughLinesP 距离分辨率（像素）
-HOUGH_THETA_DEG = 3.0            # 角度分辨率（oldCode 0.05rad ≈ 2.9°）
-HOUGH_THRESH = 50                # 一条直线至少要多少个投票点
-HOUGH_MIN_LEN_PX = 60            # 线段最短长度（oldCode 30@320宽，等比放大）
-HOUGH_MAX_GAP_PX = 10            # 同一直线上允许的断缝（oldCode 5@320宽）
-HOUGH_K_ABS_MIN = 0.25           # 斜率窗口：|k| 低于它的是近水平线（斑马线/纸边），丢弃
-HOUGH_K_ABS_MAX = 2.0            # |k| 高于它的近垂直噪声，丢弃
-HOUGH_FULL_CONF_BASE = 0.8       # 左右都找到时的基础置信度（+0.03×支持线段数，封顶 1.0）
-HOUGH_SINGLE_SIDE_CONF = 0.35    # 单侧丢线（宽度先验兜底）时的置信度 → 仲裁层按降级处理（半油门）
-HOUGH_SINGLE_HALF_W_DEFAULT_PX = 240  # 单侧兜底用的半宽默认值（无历史帧时）；有历史帧用实测配对宽度
-HOUGH_HOLD_FRAMES = 5            # 上一帧中心的有效期（帧）；过期后参考中心回到图像中心
-HOUGH_CENTER_JUMP_PX = 160       # 有效期内单帧中心最大跳变（≈40 误差单位；防单帧误配拉飞中心）
+LANE_PAIR_W_MIN_PX = 120
+LANE_PAIR_W_MAX_PX = 700
 
 # 转向符号：+1 = 角度增大 → 右转；实车若相反就改成 -1（可写进 config/site.yaml，不必改代码）
 STEER_SIGN = 1
@@ -183,7 +190,7 @@ CONE_THROTTLE_SCALE = 0.5   # 见到锥桶时的油门比例
 ZEBRA_THROTTLE_SCALE = 0.6  # 接近斑马线时的油门比例（P1-2 接入减速曲线前先用比例）
 
 # 误差自适应油门（oldCode Control_FollowTrail：误差小提速、误差大减速）
-# oldCode 用 +200/−300（±2~3%）这种小步幅；我们直接给油门百分比乘系数。
+# oldCode 用 +200/−300（±2~3%）的小步幅；我们直接给油门百分比乘系数。
 # ⚠️ 调试期电调可用区间只有 1545~1600us（≈45%~100%），慢速系数别低于 0.6，
 #    否则一减速就掉进死区、车直接停住（被判"停止超 20s"）。
 LANE_ERR_FAST_UNITS = 4.0    # |误差| 低于它（≈16px）→ 提速（oldCode <5px@320宽 ≈ 4 单位）

@@ -82,7 +82,7 @@ AUTO_TARGET_FRAMES = 12
 AUTO_TARGET_SPREAD_PX = 25.0
 AUTO_TARGET_MIN_PX = 120.0
 AUTO_TARGET_MAX_PX = 540.0
-AUTO_TARGET_MIN_CONF = 0.35     # 采样门槛：低于这个置信度的帧不进标定样本（宁可标不上，不能标歪）
+AUTO_TARGET_MIN_CONF = 0.25     # 采样门槛：低于这个置信度的帧不进标定样本（宁可标不上，不能标歪）
 
 # 跑偏保护：车在动、误差却持续这么大 → 疑似转向方向反了 / 车没跟上，直接停车
 # （80px ≈ 34cm 横向误差，已经在 1.22m 赛道里明显偏离中线；2s 是"确认真跑偏"的去抖时间）
@@ -380,13 +380,15 @@ def main() -> int:
                                 lane_ok = not arb.should_stop
                                 steer_center = arb.center_x
                                 throttle_scale = arb.throttle_scale
-                                error = abs(steer_center - planner.target_x)
+                                error_signed = steer_center - planner.target_x
+                                error = abs(error_signed)
                             else:
                                 arb = None
                                 lane_ok = True          # --no-lane 模式不判车道
                                 steer_center = planner.target_x
                                 throttle_scale = 1.0
                                 error = 0.0
+                                error_signed = 0.0
 
                             # ---- 起步对齐状态 ----
                             if gs.blocked or not seen_board:

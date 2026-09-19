@@ -73,6 +73,7 @@ START_US_DEFAULT = float(settings.ESC_CREEP_US)   # 起步对齐时的脉宽（1
 SPEED_US_DEFAULT = 1575.0     # 对准后的循迹速度（≈15% 行程，慢速起步用）
 ALIGN_TOL_PX = 15.0           # 对齐容差（像素）
 ALIGN_FRAMES = 8              # 连续多少帧在容差内算对准
+ACQUIRE_S = 3.0               # 发车后允许"低速探路找线"的窗口（秒）：看不到线也能往前拱一小段
 
 # 「边跑边标定」：竞速比赛里裁判不会留出"先标定再跑"的时间，
 # 所以标定必须发生在正式流程内部 —— 发车瞬间车正停在车道中央（人工摆位就是这个前提），
@@ -81,6 +82,7 @@ AUTO_TARGET_FRAMES = 12
 AUTO_TARGET_SPREAD_PX = 25.0
 AUTO_TARGET_MIN_PX = 120.0
 AUTO_TARGET_MAX_PX = 540.0
+AUTO_TARGET_MIN_CONF = 0.35     # 采样门槛：低于这个置信度的帧不进标定样本（宁可标不上，不能标歪）
 
 # 跑偏保护：车在动、误差却持续这么大 → 疑似转向方向反了 / 车没跟上，直接停车
 # （80px ≈ 34cm 横向误差，已经在 1.22m 赛道里明显偏离中线；2s 是"确认真跑偏"的去抖时间）
@@ -136,8 +138,15 @@ class Decision:
 
 def decide(blocked: bool, seen_board: bool, lane_ok: bool, aligned: bool,
            force_run: bool, speed_us: float, start_us: float,
-           neutral_us: float = NEUTRAL_US, no_lane: bool = False) -> Decision:
-    """台架决策（纯函数，便于单测）。安全优先级：未见过板 > 板在 > 无车道 > 对齐 > 循迹。"""
+           neutral_us: float = NEUTRAL_US, no_lane: bool = False,
+           acquire: bool = False) -> Decision:
+    """台架决策（纯函数，便于单测）。安全优先级：未见过板 > 板在 > 无车道 > 对齐 > 循迹。
+
+    `acquire=True` 是**发车后的低速探路窗口**：车停在起点时下摄可能还没看到白线
+    （线在视野边缘/太近处投影不到），若这时也按"无有效车道就停"，车会**永远动不了**
+    ——2026-09-16 实测就这么卡住过（电调全程 1500us）。所以发车后允许用蠕动速度
+    往前拱一小段（窗口由调用方限时），边拱边找线；找回线就转正常对齐/循迹。
+    """
     if not seen_board:
         return Decision(neutral_us, "idle", "未见过板")
     if blocked:
@@ -145,6 +154,8 @@ def decide(blocked: bool, seen_board: bool, lane_ok: bool, aligned: bool,
     if no_lane:                                   # --no-lane：只测蓝板+电调
         return Decision(speed_us, "track", "跑(不循迹)")
     if not lane_ok and not force_run:
+        if acquire:
+            return Decision(start_us, "align", "起步探路（低速找线）")
         return Decision(neutral_us, "stopped", "无有效车道")
     if not aligned:
         return Decision(start_us, "align", "起步对齐")
@@ -161,6 +172,9 @@ def main() -> int:
     ap.add_argument("--align-tol", type=float, default=ALIGN_TOL_PX, help="对齐容差 px（默认 15）")
     ap.add_argument("--align-frames", type=int, default=ALIGN_FRAMES, help="容差内连续帧数（默认 8）")
     ap.add_argument("--align-max-s", type=float, default=6.0, help="对齐阶段最长秒数（超时即提速）")
+    ap.add_argument("--acquire-s", type=float, default=ACQUIRE_S,
+                    help=f"发车后「低速探路找线」的窗口（默认 {ACQUIRE_S:.0f}s；窗口内没线也会低速往前找，"
+                         f"超时就停）")
     ap.add_argument("--target-x", type=float, default=None, help="期望车道中心（默认 settings.TARGET_X=<320>）")
     ap.add_argument("--max-steer", type=float, default=None, help="转向限幅（默认 settings 的 30°）")
     ap.add_argument("--max-seconds", type=float, default=180.0, help="整段最长运行时间")
@@ -307,7 +321,7 @@ def main() -> int:
                     align_since = None      # 进入对齐阶段的时刻
                     align_hits = 0          # 容差内连续帧数
                     aligned = False
-                    no_lane_since = None
+                    acquire_since = None    # 低速探路窗口起点（发车瞬间）
                     hinted_no_lane = False
                     try:
                         while not state["stopped"] and (time.time() - t0) < args.max_seconds:
@@ -335,14 +349,16 @@ def main() -> int:
                             # ---- 起步对齐状态 ----
                             if gs.blocked or not seen_board:
                                 align_since, align_hits, aligned = None, 0, False
-                                no_lane_since = None
+                                acquire_since = None
+                                hinted_no_lane = False
                                 align_samples.clear()
                                 align_errors.clear()
                             elif not args.no_lane:
                                 if align_since is None:
-                                    align_since = now
+                                    align_since = acquire_since = now
                                 # 「边跑边标定」：板刚移开、车还没动，用这段画面修正车道中心
-                                if (obs is not None and lane_ok and not auto_target_done
+                                if (obs is not None and not auto_target_done
+                                        and obs.confidence >= AUTO_TARGET_MIN_CONF
                                         and not args.no_auto_target):
                                     align_samples.append(obs.center_x)
                                     value = auto_target(align_samples)
@@ -360,7 +376,7 @@ def main() -> int:
                                             print("[BENCH]    已写入 config/site.yaml，本次与以后都用它")
                                         except Exception as exc:
                                             print(f"[BENCH]    ⚠️ 写入 site.yaml 失败（本次仍用它）：{exc}")
-                                if not aligned:
+                                if not aligned and lane_ok:
                                     align_errors.append(error)
                                 if lane_ok and error <= args.align_tol:
                                     align_hits += 1
@@ -368,26 +384,30 @@ def main() -> int:
                                         aligned = True
                                 else:
                                     align_hits = 0
-                                if not aligned and (now - align_since) >= args.align_max_s:
+                                if not aligned and lane_ok and (now - align_since) >= args.align_max_s:
                                     aligned = True      # 对齐超时 → 先走起来（避免原地磨蹭）
                                 if aligned and not verdict_printed:
                                     verdict_printed = True
                                     print(f"[BENCH] {align_verdict(align_errors)}")
-                                # 对齐期间长时间没车道 → 已按保护停车，给一次明确提示（不盲目前冲）
+                                # 探路窗口用完还没看到车道 → 明确说清楚，不再盲目往前拱
                                 if lane_ok:
-                                    no_lane_since = None
+                                    acquire_since = None      # 找到线了，探路窗口结束
                                     hinted_no_lane = False
-                                else:
-                                    if no_lane_since is None:
-                                        no_lane_since = now
-                                    elif (now - no_lane_since) > 3.0 and not hinted_no_lane:
-                                        hinted_no_lane = True
-                                        print("[BENCH] ⚠️ 连续 3s 没有有效车道 → 已按保护停车。"
-                                              "可重新摆放车辆 / 调 --target-x / 检查白线是否在视野内与光照")
+                                elif (not hinted_no_lane and acquire_since is not None
+                                      and (now - acquire_since) > args.acquire_s):
+                                    hinted_no_lane = True
+                                    print(f"[BENCH] ⚠️ 发车后 {args.acquire_s:.0f}s 探路（低速往前找线）"
+                                          "仍没有有效车道 → 已停车。这不是「该不该走」的问题，"
+                                          "是**扫线看不到线**：")
+                                    print("[BENCH]    1) 白线是否在画面里（用 --no-motor 看读数，"
+                                          "或跑 scripts/diag/lane_probe.py 看掩膜图）；"
+                                          "2) 光照/反光是否把白线淹了；3) LANE_ROI_TOP_RATIO 是否太低（只看了近处地面）")
 
                             d = decide(gs.blocked, seen_board, lane_ok, aligned,
                                        args.force_run, args.speed_us, args.start_us,
-                                       no_lane=args.no_lane)
+                                       no_lane=args.no_lane,
+                                       acquire=(not lane_ok and acquire_since is not None
+                                                and (now - acquire_since) <= args.acquire_s))
 
                             # ---- 跑偏保护：在有动力的状态下持续大误差 → 停车并给诊断 ----
                             if d.out_us > NEUTRAL_US and error > DIVERGENCE_PX:

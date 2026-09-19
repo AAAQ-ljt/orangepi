@@ -136,6 +136,24 @@ def test_driving_off_course():
     assert not driving_off_course(120.0, 1575.0, since=None, now=9.0)
 
 
+# ------------------------------------------------------- 起步探路（防"看到车道才敢动"死锁）
+def test_acquire_creep_without_lane():
+    """发车后允许**低速探路找线**：车停在起点时下摄可能看不到白线，若这时也要求"有车道"，
+    车会永远动不了（2026-09-16 实测：电调全程 1500us 一次没动）。"""
+    d = _d(lane_ok=False, aligned=False, acquire=True)
+    assert d.out_us == START_US_DEFAULT and d.phase == "align", d
+    # 探路窗口之外 / 没见过板 → 一律不动（探路绝不放宽发车条件）
+    assert _d(lane_ok=False, aligned=False, acquire=False).out_us == NEUTRAL_US
+    assert _d(lane_ok=False, aligned=False, acquire=True, seen_board=False).out_us == NEUTRAL_US
+    assert _d(lane_ok=False, aligned=False, acquire=True, blocked=True).out_us == NEUTRAL_US
+
+
+def test_acquire_does_not_override_force_run():
+    """--force-run（台架逃生门）优先级仍高于探路逻辑。"""
+    d = _d(lane_ok=False, aligned=True, force_run=True, acquire=True)
+    assert d.out_us == SPEED_US_DEFAULT and d.phase == "track"
+
+
 if __name__ == "__main__":
     test_never_runs_without_board()
     test_board_stops()
@@ -149,6 +167,8 @@ if __name__ == "__main__":
     test_auto_target_rejects_unstable_or_absurd()
     test_align_verdict_detects_direction()
     test_driving_off_course()
+    test_acquire_creep_without_lane()
+    test_acquire_does_not_override_force_run()
     test_bench_common_exposes_safety_api()
     test_restore_is_idempotent()
     print("test_bench_logic: all passed")

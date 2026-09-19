@@ -205,6 +205,87 @@ def analyze_frame(frame: np.ndarray, name: str, out_dir: str | None = None, verb
     return ok, text, _rows
 
 
+def sweep_tilt(camera: int, tilts=None, frames: int = 3, step_s: float = 1.2) -> int:
+    """**自动扫云台仰角，逐档给扫线打分**（解决"人猜角度猜不中"）。
+
+    只动云台（CH3），电调始终保持中位 1500us —— 车不会动。
+    对每个角度：等云台到位 → 抓 frames 帧 → 报告 conf / 左右跟踪行数 / 配对行数，
+    最后按分数排序给出**建议写进 config/site.yaml 的巡线仰角**。
+    """
+    from control.driver import Driver
+    from scripts.bench_common import MotorSession, install_signal_guard, restore_remote_stage
+    from vision.camera_guard import camera_exclusive, open_camera
+
+    if tilts is None:
+        # 从"最朝前"到"最朝下"都试一遍；两边的机械行程都覆盖，避免搞不清正负方向
+        tilts = [90, 105, 75, 120, 60, 135, 45, 140, 40]
+    tilts = [t for t in tilts if settings.GIMBAL_TILT_MIN <= t <= settings.GIMBAL_TILT_MAX]
+
+    state = {"stopped": False, "driver": None, "restored": False, "used_motor": True}
+    install_signal_guard(state)
+    results = []
+    print("[SWEEP] 只动云台（电调保持中位，车不会动）；每档抓 %d 帧" % frames)
+    try:
+        with MotorSession(state, enabled=True, speed_us_max=settings.ESC_CREEP_US) as pca:
+            with camera_exclusive():
+                cap = open_camera(camera, settings.IMG_W, settings.IMG_H)
+                if cap is None:
+                    return 1
+                try:
+                    for tilt in tilts:
+                        pca.set_tilt_angle(tilt)
+                        time.sleep(step_s)                     # 等云台停稳
+                        for _ in range(4):                     # 丢掉到位瞬间的旧帧
+                            cap.read()
+                        best_conf, rows = 0.0, (0, 0)
+                        for _ in range(frames):
+                            ok, frame = cap.read()
+                            if not ok or frame is None:
+                                continue
+                            mask, (y0, y1) = white_mask(frame)
+                            L = trace_boundary(mask, y1, y0, "left")
+                            R = trace_boundary(mask, y1, y0, "right")
+                            obs = LaneScanner().scan(frame)
+                            if obs.confidence >= best_conf:
+                                best_conf, rows = obs.confidence, (len(L), len(R))
+                        results.append((best_conf, tilt, rows))
+                        mark = "✅" if best_conf >= 0.4 else ("~" if best_conf >= 0.2 else " ")
+                        print(f"[SWEEP]   tilt={tilt:3d}°  conf={best_conf:.2f}  "
+                              f"左{rows[0]:3d}行 右{rows[1]:3d}行  {mark}")
+                finally:
+                    # 扫完把云台回中位：推流画面立刻恢复正常朝向，别把车留在"对着地面"的状态
+                    try:
+                        pca.set_tilt_angle(settings.GIMBAL_TILT_CENTER)
+                        pca.set_pan_angle(settings.GIMBAL_PAN_CENTER)
+                        time.sleep(step_s)
+                        print(f"[SWEEP] 云台已回到中位（tilt={settings.GIMBAL_TILT_CENTER}°，"
+                              f"推流画面恢复正常朝向）")
+                    except Exception as exc:
+                        print(f"[SWEEP] ⚠️ 云台回中位失败：{exc}")
+                    cap.release()
+    finally:
+        restore_remote_stage(state, "扫角度结束")
+
+    if not results:
+        print("[SWEEP] 没有结果")
+        return 1
+    results.sort(reverse=True)
+    best_conf, best_tilt, rows = results[0]
+    print("")
+    print("[SWEEP] ===== 结果（按 conf 排序）=====")
+    for conf, tilt, rows in results:
+        print(f"[SWEEP]   tilt={tilt:3d}°  conf={conf:.2f}  左{rows[0]}行 右{rows[1]}行")
+    if best_conf >= 0.4:
+        print(f"[SWEEP] ✅ 建议巡线仰角 = {best_tilt}°（conf={best_conf:.2f}）")
+        print(f"[SWEEP]    写入方式（之后所有程序自动读）：")
+        print(f"[SWEEP]    echo 'gimbal_tilt_lane: {best_tilt}' >> /root/dev/config/site.yaml")
+        print(f"[SWEEP]    或由 AI/人 直接把 config/site.yaml 的 target_x 一起更新")
+    else:
+        print(f"[SWEEP] ⚠️ 最好的也只有 conf={best_conf:.2f}（<0.4）——这一路摄像头/这个位置还是不行，"
+              f"换 --camera 0/2 再扫一次，或把车摆到正常赛道上再扫")
+    return 0
+
+
 def live_view(camera: int, quiet: bool = False) -> int:
     """实时预览（需要 X11；本车目前没装 X 服务器，用浏览器看图传 + 下面的数字模式即可）。
 
@@ -255,13 +336,30 @@ def main() -> int:
     ap.add_argument("--analyze", default="", help="只分析已有图片（本地跑，不需要摄像头）")
     ap.add_argument("--show", action="store_true",
                     help="实时预览窗口（需要 X11；本车没装 X 服务器，用浏览器看图传 + 本脚本的数字/叠加图即可）")
+    ap.add_argument("--sweep-tilt", action="store_true",
+                    help="自动扫云台仰角并逐档给扫线打分（只动云台，车不会动；用来找巡线视角）")
+    ap.add_argument("--tilt", type=float, default=None,
+                    help="先把云台设到这个仰角再分析（需要配合 --frames；只动云台）")
+    ap.add_argument("--tilts", default="",
+                    help="--sweep-tilt 的角度列表，逗号分隔（默认 90,105,75,120,60,135,45,140,40）")
     ap.add_argument("--save-annotated", action="store_true",
                     help="离线分析时也输出叠加图（绿=判为线，红=被形状过滤丢弃，黄=中心，品红=target_x）")
     ap.add_argument("--quiet", action="store_true", help="只存图不打印明细")
+    ap.add_argument("--allow-motion", action="store_true",
+                    help="允许动云台舵机（--sweep-tilt/--tilt 需要；电调始终中位，车不会走）")
     args = ap.parse_args()
 
     if args.show:
         return live_view(args.camera, quiet=args.quiet)
+
+    if args.sweep_tilt or args.tilt is not None:
+        if not args.allow_motion:
+            print("[PROBE] 这个模式会动云台舵机（电调保持中位、车不会走），请加 --allow-motion 确认")
+            return 2
+        tilts = ([float(args.tilt)] if args.tilt is not None else
+                 ([float(x) for x in args.tilts.split(",") if x.strip()] if args.tilts else None))
+        return sweep_tilt(args.camera, tilts=tilts,
+                          frames=max(1, args.frames if args.tilt is not None else 3))
 
     if args.analyze:
         files = sorted(f for f in os.listdir(args.analyze)

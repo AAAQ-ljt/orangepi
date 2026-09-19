@@ -272,6 +272,12 @@ def main() -> int:
           f"对齐容差={args.align_tol:.0f}px  电机={'开' if use_motor else '关(只跑视觉/决策)'}"
           f"{'  不循迹(--no-lane)' if args.no_lane else ''}")
     print("[BENCH] 规则：没见板→中位；见板→中位；板移开→低速对齐→循迹；再见板→立即停")
+    if args.no_lane:
+        print(f"[BENCH] 直行档：舵机固定在中位 {settings.SERVO_CENTER_ANGLE:.0f}°（不循迹、不修正）。"
+              f"若在赛道上直行往一边跑偏，把这个中位微调写进 config/site.yaml：")
+        print("[BENCH]    servo_center_angle: %d      # 车往【左】偏 → 调大 1~2°；往【右】偏 → 调小"
+              % int(settings.SERVO_CENTER_ANGLE))
+        print("[BENCH]   （改完重跑本命令看效果；这是「直线行驶不压线」的关键一档）")
     if not args.no_lane:
         from config import site as _site
         applied = _site.applied()

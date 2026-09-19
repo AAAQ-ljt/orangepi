@@ -118,6 +118,35 @@ LANE_TRACK_SEED_STEP = 8        # 多种子扫描的取样步长（越大越快�
 LANE_PAIR_W_MIN_PX = 110
 LANE_PAIR_W_MAX_PX = 620
 
+# ---------------------------------------------------------------- Hough 循线（vision/lane_hough.py）
+# 2026-09-19 起的**主力通道**：Canny 边缘 + 霍夫直线，**不依赖颜色**。
+# 依据：HSV 白线方案在打印跑道上被反光打败（白线 S 与红底重叠、反光比线亮 40 级），
+# 而线的本质是"明暗交界的直线"——Canny 找的是梯度，反光斑内部没有边缘、形不成直线。
+# 逻辑移植自 2025 届实车跑通的 oldCode picture()（F:/smart_car/smart-car/oldCode）。
+HOUGH_ROI_TOP_RATIO = 0.50       # Canny/Hough 作用的 ROI 上沿（占比画面高）
+HOUGH_ROI_BOTTOM_RATIO = 0.90    # ROI 下沿（留出车头）
+HOUGH_BAND_TOP_RATIO = 0.55      # 误差带：对这段行的 (左线x+右线x)/2 求平均（oldCode 用 130~230/240）
+HOUGH_BAND_BOTTOM_RATIO = 0.96   # 误差带下沿可以超出 ROI——直线方程允许外推
+HOUGH_CANNY_LO = 60              # Canny 低阈值初值（oldCode MIN_YU）【现场可调】
+HOUGH_CANNY_HI = 140             # Canny 高阈值初值（oldCode MAX_YU）【现场可调】
+HOUGH_CANNY_LO_LIMIT = (30, 150) # 自适应钳位（oldCode 没钳位会漂到 0/255，这里补上）
+HOUGH_CANNY_HI_LIMIT = (80, 240)
+HOUGH_EDGE_DENSITY_HI = 0.095    # ROI 边缘像素占比高于它 → 提阈值（画面太"吵"）
+HOUGH_EDGE_DENSITY_LO = 0.075    # 低于它 → 降阈值（线快看不见了）
+HOUGH_CANNY_STEP = (2, 4)        # 每次自适应的步长 (lo, hi)（oldCode 同款 2/4）
+HOUGH_RHO = 1                    # HoughLinesP 距离分辨率（像素）
+HOUGH_THETA_DEG = 3.0            # 角度分辨率（oldCode 0.05rad ≈ 2.9°）
+HOUGH_THRESH = 50                # 一条直线至少要多少个投票点
+HOUGH_MIN_LEN_PX = 60            # 线段最短长度（oldCode 30@320宽，等比放大）
+HOUGH_MAX_GAP_PX = 10            # 同一直线上允许的断缝（oldCode 5@320宽）
+HOUGH_K_ABS_MIN = 0.25           # 斜率窗口：|k| 低于它的是近水平线（斑马线/纸边），丢弃
+HOUGH_K_ABS_MAX = 2.0            # |k| 高于它的近垂直噪声，丢弃
+HOUGH_FULL_CONF_BASE = 0.8       # 左右都找到时的基础置信度（+0.03×支持线段数，封顶 1.0）
+HOUGH_SINGLE_SIDE_CONF = 0.35    # 单侧丢线（宽度先验兜底）时的置信度 → 仲裁层按降级处理（半油门）
+HOUGH_SINGLE_HALF_W_DEFAULT_PX = 240  # 单侧兜底用的半宽默认值（无历史帧时）；有历史帧用实测配对宽度
+HOUGH_HOLD_FRAMES = 5            # 上一帧中心的有效期（帧）；过期后参考中心回到图像中心
+HOUGH_CENTER_JUMP_PX = 160       # 有效期内单帧中心最大跳变（≈40 误差单位；防单帧误配拉飞中心）
+
 # 转向符号：+1 = 角度增大 → 右转；实车若相反就改成 -1（可写进 config/site.yaml，不必改代码）
 STEER_SIGN = 1
 
@@ -152,3 +181,12 @@ ARBITER_HOLD_THROTTLE_SCALE = 0.5   # 降级期间的油门比例
 CRUISE_THROTTLE = 100.0     # 常态巡线油门（百分比）
 CONE_THROTTLE_SCALE = 0.5   # 见到锥桶时的油门比例
 ZEBRA_THROTTLE_SCALE = 0.6  # 接近斑马线时的油门比例（P1-2 接入减速曲线前先用比例）
+
+# 误差自适应油门（oldCode Control_FollowTrail：误差小提速、误差大减速）
+# oldCode 用 +200/−300（±2~3%）这种小步幅；我们直接给油门百分比乘系数。
+# ⚠️ 调试期电调可用区间只有 1545~1600us（≈45%~100%），慢速系数别低于 0.6，
+#    否则一减速就掉进死区、车直接停住（被判"停止超 20s"）。
+LANE_ERR_FAST_UNITS = 4.0    # |误差| 低于它（≈16px）→ 提速（oldCode <5px@320宽 ≈ 4 单位）
+LANE_ERR_SLOW_UNITS = 12.0   # |误差| 高于它（≈48px）→ 减速（oldCode >15px@320宽）
+THROTTLE_FAST_SCALE = 1.0    # 提速档（调试期保持 1.0——1600us 已是上限，没有提速空间）
+THROTTLE_SLOW_SCALE = 0.85   # 减速档（弯道/大偏差时降功率保稳定）【现场可调】

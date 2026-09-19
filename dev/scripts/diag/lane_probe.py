@@ -157,6 +157,11 @@ def live_view(camera: int, quiet: bool = False) -> int:
     """
     from vision.camera_guard import camera_exclusive
 
+    if not os.environ.get("DISPLAY"):
+        print("[PROBE] 没有 DISPLAY：车机是无桌面环境，先 `bash x11.sh` 再跑 --show；"
+              "不需要看画面可以去掉 --show（只抓图分析）")
+        return 2
+
     print("[PROBE] 实时预览：把两条白线调到画面下半部、左右对称（V 字），按 q 退出")
     with camera_exclusive():
         cap = cv2.VideoCapture(camera, cv2.CAP_V4L)

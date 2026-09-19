@@ -90,6 +90,20 @@ def test_thin_line_survives_shape_filter():
     assert mask.sum() > 0, "厚度 5px 的细线被形状过滤误杀"
 
 
+def test_thick_near_field_line_is_kept():
+    """**前视浅角度下白线的投影会变粗** —— 粗线仍然是线，不能被"厚度 ≤ 18px"那种绝对阈值误杀。
+
+    2026-09-16 实车：绝对厚度阈值把真线一起滤掉 → 置信度 0.6→0.1、车"看不到车道"完全不动。
+    所以判据必须是尺度无关的**细长比**。
+    """
+    from vision.lane_scan import line_like
+    assert line_like(40, 200, 40 * 200), "细长比 5 的粗线应判为线"
+    assert line_like(12, 300, 12 * 300), "细长比 25 的细线应判为线"
+    assert not line_like(90, 70, 6300), "块状反光（细长比 1.3）应丢弃"
+    assert not line_like(640, 250, 160000), "整片亮区应丢弃"
+    assert not line_like(3, 3, 9), "太小的一坨应丢弃"
+
+
 def test_blank_track_has_zero_confidence():
     frame = np.zeros((H, W, 3), dtype=np.uint8)
     frame[:, :, 2] = 130
@@ -120,6 +134,7 @@ if __name__ == "__main__":
     test_wide_white_region_is_not_a_lane_line()
     test_glare_blob_is_rejected()
     test_thin_line_survives_shape_filter()
+    test_thick_near_field_line_is_kept()
     test_blank_track_has_zero_confidence()
     test_noisy_white_blobs_do_not_dominate()
     print("test_lane_scan: all passed")

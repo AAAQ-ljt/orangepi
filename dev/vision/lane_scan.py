@@ -30,16 +30,54 @@ class LaneObservation:
     source: str = "scan"
 
 
+def line_like(bw: int, bh: int, area: int,
+              min_len: int = None, min_elong: float = None) -> bool:
+    """这个连通域"像不像一条车道线"（纯函数，便于单测）。
+
+    线 = **细长**：长度（bbox 长边）远大于等效厚度（面积 / 长度）。
+    反光斑 = **块状**：椭圆/团块的长宽比接近 1，细长比只有 1~3。
+
+    2026-09-16 教训：这里原先写的是"厚度 ≤ 18px"的绝对阈值 —— 打印跑道上是能压掉反光，
+    但白线在**前视浅角度**下（画面边缘、近处）投影出来的厚度本来就超过 18px，
+    于是真线被一起滤掉 → 置信度从 0.6 掉到 0.1、车"看不到车道"完全不动。
+    绝对厚度不可靠，**细长比（尺度无关）**才可靠。
+    """
+    length = max(bw, bh)
+    if length < (settings.LANE_LINE_MIN_LEN_PX if min_len is None else min_len):
+        return False
+    thickness = area / float(max(1, length))
+    if thickness > settings.LANE_LINE_MAX_THICK_PX:
+        return False        # 次级保险：整片亮区（不是线）靠它挡住
+    elong = length / max(1e-6, thickness)
+    return elong >= (settings.LANE_LINE_MIN_ELONG if min_elong is None else min_elong)
+
+
+def shape_filter(mask: np.ndarray) -> np.ndarray:
+    """只保留细长（像线）的连通域，去掉块状亮区（地面反光/纸边）。"""
+    n, labels, stats, _cent = cv2.connectedComponentsWithStats(mask, connectivity=8)
+    if n <= 1:
+        return mask
+    keep = np.zeros_like(mask)
+    for i in range(1, n):
+        _x, _y, bw, bh, area = stats[i]
+        if line_like(int(bw), int(bh), int(area)):
+            keep[labels == i] = 255
+    return keep
+
+
 def white_mask(frame_bgr: np.ndarray,
                roi_top_ratio: float = None,
-               roi_bottom_margin: int = None) -> Tuple[np.ndarray, Tuple[int, int]]:
+               roi_bottom_margin: int = None,
+               apply_shape_filter: bool = True) -> Tuple[np.ndarray, Tuple[int, int]]:
     """返回 (整幅二值掩膜, (roi_y0, roi_y1))。
 
     白线判据：饱和度低 + 亮度高；亮度阈值**自适应**：
-        thr = max(V_MIN, 中位数 + SPLIT × (95分位 − 中位数))
+        thr = max(V_MIN, 中位数 + SPLIT × (95分位 − 中位数)）
     也就是在"地面/纸面底色"与"更亮的白线"之间自动切一刀。
     （旧公式 max(V_MIN, 0.75×V95) 在地板与打印白线只差 20~30 级亮度时会把整片地板判成白，
      详见 config/settings.py 的 LANE_WHITE_V_SPLIT 注释。）
+
+    `apply_shape_filter=False` 时只做颜色判据（诊断工具要看"过滤前长什么样"）。
     """
     top_ratio = settings.LANE_ROI_TOP_RATIO if roi_top_ratio is None else roi_top_ratio
     bottom_margin = (settings.LANE_ROI_BOTTOM_MARGIN
@@ -69,22 +107,99 @@ def white_mask(frame_bgr: np.ndarray,
     kernel = np.ones((3, 3), np.uint8)
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=1)
 
-    # 形状过滤：只留"细长"的连通域。
-    # 2026-09-16 实车教训：打印跑道表面**反光/高光**是低饱和亮区，颜色上和白线没区别，
-    # 掩膜里会出现成片块状物 → 扫线锁到反光上，中心乱跳。线是细长的，反光是块状的：
-    #     长度 = bbox 长边；厚度 = 面积 / 长度
-    # 厚度 ≤ LANE_LINE_MAX_THICK_PX 且长度 ≥ LANE_LINE_MIN_LEN_PX 才当线。
-    n, labels, stats, _cent = cv2.connectedComponentsWithStats(mask, connectivity=8)
-    if n > 1:
-        keep = np.zeros_like(mask)
-        for i in range(1, n):
-            x, y, bw, bh, area = stats[i]
-            length = max(bw, bh)
-            if length >= settings.LANE_LINE_MIN_LEN_PX and \
-                    (area / float(length)) <= settings.LANE_LINE_MAX_THICK_PX:
-                keep[labels == i] = 255
-        mask = keep
+    if apply_shape_filter:
+        mask = shape_filter(mask)
     return mask, (roi_y0, roi_y1)
+
+
+def _runs(row: np.ndarray, margin: int) -> list:
+    """把一行里的白色像素切成连续段，返回 [(起, 止), ...]（去掉贴边伪影）。"""
+    xs = np.flatnonzero(row)
+    if xs.size == 0:
+        return []
+    xs = xs[(xs >= margin) & (xs < row.size - margin)]
+    if xs.size == 0:
+        return []
+    runs = []
+    start = prev = int(xs[0])
+    for x in xs[1:]:
+        x = int(x)
+        if x != prev + 1:
+            runs.append((start, prev))
+            start = x
+        prev = x
+    runs.append((start, prev))
+    return runs
+
+
+def trace_boundary(mask: np.ndarray, y_bottom: int, y_top: int, side: str,
+                   margin: int = None, max_line_w: int = None,
+                   max_jump: int = None, max_miss: int = None,
+                   width_tol: float = None) -> list:
+    """从下往上**逐行连续跟踪**一侧车道边界，返回 [(y, 内边缘x, 段宽), ...]。
+
+    为什么不能"每行独立地从画面中心往外找第一个白点"（2026-09-16 实车画面实测）：
+    这条打印跑道上白线在赛道**最外侧**（贴着画面边缘），而塑料膜褶皱/反光在画面**中间**——
+    独立逐行找的结果是"每一行都锁在中间那团反光上"，中心乱跳、车歪歪扭扭。
+    连续跟踪天然区分两者：**线是连续、平滑、宽度稳定的**；反光一团一团、宽度忽大忽小、
+    相邻行之间对不上。
+
+    每步要同时满足：
+    - 内边缘相对上一行位移 ≤ `max_jump`（透视变化是渐变的）；
+    - 段宽与已跟踪宽度中位数之差 ≤ `width_tol × 中位数`（反光宽度不稳定）；
+    - 允许连续 `max_miss` 行缺失（线被光斑/遮挡打断），超过即判跟丢。
+    """
+    margin = settings.LANE_EDGE_MARGIN if margin is None else margin
+    max_line_w = settings.LANE_MAX_LINE_W_PX if max_line_w is None else max_line_w
+    max_jump = settings.LANE_TRACK_MAX_JUMP_PX if max_jump is None else max_jump
+    max_miss = settings.LANE_TRACK_MAX_MISS if max_miss is None else max_miss
+    width_tol = settings.LANE_TRACK_WIDTH_TOL if width_tol is None else width_tol
+    center = mask.shape[1] // 2
+
+    path = []
+    cur_x = None
+    widths = []
+    misses = 0
+    for y in range(y_bottom - 1, y_top - 1, -1):
+        cands = []
+        for a, b in _runs(mask[y], margin):
+            width = b - a + 1
+            if width > max_line_w:
+                continue
+            inner = b if side == "left" else a          # 内边缘 = 朝画面中心的那一端
+            if side == "left" and inner >= center:
+                continue
+            if side == "right" and inner <= center:
+                continue
+            cands.append((inner, width))
+        if not cands:
+            misses += 1
+            if path and misses > max_miss:
+                break
+            continue
+
+        if cur_x is None:
+            inner, width = min(cands, key=lambda c: abs(c[0] - center))   # 种子：离中心最近
+        else:
+            near = [(x, wd) for (x, wd) in cands if abs(x - cur_x) <= max_jump]
+            if not near:
+                misses += 1
+                if misses > max_miss:
+                    break
+                continue
+            med = float(np.median(widths)) if widths else None
+            inner, width = min(near, key=lambda c: abs(c[0] - cur_x))
+            if med is not None and abs(width - med) > width_tol * med:
+                misses += 1          # 宽度突变 = 多半是反光/地面，别让它带偏后续跟踪
+                if misses > max_miss:
+                    break
+                continue
+        cur_x = inner
+        misses = 0
+        widths.append(width)
+        path.append((y, inner, width))
+    path.reverse()                        # 自上而下（行号递增）
+    return path
 
 
 class LaneScanner:
@@ -109,69 +224,6 @@ class LaneScanner:
         self.max_error_px = float(settings.LANE_MAX_ERROR_PX if max_error_px is None else max_error_px)
         self.min_valid_rows = int(settings.LANE_MIN_VALID_ROWS if min_valid_rows is None else min_valid_rows)
 
-    # ------------------------------------------------------------------ 内部
-    @staticmethod
-    def _run_width(row: np.ndarray, idx: int) -> int:
-        """idx 所在的白色连通段宽度（像素）。"""
-        l = idx
-        while l > 0 and row[l - 1]:
-            l -= 1
-        r = idx
-        w = row.size
-        while r < w - 1 and row[r + 1]:
-            r += 1
-        return r - l + 1
-
-    @classmethod
-    def _pick(cls, row: np.ndarray, candidates: np.ndarray, from_center: bool,
-              max_line_w: int) -> Optional[int]:
-        """从候选中挑一个"像车道线"的：**从靠近画面中心的一侧往外找**，
-        取第一个宽度不超过 max_line_w 的连通段。
-
-        为什么要限宽（2026-09-16 实车教训）：实验室地面/纸边的亮区也会被判成"白"，
-        它们是大片连通区（几十~上百像素宽），而车道线只有几~十几像素宽。
-        不限宽的话，扫线会锁到大片亮区上，中心值乱跳 → 车左右猛打。
-        """
-        order = candidates[::-1] if from_center else candidates
-        for idx in order:
-            if cls._run_width(row, int(idx)) <= max_line_w:
-                return int(idx)
-        return None
-
-    @staticmethod
-    def _row_boundaries(row: np.ndarray, center0: int,
-                        margin: int = settings.LANE_EDGE_MARGIN,
-                        max_line_w: int = settings.LANE_MAX_LINE_W_PX) -> Tuple[Optional[int], Optional[int]]:
-        """在一行里找左右边界。
-
-        `center0` 是期望中心；若该像素本身就是白线（车压线），先跳过它所在的连通段，
-        避免把"车下的白线"当成车道边界。
-        距画面边缘 `margin` 像素内的白点忽略——那里出现的通常是画面边框/远处墙体等伪影。
-        超过 `max_line_w` 的白色连通段不算车道线（那是地面/纸边的亮区，见 _pick 注释）。
-        """
-        xs = np.flatnonzero(row)
-        if xs.size == 0:
-            return None, None
-        xs = xs[(xs >= margin) & (xs < row.size - margin)]
-        if xs.size == 0:
-            return None, None
-
-        left_limit = center0 - 1
-        right_start = center0 + 1
-        if row[center0]:
-            l = center0
-            while l > 0 and row[l - 1]:
-                l -= 1
-            r = center0
-            w = row.size
-            while r < w - 1 and row[r + 1]:
-                r += 1
-            left_limit = l - 1
-            right_start = r + 1
-
-        left = LaneScanner._pick(row, xs[xs <= left_limit], from_center=True, max_line_w=max_line_w)
-        right = LaneScanner._pick(row, xs[xs >= right_start], from_center=True, max_line_w=max_line_w)
-        return left, right
 
     # ------------------------------------------------------------------ 接口
     def scan(self, frame_bgr: np.ndarray) -> LaneObservation:
@@ -184,11 +236,14 @@ class LaneScanner:
         """
         h, w = frame_bgr.shape[:2]
         mask, (roi_y0, roi_y1) = white_mask(frame_bgr, self.roi_top_ratio, self.roi_bottom_margin)
-        center0 = int(min(max(self.target_x, 0), w - 1))
 
         rows = list(range(roi_y1 - 1, roi_y0, -self.row_step))
         if not rows:
             return LaneObservation(center_x=self.target_x, confidence=0.0, source="scan")
+
+        # 连续跟踪左右边界（不是"每行独立找"——那会锁到画面中间的地面反光上）
+        left_map = {y: x for y, x, _ in trace_boundary(mask, roi_y1, roi_y0, "left")}
+        right_map = {y: x for y, x, _ in trace_boundary(mask, roi_y1, roi_y0, "right")}
 
         span = max(1, roi_y1 - roi_y0)
         weighted_sum = 0.0
@@ -199,7 +254,8 @@ class LaneScanner:
         full_rows = partial_rows = 0
 
         for y in rows:
-            left, right = self._row_boundaries(mask[y], center0)
+            left = left_map.get(y)
+            right = right_map.get(y)
             if left is None and right is None:
                 continue
             if left is None or right is None:

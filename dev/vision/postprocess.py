@@ -5,7 +5,7 @@
 """
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 import numpy as np
 
@@ -57,8 +57,14 @@ def _find_detection_tensor(outputs: List[np.ndarray]) -> np.ndarray:
 
 def parse_elements(outputs: List[np.ndarray], profile: ModelProfile,
                    conf_threshold: Optional[float] = None,
-                   iou_threshold: float = IOU_THRESHOLD) -> List[Element]:
-    """解码 + 逐类 NMS → 元素列表（统一语义）。"""
+                   iou_threshold: float = IOU_THRESHOLD,
+                   box_transform: Optional[Callable[[np.ndarray], np.ndarray]] = None) -> List[Element]:
+    """解码 + 逐类 NMS → 元素列表（统一语义）。
+
+    `box_transform`：把「模型坐标系」的框还原成「原图坐标系」的函数，
+    传 `RKNNYoloDet.restore` 即可（模型输入尺寸与摄像头分辨率不一致、走了 letterbox 时必须传，
+    否则 y 会系统性偏差——历史上把 y 报大了 33%）。
+    """
     det = _find_detection_tensor(outputs)[0]        # (C, N)
     nc = profile.num_classes
     if det.shape[0] < 4 + nc:
@@ -79,7 +85,10 @@ def parse_elements(outputs: List[np.ndarray], profile: ModelProfile,
 
     if not picked_boxes:
         return []
-    return elements_from_boxes(np.asarray(picked_boxes),
+    picked = np.asarray(picked_boxes, dtype=np.float32)
+    if box_transform is not None:
+        picked = np.asarray(box_transform(picked), dtype=np.float32)
+    return elements_from_boxes(picked,
                                np.asarray(picked_scores, dtype=float).reshape(-1, 2),
                                profile)
 
@@ -87,7 +96,9 @@ def parse_elements(outputs: List[np.ndarray], profile: ModelProfile,
 def postprocess(outputs: List[np.ndarray],
                 profile: Optional[ModelProfile] = None,
                 conf_threshold: Optional[float] = None,
-                iou_threshold: float = IOU_THRESHOLD) -> List[Element]:
+                iou_threshold: float = IOU_THRESHOLD,
+                box_transform: Optional[Callable[[np.ndarray], np.ndarray]] = None) -> List[Element]:
     """兼容旧调用名的入口：不给 profile 就用默认（legacy，上一届模型）。"""
     prof = profile if profile is not None else load_profile()
-    return parse_elements(outputs, prof, conf_threshold=conf_threshold, iou_threshold=iou_threshold)
+    return parse_elements(outputs, prof, conf_threshold=conf_threshold,
+                          iou_threshold=iou_threshold, box_transform=box_transform)

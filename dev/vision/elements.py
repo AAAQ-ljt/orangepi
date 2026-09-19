@@ -72,11 +72,28 @@ class Element:
         }
 
 
+def as_hw(value) -> Tuple[int, int]:
+    """把各种写法的 imgsz 统一成 (h, w)。
+
+    yaml 里人手写容易写成 `640`（方形）、`[480, 640]`（h,w）、`[640]`，
+    检测器要的是 (h, w)，所以在这里收敛一次：
+        as_hw(640) -> (640, 640)
+        as_hw([480, 640]) -> (480, 640)
+        as_hw([640]) -> (640, 640)
+    """
+    if isinstance(value, int):
+        return int(value), int(value)
+    seq = list(value)
+    if len(seq) == 1:
+        return int(seq[0]), int(seq[0])
+    return int(seq[0]), int(seq[1])
+
+
 @dataclass
 class ModelProfile:
     name: str
     task: str                 # detect / segment
-    imgsz: int
+    imgsz: Tuple[int, int]    # (h, w)，统一由 as_hw() 规范化
     conf: float
     names: Dict[int, str]     # 类 id → 模型类名
     mapping: Dict[str, str]   # 模型类名 → 统一元素名（none 表示不使用）
@@ -105,7 +122,7 @@ def load_profile(name: str = DEFAULT_PROFILE, path: str = PROFILE_FILE) -> Model
             return ModelProfile(
                 name=name,
                 task=str(node.get("task", "detect")),
-                imgsz=int(node.get("imgsz", 640)),
+                imgsz=as_hw(node.get("imgsz", 640)),
                 conf=float(node.get("conf", 0.25)),
                 names={int(k): str(v) for k, v in (node.get("names") or {}).items()},
                 mapping={str(k): str(v) for k, v in (node.get("map") or {}).items()},
@@ -119,7 +136,7 @@ def _builtin_profile(name: str) -> ModelProfile:
     """内置兜底：即使 yaml 丢了也能跑（与 config/model_profile.yaml 保持一致）。"""
     if name == "smartcar2026":
         return ModelProfile(
-            name="smartcar2026", task="detect", imgsz=640, conf=0.25,
+            name="smartcar2026", task="detect", imgsz=(480, 640), conf=0.25,
             names={0: "blue_board", 1: "crosswalk", 2: "traffic_light_off",
                    3: "traffic_light_red", 4: "traffic_light_green",
                    5: "obstacle_cone_blue", 6: "obstacle_cone_red", 7: "parking_area"},
@@ -129,7 +146,7 @@ def _builtin_profile(name: str) -> ModelProfile:
                      "obstacle_cone_red": "cone", "parking_area": "parking_area"},
         )
     return ModelProfile(
-        name="legacy", task="segment", imgsz=640, conf=0.25,
+        name="legacy", task="segment", imgsz=(640, 640), conf=0.25,
         names={0: "lane_change_sign_left", 1: "lane_change_sign_right",
                2: "left_lane", 3: "obstacle_cone_blue", 4: "obstacle_cone_yellow",
                5: "parking_sign_A", 6: "parking_sign_B", 7: "right_lane",

@@ -125,6 +125,7 @@ def main() -> int:
                     if model is not None:
                         ti = time.time()
                         elements = postprocess(model.infer(model.preprocess(frame)), profile,
+                                                   box_transform=model.restore,
                                                conf_threshold=args.conf)
                         infer_ms = (time.time() - ti) * 1000.0
                     loop_ms = (time.time() - t0) * 1000.0

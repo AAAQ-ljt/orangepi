@@ -131,6 +131,7 @@ def main() -> int:
             model = RKNNYoloSeg(args.model)
             if model.load():
                 elements = postprocess(model.infer(model.preprocess(frame)), profile,
+                                                   box_transform=model.restore,
                                        conf_threshold=args.conf)
                 print(f"[VISION] profile={profile.name} 元素 {len(elements)} 个: "
                       f"{[f'{e.name}({e.color}) {e.conf:.2f}' for e in elements]}")
@@ -191,7 +192,8 @@ def main() -> int:
                         frames_every = max(1, args.detect_every)
                         if frames % frames_every == 0:
                             elements = postprocess(model.infer(model.preprocess(frame)), profile,
-                                                   conf_threshold=args.conf)
+                                                   conf_threshold=args.conf,
+                                                   box_transform=model.restore)
                             last_elements = elements
                     elif on_gate_camera:
                         elements = []

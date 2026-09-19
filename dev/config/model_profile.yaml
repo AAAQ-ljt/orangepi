@@ -13,7 +13,7 @@
 profiles:
   legacy:
     task: segment
-    imgsz: 640
+    imgsz: [640, 640]     # (h, w)
     conf: 0.25
     names:
       0: lane_change_sign_left
@@ -38,7 +38,7 @@ profiles:
 
   smartcar2026:
     task: detect
-    imgsz: 640
+    imgsz: [480, 640]     # (h, w)：与摄像头原生分辨率一致，模型零缩放
     conf: 0.25
     names:
       0: blue_board

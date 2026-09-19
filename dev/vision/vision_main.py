@@ -25,6 +25,7 @@ from config import settings
 from common.protocol import PerceptionMessage
 from vision.camera_guard import camera_exclusive
 from vision.elements import load_profile
+from vision.lane_hough import HoughLaneScanner
 from vision.lane_scan import LaneScanner
 from vision.postprocess import postprocess
 from vision.start_gate import StartGate
@@ -102,13 +103,17 @@ def main() -> int:
     parser.add_argument("--detect-every", type=int, default=3,
                         help="每 N 帧做一次元素检测（扫线仍然每帧跑）")
     parser.add_argument("--no-lane", action="store_true", help="关闭扫线（仅用于对比测试）")
+    parser.add_argument("--lane-method", default="hough", choices=["hough", "track"],
+                        help="循线通道：hough=Canny+霍夫直线（默认，不依赖颜色，抗反光）；"
+                             "track=HSV白线逐行跟踪（被反光打败时的旧通道，留作对比）")
     parser.add_argument("--no-start-gate", action="store_true", help="关闭发车检测（仅用于调试）")
     parser.add_argument("--test-image", default=None, help="只测试单张图片后退出")
     parser.add_argument("--status-file", default=settings.STATUS_FILE)
     args = parser.parse_args()
 
     profile = load_profile(args.profile)
-    scanner = None if args.no_lane else LaneScanner()
+    scanner = None if args.no_lane else (HoughLaneScanner() if args.lane_method == "hough"
+                                        else LaneScanner())
     gate = None if args.no_start_gate else StartGate()
     gate_camera = args.camera if args.gate_camera < 0 else args.gate_camera
 
@@ -128,7 +133,7 @@ def main() -> int:
                   f"蓝面积占比={st.metrics.area_ratio:.3f} 主导度={st.metrics.dominance:.1f}")
         if args.model:
             from vision.rknn_detector import RKNNYoloSeg
-            model = RKNNYoloSeg(args.model)
+            model = RKNNYoloSeg(args.model, profile.imgsz)
             if model.load():
                 elements = postprocess(model.infer(model.preprocess(frame)), profile,
                                                    box_transform=model.restore,
@@ -141,9 +146,9 @@ def main() -> int:
     # ---------------- 模型（可选） ----------------
     model = None
     if args.model:
-        print(f"[VISION] loading RKNN model: {args.model}  (profile={profile.name}, {profile.num_classes} 类)")
+        print(f"[VISION] loading RKNN model: {args.model}  (profile={profile.name}, {profile.num_classes} 类, 输入 {profile.imgsz[0]}x{profile.imgsz[1]})")
         from vision.rknn_detector import RKNNYoloSeg
-        model = RKNNYoloSeg(args.model)
+        model = RKNNYoloSeg(args.model, profile.imgsz)
         if not model.load():
             print("[VISION] model load failed; 继续以纯扫线模式运行")
             model = None

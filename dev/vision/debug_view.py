@@ -21,6 +21,7 @@ import numpy as np
 from config import settings
 from vision.camera_guard import camera_exclusive
 from vision.elements import load_profile
+from vision.lane_hough import HoughLaneScanner
 from vision.lane_scan import LaneScanner
 from vision.postprocess import postprocess
 from vision.start_gate import StartGate
@@ -78,18 +79,20 @@ def main() -> int:
     parser.add_argument("--width", type=int, default=settings.IMG_W)
     parser.add_argument("--height", type=int, default=settings.IMG_H)
     parser.add_argument("--conf", type=float, default=None)
+    parser.add_argument("--lane-method", default="hough", choices=["hough", "track"],
+                        help="循线通道：hough=Canny+霍夫（默认）/ track=HSV 白线跟踪")
     args = parser.parse_args()
 
     profile = load_profile(args.profile)
     model = None
     if args.model:
         from vision.rknn_detector import RKNNYoloSeg
-        model = RKNNYoloSeg(args.model)
+        model = RKNNYoloSeg(args.model, profile.imgsz)
         if not model.load():
             print("[DEBUG] model load failed")
             return 1
 
-    scanner = LaneScanner()
+    scanner = HoughLaneScanner() if args.lane_method == "hough" else LaneScanner()
     gate = StartGate(verbose=False)
     show_mask = True
     show_gate = True

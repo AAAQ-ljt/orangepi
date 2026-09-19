@@ -134,6 +134,15 @@ def load_profile(name: str = DEFAULT_PROFILE, path: str = PROFILE_FILE) -> Model
 
 def _builtin_profile(name: str) -> ModelProfile:
     """内置兜底：即使 yaml 丢了也能跑（与 config/model_profile.yaml 保持一致）。"""
+    if name == "car4cls":
+        # 4 类试验模型（smartcar5g v1-demo1）：先跑通链路用，不是最终方案。
+        # parkingLeft/Right 统一并入 parking_area，左右交由几何判定（设计如此）。
+        return ModelProfile(
+            name="car4cls", task="detect", imgsz=(480, 640), conf=0.25,
+            names={0: "coneBucket", 1: "crosswalk", 2: "parkingLeft", 3: "parkingRight"},
+            mapping={"coneBucket": "cone", "crosswalk": "zebra",
+                     "parkingLeft": "parking_area", "parkingRight": "parking_area"},
+        )
     if name == "smartcar2026":
         return ModelProfile(
             name="smartcar2026", task="detect", imgsz=(480, 640), conf=0.25,

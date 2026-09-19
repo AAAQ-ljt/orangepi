@@ -63,7 +63,7 @@ from config import settings
 from control.lane_arbiter import LaneArbiter
 from control.planner import Planner
 from scripts.bench_common import NEUTRAL_US, MotorSession, install_signal_guard
-from vision.camera_guard import camera_exclusive
+from vision.camera_guard import camera_exclusive, open_camera
 from vision.lane_scan import LaneScanner
 from vision.start_gate import StartGate
 
@@ -232,12 +232,8 @@ def main() -> int:
     if args.calibrate > 0:
         samples = []
         with camera_exclusive():
-            cap = cv2.VideoCapture(args.camera, cv2.CAP_V4L)
-            cap.set(cv2.CAP_PROP_FRAME_WIDTH, args.width)
-            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, args.height)
-            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-            if not cap.isOpened():
-                print("[BENCH] 摄像头打不开")
+            cap = open_camera(args.camera, args.width, args.height)
+            if cap is None:
                 return 1
             tries = 0
             while len(samples) < args.calibrate and tries < args.calibrate * 8:
@@ -308,12 +304,8 @@ def main() -> int:
                 print("[STEER-TEST]   · 角度大=左转  → 在 /root/dev/config/site.yaml 里写一行 steer_sign: -1")
                 return 0
             with camera_exclusive():
-                cap = cv2.VideoCapture(args.camera, cv2.CAP_V4L)
-                cap.set(cv2.CAP_PROP_FRAME_WIDTH, args.width)
-                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, args.height)
-                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-                if not cap.isOpened():
-                    print("[BENCH] 摄像头打不开")
+                cap = open_camera(args.camera, args.width, args.height)
+                if cap is None:
                     rc = 1
                 else:
                     t0 = last_t = time.time()

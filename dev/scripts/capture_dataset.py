@@ -17,17 +17,14 @@ from __future__ import annotations
 
 import argparse
 import os
-import subprocess
 import sys
 import time
 from datetime import datetime
 
 import cv2
 
-FFMPEG_SERVICES = [
-    "ffmpeg-stream.service",
-    "ffmpeg-stream-sub.service",
-]
+from vision.camera_guard import open_camera, start_ffmpeg, stop_ffmpeg
+
 DEFAULT_BASE_DIR = "."
 
 
@@ -51,17 +48,6 @@ def resolve_output_dir(args: argparse.Namespace) -> str:
             )
         return os.path.abspath(os.path.join(args.base, name))
     raise ValueError("请用 --folder 指定物体文件夹名，或用 --output 指定完整路径")
-
-
-def stop_ffmpeg() -> None:
-    for svc in FFMPEG_SERVICES:
-        subprocess.run(["systemctl", "stop", svc], check=False)
-    time.sleep(1.0)
-
-
-def start_ffmpeg() -> None:
-    for svc in FFMPEG_SERVICES:
-        subprocess.run(["systemctl", "start", svc], check=False)
 
 
 def main() -> int:
@@ -108,11 +94,8 @@ def main() -> int:
 
     cap = None
     try:
-        cap = cv2.VideoCapture(args.device, cv2.CAP_V4L)
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, args.width)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, args.height)
-        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        if not cap.isOpened():
+        cap = open_camera(args.device, args.width, args.height)   # 等设备释放 + 重试
+        if cap is None:
             print("[CAPTURE] ERROR: cannot open camera")
             return 1
 

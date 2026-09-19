@@ -132,74 +132,113 @@ def _runs(row: np.ndarray, margin: int) -> list:
     return runs
 
 
+def _row_candidates(mask: np.ndarray, y: int, side: str, margin: int,
+                    max_line_w: int, center: int) -> list:
+    """第 y 行里"像这一侧车道线"的候选 [(内边缘x, 段宽), ...]。"""
+    cands = []
+    for a, b in _runs(mask[y], margin):
+        width = b - a + 1
+        if width > max_line_w:
+            continue
+        inner = b if side == "left" else a          # 内边缘 = 朝画面中心的那一端
+        if side == "left" and inner >= center:
+            continue
+        if side == "right" and inner <= center:
+            continue
+        cands.append((inner, width))
+    return cands
+
+
+def _trace_from(rows_cands: list, seed_idx: int, seed: tuple,
+                max_jump: int, max_miss: int, width_tol: float) -> list:
+    """从一个种子出发，向上、向下各走一遍，返回 [(y, 内边缘x, 段宽), ...]（自上而下）。"""
+    def walk(step: int):
+        out = []
+        cur_x, widths, misses = seed[0], [seed[1]], 0
+        i = seed_idx + step
+        while 0 <= i < len(rows_cands):
+            y, cands = rows_cands[i]
+            near = [(x, wd) for (x, wd) in cands if abs(x - cur_x) <= max_jump]
+            med = float(np.median(widths)) if widths else None
+            pick = None
+            if near:
+                cand = min(near, key=lambda c: abs(c[0] - cur_x))
+                if med is None or abs(cand[1] - med) <= width_tol * med:
+                    pick = cand
+            if pick is None:
+                misses += 1
+                if misses > max_miss:
+                    break
+                i += step
+                continue
+            cur_x, width = pick
+            widths.append(width)
+            misses = 0
+            out.append((y, cur_x, width))
+            i += step
+        return out
+
+    up = walk(-1)
+    down = walk(+1)
+    path = list(reversed(up)) + [(rows_cands[seed_idx][0], seed[0], seed[1])] + down
+    return path
+
+
 def trace_boundary(mask: np.ndarray, y_bottom: int, y_top: int, side: str,
                    margin: int = None, max_line_w: int = None,
                    max_jump: int = None, max_miss: int = None,
-                   width_tol: float = None) -> list:
-    """从下往上**逐行连续跟踪**一侧车道边界，返回 [(y, 内边缘x, 段宽), ...]。
+                   width_tol: float = None,
+                   min_len: int = None, seed_step: int = None) -> list:
+    """**逐行连续跟踪**一侧车道边界，返回 [(y, 内边缘x, 段宽), ...]（自上而下）。
 
     为什么不能"每行独立地从画面中心往外找第一个白点"（2026-09-16 实车画面实测）：
     这条打印跑道上白线在赛道**最外侧**（贴着画面边缘），而塑料膜褶皱/反光在画面**中间**——
-    独立逐行找的结果是"每一行都锁在中间那团反光上"，中心乱跳、车歪歪扭扭。
-    连续跟踪天然区分两者：**线是连续、平滑、宽度稳定的**；反光一团一团、宽度忽大忽小、
-    相邻行之间对不上。
+    独立逐行找的结果是"每一行都锁在中间那团反光上"，中心乱跳。连续跟踪天然区分两者：
+    **线是连续、平滑、宽度稳定的**；反光一团一团、宽度忽大忽小、相邻行之间对不上。
 
-    每步要同时满足：
+    跟踪规则（每一步都要满足）：
     - 内边缘相对上一行位移 ≤ `max_jump`（透视变化是渐变的）；
     - 段宽与已跟踪宽度中位数之差 ≤ `width_tol × 中位数`（反光宽度不稳定）；
-    - 允许连续 `max_miss` 行缺失（线被光斑/遮挡打断），超过即判跟丢。
+    - 允许连续 `max_miss` 行缺失（被光斑/遮挡打断），超过即判跟丢。
+
+    **种子策略（2026-09-19 实车复盘新增）**：先从最下面一行找种子往上跟（正常俯视角度下
+    近处的线最清楚）；如果那条路径太短（< `min_len`），再**遍历所有可能的种子行、取最长路径**。
+    之所以必须这样：本车下摄角度偏「平」时，画面**最下方只有地面和反光**，两条白线反而在
+    **画面中部的远场**才对得上——固定从底部起跟就会"一片空白起步"、什么都跟不到。
     """
     margin = settings.LANE_EDGE_MARGIN if margin is None else margin
     max_line_w = settings.LANE_MAX_LINE_W_PX if max_line_w is None else max_line_w
     max_jump = settings.LANE_TRACK_MAX_JUMP_PX if max_jump is None else max_jump
     max_miss = settings.LANE_TRACK_MAX_MISS if max_miss is None else max_miss
     width_tol = settings.LANE_TRACK_WIDTH_TOL if width_tol is None else width_tol
+    min_len = settings.LANE_TRACK_MIN_LEN if min_len is None else min_len
+    seed_step = settings.LANE_TRACK_SEED_STEP if seed_step is None else seed_step
     center = mask.shape[1] // 2
 
-    path = []
-    cur_x = None
-    widths = []
-    misses = 0
-    for y in range(y_bottom - 1, y_top - 1, -1):
-        cands = []
-        for a, b in _runs(mask[y], margin):
-            width = b - a + 1
-            if width > max_line_w:
-                continue
-            inner = b if side == "left" else a          # 内边缘 = 朝画面中心的那一端
-            if side == "left" and inner >= center:
-                continue
-            if side == "right" and inner <= center:
-                continue
-            cands.append((inner, width))
-        if not cands:
-            misses += 1
-            if path and misses > max_miss:
-                break
-            continue
+    rows_cands = [(y, _row_candidates(mask, y, side, margin, max_line_w, center))
+                  for y in range(y_bottom - 1, y_top - 1, -1)]
+    rows_cands.reverse()                                   # y 递增，便于两个方向行走
 
-        if cur_x is None:
-            inner, width = min(cands, key=lambda c: abs(c[0] - center))   # 种子：离中心最近
-        else:
-            near = [(x, wd) for (x, wd) in cands if abs(x - cur_x) <= max_jump]
-            if not near:
-                misses += 1
-                if misses > max_miss:
-                    break
-                continue
-            med = float(np.median(widths)) if widths else None
-            inner, width = min(near, key=lambda c: abs(c[0] - cur_x))
-            if med is not None and abs(width - med) > width_tol * med:
-                misses += 1          # 宽度突变 = 多半是反光/地面，别让它带偏后续跟踪
-                if misses > max_miss:
-                    break
-                continue
-        cur_x = inner
-        misses = 0
-        widths.append(width)
-        path.append((y, inner, width))
-    path.reverse()                        # 自上而下（行号递增）
-    return path
+    def seed_index_for(y: int) -> int:
+        return max(0, y_bottom - 1 - y)                    # 注意：上面 reverse 过，行号直接映射
+
+    seeds = [(i, cands) for i, (y, cands) in enumerate(rows_cands) if cands]
+    if not seeds:
+        return []
+
+    # ① 先试"从最下面往上"：正常角度下这就是对的，也最省时间
+    first = seeds[0]
+    best = _trace_from(rows_cands, first[0], first[1][-1], max_jump, max_miss, width_tol)
+    if len(best) >= min_len:
+        return best
+
+    # ② 太短 → 遍历（稀疏取样）所有种子，取最长的那条
+    for i, cands in seeds[::max(1, seed_step)]:
+        for seed in cands:
+            path = _trace_from(rows_cands, i, seed, max_jump, max_miss, width_tol)
+            if len(path) > len(best):
+                best = path
+    return best
 
 
 class LaneScanner:
@@ -267,8 +306,15 @@ class LaneScanner:
                     right_sum += right; right_n += 1
                 continue
 
+            pair_w = right - left
+            if not (settings.LANE_PAIR_W_MIN_PX <= pair_w <= settings.LANE_PAIR_W_MAX_PX):
+                # 宽度不像"一条 1.22m 的车道" → 这对左右边界不是同一行的两条车道线
+                partial_rows += 1
+                left_sum += left; left_n += 1
+                right_sum += right; right_n += 1
+                continue
             full_rows += 1
-            widths.append(right - left)
+            widths.append(pair_w)
             left_sum += left
             left_n += 1
             right_sum += right

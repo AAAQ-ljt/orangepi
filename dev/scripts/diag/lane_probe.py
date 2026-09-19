@@ -215,7 +215,7 @@ def live_view(camera: int, quiet: bool = False) -> int:
       · 画面中间那一片"反光"即使还是白的，也不该被跟到（跟踪会跳过它）。
     按 q / ESC 退出。
     """
-    from vision.camera_guard import camera_exclusive
+    from vision.camera_guard import camera_exclusive, open_camera
 
     if not os.environ.get("DISPLAY"):
         print("[PROBE] 没有 DISPLAY（本车没装 X 服务器）：改用不需要画面的两招——")
@@ -226,12 +226,8 @@ def live_view(camera: int, quiet: bool = False) -> int:
 
     print("[PROBE] 实时预览：把两条白线调到画面下半部、左右对称（V 字），按 q 退出")
     with camera_exclusive():
-        cap = cv2.VideoCapture(camera, cv2.CAP_V4L)
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, settings.IMG_W)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, settings.IMG_H)
-        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        if not cap.isOpened():
-            print("[PROBE] 摄像头打不开")
+        cap = open_camera(camera, settings.IMG_W, settings.IMG_H)
+        if cap is None:
             return 1
         n = 0
         while True:
@@ -284,18 +280,14 @@ def main() -> int:
         return 0
 
     os.makedirs(args.out, exist_ok=True)
-    from vision.camera_guard import camera_exclusive
+    from vision.camera_guard import camera_exclusive, open_camera
 
     print(f"[PROBE] 打开摄像头 {args.camera}（会临时停掉两路推流，退出自动恢复）")
     good = 0
     last = ("", (0, 0))
     with camera_exclusive():
-        cap = cv2.VideoCapture(args.camera, cv2.CAP_V4L)
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, settings.IMG_W)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, settings.IMG_H)
-        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        if not cap.isOpened():
-            print("[PROBE] 摄像头打不开（推流是否已恢复？）")
+        cap = open_camera(args.camera, settings.IMG_W, settings.IMG_H)
+        if cap is None:
             return 1
         for i in range(args.frames):
             ok, frame = cap.read()

@@ -295,6 +295,8 @@ StartGateState(blocked: bool, armed: bool, released: bool, blue_ratio: float, ti
 | **Git Bash 会把 `/root/xxx` 这类参数转成 Windows 路径** | 远端收到的是 `C:/Program Files/Git/root/...`，报 `No such file`。用 `ssh_put.py`/`ssh_sync.py` 传绝对路径前加 **`MSYS_NO_PATHCONV=1`** |
 | 摄像头 index 搞反（会把云台画面当赛道） | **实测确认（2026-09-16）**：`/dev/video0`(index 0) = icspring = **主摄＝云台摄像头**（推流 `cam_car0027`，红绿灯环节看灯）；`/dev/video2`(index 2) = Global Shutter = **副摄＝下摄**（推流 `cam_car0027_sub`，**巡线扫线用它**）。自动驾驶默认 `--camera 2`；不确定时跑 `dev/scripts/cam-identify.py` 复验 |
 | 以为摄像头能跑 30fps | 实测 640×480 只有 **~15fps**（驱动谎报 30）。视觉进程 14 FPS 是摄像头限制，不是我们的代码慢 |
+| **下摄"看着赛道"就以为白线在画面里** | 2026-09-19 抓图实锤：下摄俯仰角太**平**（几乎水平看出去）时，画面里只有赛道中段 + 塑料膜褶皱反光，两条白线贴在**画面左右外沿/画面外** → 扫线无论如何都锁不到线（实测：左 18 行、右 8 行碎片，conf 0）。**先看画面再调参数**：`sudo python3 scripts/diag/lane_probe.py --camera 2 --show`（实时预览叠加图），把两条白线调进画面下半部再谈阈值 |
+| 用"每行独立从中心往外找第一个白点"找车道线 | 打印跑道塑料膜的反光是**低饱和亮区**，颜色上与白线无法区分，且正好在画面中间 → 每行都会先撞上反光。已改为 **`trace_boundary()` 从下往上连续跟踪**（线：连续/平滑/宽度稳定；反光：一团一团/宽度突变），并保留形状过滤（尺度无关的细长比）兜底 |
 | 用"当前无挡板"直接发车 | **上电即冲**。必须边沿触发（`start_gate.py`） |
 | `is_barrier` 之类字段硬编码成常量 | 会让 FSM 走进错误分支；协议字段必须来自真实感知 |
 | 每帧 `print` 完整状态 | 15~25FPS 下日志本身就吃掉可观 CPU；改为每 N 帧或写状态文件 |

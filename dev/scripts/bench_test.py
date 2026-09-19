@@ -122,7 +122,8 @@ def main() -> int:
     ap.add_argument("--print-every", type=int, default=5)
     args = ap.parse_args()
 
-    use_motor = not args.no_motor
+    # 标定/只读模式不驱动电机，因此不需要 --allow-motion
+    use_motor = (not args.no_motor) and args.calibrate == 0
     if use_motor and not args.allow_motion:
         print("[BENCH] 拒绝运行：这次会驱动电机。确认四轮架空或场地空旷、有人在旁能立即断电，"
               "再加 --allow-motion；只想看读数就加 --no-motor")
@@ -162,7 +163,16 @@ def main() -> int:
             avg = statistics.mean(samples)
             print(f"[BENCH] 标定完成：{len(samples)}/{tries} 帧有效，平均车道中心 = {avg:.1f} "
                   f"(波动 {max(samples) - min(samples):.0f}px)")
-            print(f"[BENCH] 跑车时加参数： --target-x {avg:.0f}")
+            # 直接写进车端本地配置（config/site.yaml），以后所有程序自动读取 —— 跑车只需一条命令
+            try:
+                from config import site
+                path = site.save({"target_x": round(float(avg), 1)})
+                print(f"[BENCH] ✅ 已写入 {path}：target_x = {avg:.1f}")
+                print("[BENCH] 以后直接跑就行（不用再传 --target-x）：")
+                print("[BENCH]    sudo python3 /root/dev/scripts/bench_test.py --allow-motion")
+                print("[BENCH]    主程序 car-mode.sh auto --real 也同样自动读这个值")
+            except Exception as exc:
+                print(f"[BENCH] ⚠️ 写 site.yaml 失败（请手动用 --target-x {avg:.0f}）：{exc}")
         else:
             print("[BENCH] 没取到有效读数：确认车已摆正在车道中央、白线在视野内（可加 --show 看画面）")
         return 0
@@ -175,6 +185,13 @@ def main() -> int:
           f"对齐容差={args.align_tol:.0f}px  电机={'开' if use_motor else '关(只跑视觉/决策)'}"
           f"{'  不循迹(--no-lane)' if args.no_lane else ''}")
     print("[BENCH] 规则：没见板→中位；见板→中位；板移开→低速对齐→循迹；再见板→立即停")
+    if not args.no_lane:
+        from config import site as _site
+        if "target_x" not in _site.applied():
+            print("[BENCH] 提示：还没做过车道中心标定（现在用默认 TARGET_X=320）。"
+                  "把车摆正在车道中央后跑一次：")
+            print("[BENCH]    sudo python3 /root/dev/scripts/bench_test.py --calibrate 30"
+                  "   ← 标定值会自动写入本地配置，之后跑车不用再传参数")
 
     rc = 0
     try:

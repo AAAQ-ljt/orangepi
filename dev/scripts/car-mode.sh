@@ -168,10 +168,21 @@ PY
   fi
 
   # PCA9685（非 dry-run 才必须）
+  # ⚠️ 此刻 opi-control（手动遥控）通常还在跑、正持续读写同一根 i2c 总线，
+  # i2cdetect 的探测会和它的控制流量撞车 → 偶发扫不到 0x40（误报）。
+  # 所以这里重试 3 次；仍然失败才是真的掉板/接线问题。
   if [[ "$dry_run" -eq 0 ]]; then
     if command -v i2cdetect >/dev/null 2>&1; then
-      if i2cdetect -y 5 2>/dev/null | grep -qE '\b40\b'; then ok "PCA9685 @0x40 在线"
-      else err "PCA9685 未检测到（i2c-5）"; errors=$((errors+1)); fi
+      pca_ok=0
+      for _try in 1 2 3; do
+        if i2cdetect -y 5 2>/dev/null | grep -qE '\b40\b'; then pca_ok=1; break; fi
+        sleep 0.5
+      done
+      if [[ $pca_ok -eq 1 ]]; then ok "PCA9685 @0x40 在线"
+      else err "PCA9685 未检测到（i2c-5，已重试 3 次）——检查接线/供电；" \
+               "若 opi-control 正在跑也可能挤占总线，稍等 2s 重试本命令"
+           errors=$((errors+1))
+      fi
     else
       warn "没有 i2cdetect，跳过 PCA9685 检查"
     fi

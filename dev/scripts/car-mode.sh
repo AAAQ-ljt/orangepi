@@ -168,20 +168,30 @@ PY
   fi
 
   # PCA9685（非 dry-run 才必须）
-  # ⚠️ 此刻 opi-control（手动遥控）通常还在跑、正持续读写同一根 i2c 总线，
-  # i2cdetect 的探测会和它的控制流量撞车 → 偶发扫不到 0x40（误报）。
-  # 所以这里重试 3 次；仍然失败才是真的掉板/接线问题。
+  # ⚠️ 不能在 opi-control 运行时检查：i2c 总线的地址选择是排他的，
+  # 手动遥控正驱动 PCA9685 时，i2cdetect 的 ioctl(I2C_SLAVE) 会被 -EBUSY
+  # 直接打断（stderr 被 2>/dev/null 吞掉，stdout 为空）→ 误报"未检测到"。
+  # 2026-09-19 两次 --real 失败都是这个原因。所以：
+  #   opi-control 在跑 → 跳过（权威检查移到 cmd_auto 停服之后做）；
+  #   opi-control 没跑 → 就地检查。
+  # 检测判据用 awk 精确匹配 "40: 40"——旧写法 grep '\b40\b' 会匹配行号"40:"，
+  # 总线上没有设备也永远判在线（体检验尸都验不出来）。
   if [[ "$dry_run" -eq 0 ]]; then
     if command -v i2cdetect >/dev/null 2>&1; then
-      pca_ok=0
-      for _try in 1 2 3; do
-        if i2cdetect -y 5 2>/dev/null | grep -qE '\b40\b'; then pca_ok=1; break; fi
-        sleep 0.5
-      done
-      if [[ $pca_ok -eq 1 ]]; then ok "PCA9685 @0x40 在线"
-      else err "PCA9685 未检测到（i2c-5，已重试 3 次）——检查接线/供电；" \
-               "若 opi-control 正在跑也可能挤占总线，稍等 2s 重试本命令"
-           errors=$((errors+1))
+      if svc_active opi-control.service; then
+        info "opi-control 运行中，PCA9685 检查移到停服后进行"
+      else
+        pca_ok=0
+        for _try in 1 2 3; do
+          if i2cdetect -y 5 2>/dev/null | awk '$1=="40:" && $2=="40"{f=1} END{exit !f}'; then
+            pca_ok=1; break
+          fi
+          sleep 0.5
+        done
+        if [[ $pca_ok -eq 1 ]]; then ok "PCA9685 @0x40 在线"
+        else err "PCA9685 未检测到（i2c-5，已重试 3 次）——检查接线/供电"
+             errors=$((errors+1))
+        fi
       fi
     else
       warn "没有 i2cdetect，跳过 PCA9685 检查"
@@ -381,6 +391,26 @@ cmd_auto() {
     info "保留另一路推流给裁判看画面：$([[ "$camera_svc" == "$SVC_MAIN" ]] && echo "$SVC_SUB" || echo "$SVC_MAIN")"
   fi
   sleep 2
+
+  # ---- 停服后复核 PCA9685（真跑才需要；权威检查）----
+  # 此刻 opi-control 已停、i2c 总线归我们独占，检测结果才可信（原因见 preflight 注释）。
+  # 失败则恢复服务、保持手动模式并放弃——绝不允许在没确认舵机/电调驱动在线的情况下上动力。
+  if [[ $dry_run -eq 0 ]] && command -v i2cdetect >/dev/null 2>&1; then
+    pca_ok=0
+    for _try in 1 2 3; do
+      if i2cdetect -y 5 2>/dev/null | awk '$1=="40:" && $2=="40"{f=1} END{exit !f}'; then
+        pca_ok=1; break
+      fi
+      sleep 0.5
+    done
+    if [[ $pca_ok -ne 1 ]]; then
+      err "PCA9685 未检测到（i2c-5，停服后复核 3 次仍失败）——检查接线/供电，车保持手动模式"
+      stop_ours
+      restore_manual
+      die "停服后复核未通过，已放弃上动力"
+    fi
+    ok "PCA9685 @0x40 在线（停服后复核通过）"
+  fi
 
   # ---- 起视觉 ----
   local vision_args=(--udp-ip 127.0.0.1 --udp-port "$port" --camera "$camera" --status-file "$STATUS_FILE")

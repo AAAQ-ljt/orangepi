@@ -133,6 +133,45 @@ def _annotate(frame: np.ndarray, name: str | None = None, out_dir: str | None = 
     return vis
 
 
+def angle_advice(frame: np.ndarray) -> str:
+    """根据白点分布给出**该怎么调镜头**的具体建议（这是最常需要的结论）。
+
+    判据来自实车复盘：
+      · 白点集中在画面上半部（远处）+ 下半部几乎没有 → 镜头太"朝前"，要往下压；
+      · 白点贴着画面左右边缘、成片被裁 → 镜头太朝前/视场太窄，近处车道比画面还宽；
+      · 白点只在画面最下方一条窄带 → 视场只看到车头前一点点，要么压角度要么退后安装。
+    """
+    raw, (roi_y0, roi_y1) = white_mask(frame, apply_shape_filter=False)
+    h, w = raw.shape
+    ys, xs = np.nonzero(raw)
+    if ys.size < 50:
+        return "画面里几乎没有白点：检查曝光/光照，或白线是否在视野内"
+    y_med = float(np.median(ys))
+    edge = float(np.mean((xs <= 3) | (xs >= w - 4)))
+    lower = float(np.mean(ys > 0.6 * h))
+    if y_med < 0.4 * h and lower < 0.05:
+        return ("白点集中在**画面上半部**（远处），近处地面看不到 → 镜头太朝前，"
+                "**把下摄往下压**，直到两条白线出现在画面下半部")
+    if edge > 0.35:
+        return ("白点大量贴着**画面左右边缘**（被裁掉）→ 视场里近处车道比画面还宽，"
+                "**把下摄往下压**（或换更广角镜头），让两条白线完整进画面")
+
+    # 2026-09-19 实车最典型的一种：左右线各自成段、y 范围完全不重叠
+    kept, _ = white_mask(frame, apply_shape_filter=True)
+    left = trace_boundary(kept, roi_y1, roi_y0, "left")
+    right = trace_boundary(kept, roi_y1, roi_y0, "right")
+    if left and right:
+        ly = {y for y, _x, _w in left}
+        ry = {y for y, _x, _w in right}
+        if not (ly & ry):
+            return (f"**左右白线出现在画面的不同高度段**（左 y{min(ly)}~{max(ly)}、"
+                    f"右 y{min(ry)}~{max(ry)}，没有一行同时看到两条）→ 这是镜头太「平」的典型表现："
+                    f"近处车道比画面还宽、远处才收进画面。**把下摄往下压**，"
+                    f"让两条白线在画面下半部同时出现")
+    return ("白点在画面里但不成对/不连续 → 先按上面的逐行白点图确认白线的确切位置，"
+            "再决定是压角度还是调 LANE_ROI_TOP_RATIO")
+
+
 def verdict_of(frame: np.ndarray) -> tuple:
     """(是否可用, 结论文本, 左右跟踪行数) —— 终端与叠加图共用同一套判据。"""
     mask, (roi_y0, roi_y1) = white_mask(frame)
@@ -144,10 +183,10 @@ def verdict_of(frame: np.ndarray) -> tuple:
         text = f"✅ 可用：双侧跟踪 左{len(left)}行 右{len(right)}行 conf={obs.confidence:.2f}"
     elif len(left) < 10 and len(right) < 10:
         text = (f"❌ 线不在画面里（左{len(left)}行/右{len(right)}行 conf={obs.confidence:.2f}）"
-                f"→ **先调下摄俯仰角**：让两条白线进画面下半部，别调阈值")
+                f"→ 先调下摄俯仰角，别调阈值")
     else:
         text = (f"⚠️ 只跟到零碎边（左{len(left)}行/右{len(right)}行 conf={obs.confidence:.2f}）"
-                f"→ 多半是锁在地面反光/边缘上了，看上面逐行白点图确认白线位置")
+                f"→ 多半是锁在地面反光/边缘上了")
     return ok, text, (len(left), len(right))
 
 
@@ -157,12 +196,13 @@ def analyze_frame(frame: np.ndarray, name: str, out_dir: str | None = None, verb
         _row_map(frame)
         _print_components(frame)
         _print_roi_sweep(frame)
-    _ok, text, _rows = verdict_of(frame)
+    ok, text, _rows = verdict_of(frame)
     print(f"    判定：{text}")
+    print(f"    镜头建议：{angle_advice(frame)}")
     if out_dir:
         _annotate(frame, name, out_dir)
         print(f"    存图：{os.path.join(out_dir, 'annotated_' + name + '.jpg')}")
-    return verdict_of(frame)
+    return ok, text, _rows
 
 
 def live_view(camera: int, quiet: bool = False) -> int:

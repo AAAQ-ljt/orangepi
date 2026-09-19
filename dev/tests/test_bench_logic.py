@@ -155,6 +155,19 @@ def test_acquire_does_not_override_force_run():
 
 
 # ------------------------------------------------------- 丢线时的"降速维持"（过弯道关键）
+def test_creep_stage_ignores_throttle_scale():
+    """探路/起步对齐阶段**必须**用蠕动脉宽：若也被仲裁 scale 乘回中位，车永远不动、找不到线。
+
+    2026-09-19 现场：探路窗口里打的是 `电调=1500us(降速×0.0)`，车原地不动 → 死锁。
+    规则：只有 track 阶段参与降速。
+    """
+    from scripts.bench_test import scaled_pulse
+    for phase in ("align", "idle", "stopped"):
+        eff = 1.0                       # 非 track 阶段强制 1.0
+        assert scaled_pulse(1560.0, eff) == 1560.0, phase
+    assert scaled_pulse(1560.0, 0.0) == 1500.0, "track 阶段降级到 0 才是回中位"
+
+
 def test_scaled_pulse_slows_down_instead_of_stopping():
     """仲裁层降级时**降速**（往中位靠），而不是急停——过弯道时短时丢线就靠这个撑过去。"""
     from scripts.bench_test import NEUTRAL_US, scaled_pulse

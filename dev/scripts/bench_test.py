@@ -487,7 +487,10 @@ def main() -> int:
                             steering += max(-max_delta, min(max_delta, target_steer - steering))
 
                             # 标称速度 → 按仲裁层比例降速（丢线时慢下来等有效观测，而不是急停）
-                            out_us = scaled_pulse(d.out_us, throttle_scale)
+                            # ⚠️ 只在**循迹阶段**降速：探路/起步对齐本来就该用最低蠕动脉宽，
+                            # 若也被 scale=0 乘回中位，车就永远不动、也就永远找不到线（2026-09-19 现场踩到）。
+                            eff_scale = throttle_scale if d.phase == "track" else 1.0
+                            out_us = scaled_pulse(d.out_us, eff_scale)
 
                             if use_motor and pca is not None:
                                 pca.set_steering_angle(steering)

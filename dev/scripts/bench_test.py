@@ -99,6 +99,17 @@ def driving_off_course(error: float, out_us: float, since: Optional[float], now:
     return (now - since) > limit_s
 
 
+def scaled_pulse(out_us: float, scale: float, neutral_us: float = NEUTRAL_US) -> float:
+    """按仲裁层的降级比例缩放动力：降级/丢线时**变慢**，而不是立刻急停。
+
+    为什么需要（2026-09-19 实地）：过弯道时光斑/白线会短时丢失，若一丢就停车，
+    车会"走走停停"根本过不了弯。仲裁层本来就是"降油门 + 用上一帧值维持 + 超时才停"，
+    这里把它的 throttle_scale 真正接到电调上（纯函数，便于单测）。
+    """
+    k = max(0.0, min(1.0, float(scale)))
+    return float(neutral_us) + (float(out_us) - float(neutral_us)) * k
+
+
 def auto_target(samples) -> Optional[float]:
     """从静止画面采样里算新的车道中心；不可信时返回 None（纯函数，便于单测）。"""
     if len(samples) < AUTO_TARGET_FRAMES:
@@ -177,6 +188,19 @@ def main() -> int:
                          f"超时就停）")
     ap.add_argument("--target-x", type=float, default=None, help="期望车道中心（默认 settings.TARGET_X=<320>）")
     ap.add_argument("--max-steer", type=float, default=None, help="转向限幅（默认 settings 的 30°）")
+    # ---- 实地循迹调参（改这些不用碰 settings.py）----
+    ap.add_argument("--kp", type=float, default=None, help="PID 比例增益（默认 settings.LANE_KP）")
+    ap.add_argument("--ki", type=float, default=None, help="PID 积分增益（过弯道加点积分有帮助）")
+    ap.add_argument("--kd", type=float, default=None, help="PID 微分增益（默认 settings.LANE_KD）")
+    ap.add_argument("--lane-conf", type=float, default=None,
+                    help="车道置信度阈值（默认 settings.ARBITER_CONF_THRESH=0.35）")
+    ap.add_argument("--lane-stop-s", type=float, default=None,
+                    help="丢线后允许维持多久才停车（默认 1.5s）——**过弯道建议放宽到 2~3s**")
+    ap.add_argument("--no-align", action="store_true",
+                    help="跳过起步对齐：板一移开就直接按循迹速度走（实地上更省时间）")
+    ap.add_argument("--start-mode", choices=("remove", "detect"), default="remove",
+                    help="发车方式：remove=见过板且板移开才走（默认，安全）；detect=检测到板立刻走")
+    ap.add_argument("--log-csv", default="", help="把每帧数据写进 CSV（便于回来调参）")
     ap.add_argument("--max-seconds", type=float, default=180.0, help="整段最长运行时间")
     ap.add_argument("--no-lane", action="store_true", help="不循迹、不对齐：只测蓝板+电调")
     ap.add_argument("--force-run", action="store_true",
@@ -217,8 +241,17 @@ def main() -> int:
 
     scanner = LaneScanner(target_x=args.target_x)
     gate = StartGate()
-    arbiter = LaneArbiter(target_x=args.target_x)
+    arbiter = LaneArbiter(target_x=args.target_x,
+                          conf_thresh=args.lane_conf,
+                          stop_s=args.lane_stop_s)
     planner = Planner(target_x=args.target_x, max_steer=args.max_steer)
+    # 实地调参：命令行改 PID，不改 settings.py（写在文件里的东西现场容易改错）
+    for name, value in (("kp", args.kp), ("ki", args.ki), ("kd", args.kd)):
+        if value is not None:
+            setattr(planner.pid, name, float(value))
+    print(f"[BENCH] PID: kp={planner.pid.kp:.3f} ki={planner.pid.ki:.3f} kd={planner.pid.kd:.3f}  "
+          f"车道阈值={arbiter.conf_thresh:.2f} 丢线容忍={arbiter.stop_s:.1f}s  "
+          f"起步方式={'移开才走' if args.start_mode == 'remove' else '检测到就走'}")
     steer_limit = float(args.max_steer or settings.LANE_STEER_LIMIT_DEG)
     steering = float(settings.SERVO_CENTER_ANGLE)
     seen_board = False
@@ -227,6 +260,11 @@ def main() -> int:
     auto_target_done = False
     verdict_printed = False
     diverge_since = None    # 跑偏保护：大误差持续多久了
+    board_consumed = False  # --start-mode detect：起步用的那块板已被消费（之后再见板=停车）
+    csv_fh = None
+    if args.log_csv:
+        csv_fh = open(args.log_csv, "w", encoding="utf-8")
+        csv_fh.write("t,phase,reason,center_x,conf,error_px,steer_deg,esc_us,board,seen_board\n")
 
     # ---------------------------------------------------------- 静止标定
     if args.calibrate > 0:
@@ -337,11 +375,17 @@ def main() -> int:
                             obs = scanner.scan(frame) if not args.no_lane else None
                             if obs is not None:
                                 arb = arbiter.update(obs.center_x, obs.confidence, now)
-                                lane_ok = not arb.should_stop and obs.confidence >= settings.ARBITER_CONF_THRESH
-                                error = abs(obs.center_x - planner.target_x)
+                                # **用仲裁层的结论**：短时丢线 → 降速维持（coast），只有超时才停。
+                                # 旧写法"本帧置信度低就停"会让过弯道时走走停停。
+                                lane_ok = not arb.should_stop
+                                steer_center = arb.center_x
+                                throttle_scale = arb.throttle_scale
+                                error = abs(steer_center - planner.target_x)
                             else:
                                 arb = None
                                 lane_ok = True          # --no-lane 模式不判车道
+                                steer_center = planner.target_x
+                                throttle_scale = 1.0
                                 error = 0.0
 
                             # ---- 起步对齐状态 ----
@@ -354,6 +398,9 @@ def main() -> int:
                             elif not args.no_lane:
                                 if align_since is None:
                                     align_since = acquire_since = now
+                                if args.no_align:               # 实地上省时间：不等对齐，直接走
+                                    aligned = True
+                                    auto_target_done = True     # 已经在动，别再改车道中心
                                 # 「边跑边标定」：板刚移开、车还没动，用这段画面修正车道中心
                                 if (obs is not None and not auto_target_done
                                         and obs.confidence >= AUTO_TARGET_MIN_CONF
@@ -401,7 +448,14 @@ def main() -> int:
                                           "或跑 scripts/diag/lane_probe.py 看掩膜图）；"
                                           "2) 光照/反光是否把白线淹了；3) LANE_ROI_TOP_RATIO 是否太低（只看了近处地面）")
 
-                            d = decide(gs.blocked, seen_board, lane_ok, aligned,
+                            # --start-mode detect：起步用的那块板只消费一次（之后再见板=停车）
+                            if (args.start_mode == "detect" and seen_board
+                                    and not board_consumed and not gs.blocked):
+                                board_consumed = True
+                            blocked_for_decide = gs.blocked and (
+                                args.start_mode == "remove" or board_consumed)
+
+                            d = decide(blocked_for_decide, seen_board, lane_ok, aligned,
                                        args.force_run, args.speed_us, args.start_us,
                                        no_lane=args.no_lane,
                                        acquire=(not lane_ok and acquire_since is not None
@@ -437,6 +491,14 @@ def main() -> int:
                                 pca.set_steering_angle(steering)
                                 pca.write_us(pca.CH_ESC, d.out_us)
 
+                            if csv_fh is not None:
+                                csv_fh.write("%.3f,%s,%s,%s,%.3f,%.1f,%.1f,%.0f,%d,%d\n" % (
+                                    now - t0, d.phase, d.reason,
+                                    "" if obs is None else "%.1f" % obs.center_x,
+                                    (obs.confidence if obs is not None else 0.0),
+                                    error, steering, out_us,
+                                    int(gs.blocked), int(seen_board)))
+
                             frames += 1
                             if frames % max(1, args.print_every) == 0:
                                 extra = ""
@@ -445,7 +507,9 @@ def main() -> int:
                                             f"误差={error:4.1f} "
                                 print(f"[BENCH] {now - t0:6.1f}s  {extra}"
                                       f"有板={int(gs.blocked)} 武装={int(seen_board)} 对准={int(aligned)}  "
-                                      f"舵机={steering:5.1f}°  电调={d.out_us:.0f}us  ({d.reason})")
+                                      f"舵机={steering:5.1f}°  电调={out_us:.0f}us"
+                                      f"{'' if throttle_scale >= 0.999 else f'(降速×{throttle_scale:.1f})'}"
+                                      f"  ({d.reason})")
 
                             if args.show:
                                 disp = frame.copy()
@@ -471,6 +535,10 @@ def main() -> int:
     finally:
         if args.show:
             cv2.destroyAllWindows()
+    if csv_fh is not None:
+        csv_fh.close()
+        print(f"[BENCH] 数据已写入 {args.log_csv}（回来用它调 PID/看丢线情况）")
+
     return rc
 
 

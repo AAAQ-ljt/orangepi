@@ -197,12 +197,18 @@ def analyze_frame(frame: np.ndarray, name: str, out_dir: str | None = None, verb
         _print_components(frame)
         _print_roi_sweep(frame)
     ok, text, _rows = verdict_of(frame)
+    raw, _roi = white_mask(frame, apply_shape_filter=False)
+    kept, _ = white_mask(frame, apply_shape_filter=True)
+    pct_kept = float((kept > 0).mean()) * 100.0
+    conf = float(LaneScanner().scan(frame).confidence)
+    print(f"    白像素占比：过滤前 {float((raw > 0).mean()) * 100:.1f}% → 过滤后 {pct_kept:.1f}%"
+          f"（占比高但判定不可用 = 那些白都在反光/地面上）")
     print(f"    判定：{text}")
     print(f"    镜头建议：{angle_advice(frame)}")
     if out_dir:
         _annotate(frame, name, out_dir)
         print(f"    存图：{os.path.join(out_dir, 'annotated_' + name + '.jpg')}")
-    return ok, text, _rows
+    return ok, text, _rows, pct_kept, conf
 
 
 def sweep_tilt(camera: int, tilts=None, frames: int = 3, step_s: float = 1.2) -> int:
@@ -383,6 +389,8 @@ def main() -> int:
     print(f"[PROBE] 打开摄像头 {args.camera}（会临时停掉两路推流，退出自动恢复）")
     good = 0
     last = ("", (0, 0))
+    kept_pcts: list = []
+    confs: list = []
     with camera_exclusive():
         cap = open_camera(args.camera, settings.IMG_W, settings.IMG_H)
         if cap is None:
@@ -391,13 +399,20 @@ def main() -> int:
             ok, frame = cap.read()
             if not ok or frame is None:
                 continue
-            ok_v, text, rows = analyze_frame(frame, f"{i:02d}", out_dir=args.out,
-                                             verbose=not args.quiet)
+            ok_v, text, rows, pct_kept, conf_v = analyze_frame(frame, f"{i:02d}", out_dir=args.out,
+                                                               verbose=not args.quiet)
             good += 1 if ok_v else 0
             last = (text, rows)
+            kept_pcts.append(pct_kept)
+            confs.append(conf_v)
         cap.release()
 
-    print(f"\n[PROBE] ===== 结论：{args.frames} 帧里 {good} 帧可用 =====")
+    avg_kept = (sum(kept_pcts) / len(kept_pcts)) if kept_pcts else 0.0
+    best_conf = max(confs) if confs else 0.0
+    print("")
+    print(f"[PROBE] ===== 结论：{args.frames} 帧里 {good} 帧可用 =====")
+    print(f"[PROBE] 对比用读数：白像素占比（过滤后）均值 {avg_kept:.1f}%，最好置信度 {best_conf:.2f}"
+          f"   ← 开灯/关灯/换角度前后各跑一次，比这两个数最直接")
     print(f"[PROBE] 最后一帧：{last[0]}")
     if good == 0:
         print("[PROBE] 下一步（按顺序试）：")

@@ -25,7 +25,10 @@
 
 1. **任何可能驱动电机的操作，必须先确认四轮悬空或场地空旷**。真车跑车必须有人在旁、急停可达。
 2. 真车运行必须显式 `--real --arm`；**默认参数永远是 dry-run**（`main.py` 不带 `--real` 不碰硬件）。
-3. 调试期电调限速 `--max-us 1540`（`ESC_DEBUG_MAX_US`）；**未经验证不得改成 `ESC_MAX_US=2000`**。
+3. 调试期电调限速 `--max-us 1600`（`ESC_DEBUG_MAX_US`）；**未经验证不得改成 `ESC_MAX_US=2000`**。
+   ⚠️ 电调有**死区**：1500us 停、**≈1545us 才起转**（`ESC_DEADBAND_US`，2026-09-16 架空实测）。
+   任何"要让车动"的脉宽必须 > 1545（起步 1560 / 循迹 1575 起）；命令行给了低于死区的值，
+   台架脚本会**直接拒绝运行**——曾经因为默认 1530/1550 白跑一整次台架。
 4. **所有退出路径都必须安全停车**：电调归零、舵机回中、释放 PCA9685 与摄像头、恢复 ffmpeg 推流。
    统一收敛到一个 `cleanup()`，捕获 `SIGINT/SIGTERM/SIGABRT/SIGQUIT`。**绝不允许某条退出路径只 `return` 不释放**。
 5. 禁止在信号回调里做阻塞操作（sleep、网络请求）。
@@ -207,9 +210,10 @@ bash /root/dev/scripts/net/car-net.sh cellular down # 优雅断开（释放 QMI 
 bash /root/dev/scripts/net/car-net.sh apply         # 把 car-net.conf 的服务器配置应用到系统
 
 # 台架测试（四轮必须架空，或场地空旷能随时断电）—— 安全层共用 scripts/bench_common.py
-sudo python3 /root/dev/scripts/bench_test.py --calibrate 30              # 静止标定车道中心（不动电机）
 sudo python3 /root/dev/scripts/bench_test.py --no-motor                  # 只看读数（不动电机）
-sudo python3 /root/dev/scripts/bench_test.py --target-x 377 --allow-motion   # 正式跑：板在→停/板开→低速对齐→循迹/再见板→停
+sudo python3 /root/dev/scripts/bench_test.py --allow-motion --max-seconds 30   # 正式跑：板在→停/板开→低速对齐→循迹/再见板→停
+sudo python3 /root/dev/scripts/bench_test.py --calibrate 30              # 只想单独标定车道中心时用（平时不用，正式跑会自动标定）
+sudo python3 /root/dev/scripts/bench_test.py --steer-test --allow-motion # 转向方向自检（电调中位，只看前轮）
 bash /root/dev/scripts/run_tests.sh                                      # 车上跑全部单测
 ```
 
@@ -248,9 +252,9 @@ control 进程：UDP → FSM(任务状态) → Planner(观测量→控制量) �
 | 量 | 约定 |
 |---|---|
 | `center_x` / `left_x` / `right_x` | **像素**，基于 640 宽画面（`IMG_W=640`），y 向下 |
-| `TARGET_X` | 期望车道中心像素值，当前 320（摄像头偏装时现场标定） |
+| `TARGET_X` | 期望车道中心像素值（摄像头偏装，**不是 320**）；台架/主程序在起步瞬间自动标定并写 `config/site.yaml` |
 | 转向 | 舵机**角度** 0~180，90 为中位；`SERVO_MIN/MAX_ANGLE` 限幅 |
-| 油门 | `-100~100` 百分比；`ESC_STOP_US=1500`，`ESC_DEBUG_MAX_US=1540` |
+| 油门 | `-100~100` 百分比；`ESC_STOP_US=1500`、**`ESC_DEADBAND_US=1545`（低于它车不动）**、`ESC_CREEP_US=1560`、`ESC_DEBUG_MAX_US=1600` |
 | 误差单位（PID 输入） | `error_units = clamp(center_x - TARGET_X, ±160) / 4`（沿官方惯例，便于复用其 PID 起点参数） |
 | PID 输出 | 转向**角度增量**，限幅 ±`LANE_STEER_LIMIT_DEG` |
 

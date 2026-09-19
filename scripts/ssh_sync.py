@@ -29,6 +29,8 @@ DIRECT = dict(host="10.68.1.43", port=22, user="root", pwd="orangepi")
 EXCLUDE_DIRS = {"__pycache__", ".git", ".idea", ".vscode", "logs", "runs", "dataset", "datasets"}
 EXCLUDE_SUFFIXES = (".pyc", ".pyo", ".log", ".mp4", ".avi", ".pid")
 MODEL_SUFFIXES = (".rknn", ".pt", ".onnx", ".onnx.rknn")
+# 车端本地数据/配置：每台车自己的状态，不能被仓库覆盖（例如 WiFi 账本里是真实密码）
+LOCAL_ONLY_FILES = {"wifi-ledger.conf"}
 # img/ 下的采集目录（测试图片），不同步
 IMG_DATA_PREFIXES = ("dev/img/test", "dev/img/direct_test")
 
@@ -38,6 +40,8 @@ def is_excluded(rel_posix: str, include_models: bool) -> bool:
     if any(p in EXCLUDE_DIRS for p in parts):
         return True
     if rel_posix.endswith(EXCLUDE_SUFFIXES):
+        return True
+    if parts[-1] in LOCAL_ONLY_FILES:
         return True
     if not include_models and rel_posix.endswith(MODEL_SUFFIXES):
         return True

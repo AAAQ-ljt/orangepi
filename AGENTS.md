@@ -206,11 +206,11 @@ bash /root/dev/scripts/net/car-net.sh cellular up   # 拨号（APN 轮询 → �
 bash /root/dev/scripts/net/car-net.sh cellular down # 优雅断开（释放 QMI 会话与 CID）
 bash /root/dev/scripts/net/car-net.sh apply         # 把 car-net.conf 的服务器配置应用到系统
 
-# 台架测试（四轮必须架空！）—— 安全层共用 scripts/bench_common.py
-sudo python3 /root/dev/scripts/bench_board_test.py --camera 0 --no-motor   # 蓝板检测（不动电机）
-sudo python3 /root/dev/scripts/bench_board_test.py --camera 0 --speed-us 1550 --i-know-wheels-are-up
-sudo python3 /root/dev/scripts/bench_track_test.py --no-motor              # 循迹链路（不动电机）
-bash /root/dev/scripts/run_tests.sh                                        # 车上跑全部单测
+# 台架测试（四轮必须架空，或场地空旷能随时断电）—— 安全层共用 scripts/bench_common.py
+sudo python3 /root/dev/scripts/bench_test.py --calibrate 30              # 静止标定车道中心（不动电机）
+sudo python3 /root/dev/scripts/bench_test.py --no-motor                  # 只看读数（不动电机）
+sudo python3 /root/dev/scripts/bench_test.py --target-x 377 --allow-motion   # 正式跑：板在→停/板开→低速对齐→循迹/再见板→停
+bash /root/dev/scripts/run_tests.sh                                      # 车上跑全部单测
 ```
 
 - 需要看画面：先 `bash x11.sh`，再跑 `python3 vision/debug_view.py`（`vision_main.py` **没有** `--debug` 参数）。

@@ -132,11 +132,17 @@ def test_timeout_only_warns_never_releases():
 
 
 def test_bench_rule_never_runs_without_board():
-    """台架测试的安全规则（板在→停 / 板开→跑 / 板回→停）：没见过板绝不给动力。"""
-    from scripts.bench_board_test import NEUTRAL_US, decide_output
-    assert decide_output(blocked=False, seen_board=False, speed_us=1550) == NEUTRAL_US
-    assert decide_output(blocked=True, seen_board=True, speed_us=1550) == NEUTRAL_US
-    assert decide_output(blocked=False, seen_board=True, speed_us=1550) == 1550
+    """台架脚本的安全红线：没见过板绝不给动力（规则见 scripts/bench_test.py）。"""
+    from scripts.bench_test import NEUTRAL_US, decide
+    d = decide(blocked=False, seen_board=False, lane_ok=True, aligned=True,
+               force_run=False, speed_us=1550.0, start_us=1530.0)
+    assert d.out_us == NEUTRAL_US
+    d2 = decide(blocked=True, seen_board=True, lane_ok=True, aligned=True,
+                force_run=False, speed_us=1550.0, start_us=1530.0)
+    assert d2.out_us == NEUTRAL_US
+    d3 = decide(blocked=False, seen_board=True, lane_ok=True, aligned=True,
+                force_run=False, speed_us=1550.0, start_us=1530.0)
+    assert d3.out_us == 1550.0
 
 
 def test_reset_clears_state():

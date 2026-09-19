@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import time
 from enum import Enum, auto
-from typing import Optional
 
 from config import settings
 from common.protocol import PerceptionMessage

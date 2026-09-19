@@ -230,6 +230,8 @@ bash /root/dev/scripts/run_tests.sh                                      # 车�
 ### 4.4 提交前自查
 
 - [ ] 本地测试全绿
+- [ ] 静态检查干净：`cd dev && "E:/venvs/smartcar-ultra/Scripts/python.exe" -m pyflakes $(git ls-files '*.py' | sed 's|^dev/||')`
+      （**必须**：2026-09-19 就是因为没跑它，把一个未定义变量 `out_us` 送上台架，跑到第 5 帧才炸）
 - [ ] 没有新增硬编码阈值/I​P/密码（阈值进 `config/settings.py`）
 - [ ] 所有资源获取都有对应的释放路径
 - [ ] 退出路径都安全停车

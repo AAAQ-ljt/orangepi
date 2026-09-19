@@ -218,7 +218,6 @@ def sweep_tilt(camera: int, tilts=None, frames: int = 3, step_s: float = 1.2) ->
     对每个角度：等云台到位 → 抓 frames 帧 → 报告 conf / 左右跟踪行数 / 配对行数，
     最后按分数排序给出**建议写进 config/site.yaml 的巡线仰角**。
     """
-    from control.driver import Driver
     from scripts.bench_common import MotorSession, install_signal_guard, restore_remote_stage
     from vision.camera_guard import camera_exclusive, open_camera
 
@@ -283,9 +282,9 @@ def sweep_tilt(camera: int, tilts=None, frames: int = 3, step_s: float = 1.2) ->
         print(f"[SWEEP]   tilt={tilt:3d}°  conf={conf:.2f}  左{rows[0]}行 右{rows[1]}行")
     if best_conf >= 0.4:
         print(f"[SWEEP] ✅ 建议巡线仰角 = {best_tilt}°（conf={best_conf:.2f}）")
-        print(f"[SWEEP]    写入方式（之后所有程序自动读）：")
+        print("[SWEEP]    写入方式（之后所有程序自动读）：")
         print(f"[SWEEP]    echo 'gimbal_tilt_lane: {best_tilt}' >> /root/dev/config/site.yaml")
-        print(f"[SWEEP]    或由 AI/人 直接把 config/site.yaml 的 target_x 一起更新")
+        print("[SWEEP]    或由 AI/人 直接把 config/site.yaml 的 gimbal_tilt_lane 写进去")
     else:
         print(f"[SWEEP] ⚠️ 最好的也只有 conf={best_conf:.2f}（<0.4）——这一路摄像头/这个位置还是不行，"
               f"换 --camera 0/2 再扫一次，或把车摆到正常赛道上再扫")

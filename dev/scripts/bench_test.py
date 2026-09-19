@@ -480,16 +480,18 @@ def main() -> int:
                                 planner.reset()
                                 target_steer = float(settings.SERVO_CENTER_ANGLE)
                             else:
-                                center = (obs.center_x if obs is not None else planner.target_x)
-                                target_steer = float(settings.SERVO_CENTER_ANGLE) + planner.steering_offset(center, dt)
+                                target_steer = float(settings.SERVO_CENTER_ANGLE) + planner.steering_offset(steer_center, dt)
                                 target_steer = max(settings.SERVO_CENTER_ANGLE - steer_limit,
                                                    min(settings.SERVO_CENTER_ANGLE + steer_limit, target_steer))
                             max_delta = settings.STEERING_SLEW_DEG_PER_S * dt
                             steering += max(-max_delta, min(max_delta, target_steer - steering))
 
+                            # 标称速度 → 按仲裁层比例降速（丢线时慢下来等有效观测，而不是急停）
+                            out_us = scaled_pulse(d.out_us, throttle_scale)
+
                             if use_motor and pca is not None:
                                 pca.set_steering_angle(steering)
-                                pca.write_us(pca.CH_ESC, d.out_us)
+                                pca.write_us(pca.CH_ESC, out_us)
 
                             if csv_fh is not None:
                                 csv_fh.write("%.3f,%s,%s,%s,%.3f,%.1f,%.1f,%.0f,%d,%d\n" % (

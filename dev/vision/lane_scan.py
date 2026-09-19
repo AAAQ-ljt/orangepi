@@ -68,6 +68,22 @@ def white_mask(frame_bgr: np.ndarray,
     mask[roi_y1:, :] = 0
     kernel = np.ones((3, 3), np.uint8)
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=1)
+
+    # 形状过滤：只留"细长"的连通域。
+    # 2026-09-16 实车教训：打印跑道表面**反光/高光**是低饱和亮区，颜色上和白线没区别，
+    # 掩膜里会出现成片块状物 → 扫线锁到反光上，中心乱跳。线是细长的，反光是块状的：
+    #     长度 = bbox 长边；厚度 = 面积 / 长度
+    # 厚度 ≤ LANE_LINE_MAX_THICK_PX 且长度 ≥ LANE_LINE_MIN_LEN_PX 才当线。
+    n, labels, stats, _cent = cv2.connectedComponentsWithStats(mask, connectivity=8)
+    if n > 1:
+        keep = np.zeros_like(mask)
+        for i in range(1, n):
+            x, y, bw, bh, area = stats[i]
+            length = max(bw, bh)
+            if length >= settings.LANE_LINE_MIN_LEN_PX and \
+                    (area / float(length)) <= settings.LANE_LINE_MAX_THICK_PX:
+                keep[labels == i] = 255
+        mask = keep
     return mask, (roi_y0, roi_y1)
 
 

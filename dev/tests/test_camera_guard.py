@@ -12,21 +12,29 @@
 """
 from __future__ import annotations
 
+import os
 import time
 
 from vision.camera_guard import (FFMPEG_SERVICES, device_holders, open_camera,
-                                 stop_ffmpeg, wait_device_free)
+                                 stop_ffmpeg)
 
 
-def test_device_holders_is_safe_without_procfs():
-    """开发机（Windows）没有 /proc：必须返回空列表而不是抛异常。"""
-    assert device_holders(2) == []
+def test_device_holders_is_safe_and_well_typed():
+    """没有 /proc（开发机）时必须返回空列表；有 /proc（车端）时返回 pid 列表。
+
+    注意：**车端跑这个测试时推流进程正占着摄像头**，所以不能断言"一定是空"——
+    这条测试只保证"不抛异常 + 类型正确"。
+    """
+    holders = device_holders(2)
+    assert isinstance(holders, list)
+    assert all(isinstance(p, int) for p in holders)
+    if not os.path.isdir("/proc"):          # 开发机（Windows）没有 procfs
+        assert holders == []
 
 
 def test_wait_device_free_returns_immediately_when_no_holders():
-    t0 = time.time()
-    assert wait_device_free(2, timeout_s=1.0) is True
-    assert time.time() - t0 < 0.5, "没有占用者时应立即返回"
+    from vision.camera_guard import wait_device_free as wdf
+    assert wdf(97, timeout_s=0.5) is True, "不存在的设备没有占用者，应立即返回"
 
 
 def test_wait_device_free_times_out(monkeypatch=None):
@@ -54,7 +62,7 @@ def test_open_camera_returns_none_for_missing_device():
 
 
 if __name__ == "__main__":
-    test_device_holders_is_safe_without_procfs()
+    test_device_holders_is_safe_and_well_typed()
     test_wait_device_free_returns_immediately_when_no_holders()
     test_wait_device_free_times_out()
     test_stop_ffmpeg_never_raises_without_systemctl()

@@ -33,7 +33,7 @@ import cv2
 import numpy as np
 
 from config import settings
-from vision.lane_scan import LaneScanner, line_like, trace_boundary, white_mask
+from vision.lane_scan import LaneScanner, line_like, white_mask
 
 ROI_CANDIDATES = (0.0, 0.15, 0.25, 0.35, 0.45, 0.55)
 
@@ -110,13 +110,16 @@ def _annotate(frame: np.ndarray, name: str | None = None, out_dir: str | None = 
     vis[(raw > 0) & (kept == 0)] = (0, 0, 255)         # 被形状过滤丢弃
     vis = cv2.addWeighted(vis, 0.55, frame, 0.45, 0)
 
-    # 连续跟踪到的左右边界（蓝=左，红=右）—— 调相机角度时就看这两条能不能压在真白线上
-    left = trace_boundary(kept, roi_y1, roi_y0, "left")
-    right = trace_boundary(kept, roi_y1, roi_y0, "right")
-    for y, x, _w in left:
-        cv2.circle(vis, (x, y), 1, (255, 80, 0), -1)
-    for y, x, _w in right:
-        cv2.circle(vis, (x, y), 1, (0, 0, 255), -1)
+    # 扫线结果（蓝=拟合出的左线，红=右线，黄=前瞻带里逐行的车道中心）
+    sc = LaneScanner()
+    obs = sc.scan(frame)
+    if obs.left_x is not None and obs.right_x is not None:
+        y_mid = (roi_y0 + roi_y1) // 2
+        cv2.line(vis, (int(obs.left_x), y_mid), (int(obs.left_x), roi_y1), (255, 80, 0), 2)
+        cv2.line(vis, (int(obs.right_x), y_mid), (int(obs.right_x), roi_y1), (0, 0, 255), 2)
+        cv2.circle(vis, (int(obs.center_x), y_mid), 4, (0, 255, 255), -1)
+        cv2.putText(vis, f"center={obs.center_x:.0f}", (int(obs.center_x) - 40, y_mid - 8),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1, cv2.LINE_AA)
 
     cv2.line(vis, (0, roi_y0), (frame.shape[1], roi_y0), (255, 128, 0), 1)
     cv2.line(vis, (0, roi_y1), (frame.shape[1], roi_y1), (255, 128, 0), 1)
@@ -125,7 +128,7 @@ def _annotate(frame: np.ndarray, name: str | None = None, out_dir: str | None = 
              (255, 0, 255), 1)
     cv2.line(vis, (int(obs.center_x), 0), (int(obs.center_x), frame.shape[0]), (0, 255, 255), 1)
     cv2.putText(vis, f"center={obs.center_x:.0f} conf={obs.confidence:.2f} "
-                     f"left={len(left)}row right={len(right)}row",
+                     f"L={obs.left_x} R={obs.right_x} segs={obs.valid_rows}",
                 (6, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
     if out_dir:
         cv2.imwrite(os.path.join(out_dir, f"annotated_{name}.jpg"), vis)
@@ -157,37 +160,22 @@ def angle_advice(frame: np.ndarray) -> str:
                 "**把下摄往下压**（或换更广角镜头），让两条白线完整进画面")
 
     # 2026-09-19 实车最典型的一种：左右线各自成段、y 范围完全不重叠
-    kept, _ = white_mask(frame, apply_shape_filter=True)
-    left = trace_boundary(kept, roi_y1, roi_y0, "left")
-    right = trace_boundary(kept, roi_y1, roi_y0, "right")
-    if left and right:
-        ly = {y for y, _x, _w in left}
-        ry = {y for y, _x, _w in right}
-        if not (ly & ry):
-            return (f"**左右白线出现在画面的不同高度段**（左 y{min(ly)}~{max(ly)}、"
-                    f"右 y{min(ry)}~{max(ry)}，没有一行同时看到两条）→ 这是镜头太「平」的典型表现："
-                    f"近处车道比画面还宽、远处才收进画面。**把下摄往下压**，"
-                    f"让两条白线在画面下半部同时出现")
     return ("白点在画面里但不成对/不连续 → 先按上面的逐行白点图确认白线的确切位置，"
             "再决定是压角度还是调 LANE_ROI_TOP_RATIO")
 
 
 def verdict_of(frame: np.ndarray) -> tuple:
     """(是否可用, 结论文本, 左右跟踪行数) —— 终端与叠加图共用同一套判据。"""
-    mask, (roi_y0, roi_y1) = white_mask(frame)
-    left = trace_boundary(mask, roi_y1, roi_y0, "left")
-    right = trace_boundary(mask, roi_y1, roi_y0, "right")
     obs = LaneScanner().scan(frame)
     ok = obs.confidence >= 0.4
     if ok:
-        text = f"✅ 可用：双侧跟踪 左{len(left)}行 右{len(right)}行 conf={obs.confidence:.2f}"
-    elif len(left) < 10 and len(right) < 10:
-        text = (f"❌ 线不在画面里（左{len(left)}行/右{len(right)}行 conf={obs.confidence:.2f}）"
-                f"→ 先调下摄俯仰角，别调阈值")
+        text = (f"✅ 可用：两侧各 {obs.valid_rows} 条支持线段，"
+                f"L={obs.left_x} R={obs.right_x} conf={obs.confidence:.2f}")
     else:
-        text = (f"⚠️ 只跟到零碎边（左{len(left)}行/右{len(right)}行 conf={obs.confidence:.2f}）"
-                f"→ 多半是锁在地面反光/边缘上了")
-    return ok, text, (len(left), len(right))
+        text = (f"❌ 没配到车道线（conf={obs.confidence:.2f}，支持线段 {obs.valid_rows}）"
+                f"→ 看上面的『逐行白点图』确认白线在哪、斜率对不对；"
+                f"必要时调 LANE_SLOPE_MIN/MAX 或 ROI")
+    return ok, text, (obs.valid_rows, obs.valid_rows)
 
 
 def analyze_frame(frame: np.ndarray, name: str, out_dir: str | None = None, verbose: bool = True) -> tuple:
@@ -247,12 +235,9 @@ def sweep_tilt(camera: int, tilts=None, frames: int = 3, step_s: float = 1.2) ->
                             ok, frame = cap.read()
                             if not ok or frame is None:
                                 continue
-                            mask, (y0, y1) = white_mask(frame)
-                            L = trace_boundary(mask, y1, y0, "left")
-                            R = trace_boundary(mask, y1, y0, "right")
                             obs = LaneScanner().scan(frame)
                             if obs.confidence >= best_conf:
-                                best_conf, rows = obs.confidence, (len(L), len(R))
+                                best_conf, rows = obs.confidence, (obs.valid_rows, obs.valid_rows)
                         results.append((best_conf, tilt, rows))
                         mark = "✅" if best_conf >= 0.4 else ("~" if best_conf >= 0.2 else " ")
                         print(f"[SWEEP]   tilt={tilt:3d}°  conf={best_conf:.2f}  "

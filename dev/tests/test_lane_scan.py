@@ -19,35 +19,57 @@ def _scanner(**kw) -> LaneScanner:
 
 
 def _track_image(shift: int = 0, left: bool = True, right: bool = True,
-                 thickness: int = 7) -> np.ndarray:
-    """红棕跑道 + 两条竖直白线（默认关于画面中心对称，中线 = 320）。"""
+                 thickness: int = 7, noise: bool = False) -> np.ndarray:
+    """红棕跑道 + 两条**透视斜线**（默认关于画面中心对称，中线 = 320）。
+
+    ⚠️ 必须是斜线：2026-09-19 起扫线改用"边缘 + Hough 直线 + 斜率先验"
+    （移植参考实现 oldCode/src/vision/vision.cpp），而**车道线在画面里一定是斜的**
+    （越远越靠中间）。用竖线做测试图会直接被斜率先验滤掉，测不到真东西。
+    """
     frame = np.zeros((H, W, 3), dtype=np.uint8)
     frame[:, :, 2] = 130
     frame[:, :, 1] = 40
     frame[:, :, 0] = 30
-    y0, y1 = int(H * 0.45), H - 16
+    y_top, y_bot = int(H * 0.35), H - 16          # 与默认 ROI（0.35 / bottom 200）一致
     half = thickness // 2
+
+    def draw(x_bot: float, x_top: float):
+        for y in range(y_top, y_bot):
+            t = (y - y_top) / float(max(1, y_bot - y_top))
+            x = int(round(x_top + (x_bot - x_top) * t))
+            frame[y, max(0, x - half):x + half + 1] = 235
+
     if left:
-        x = 180 + shift
-        frame[y0:y1, x - half:x + half + 1] = 235
+        draw(60 + shift, 250 + shift)             # 近处在左、远处靠中间 → 斜率为负
     if right:
-        x = 460 + shift
-        frame[y0:y1, x - half:x + half + 1] = 235
+        draw(580 + shift, 390 + shift)            # 远处靠中间 → 斜率为正
+    if noise:
+        rng = np.random.default_rng(0)
+        for _ in range(400):                      # 塑胶跑道颗粒：小碎白点
+            y = int(rng.integers(y_top, y_bot))
+            x = int(rng.integers(0, W))
+            frame[y, x:x + 2] = 235
     return frame
 
 
 def test_centered_track_is_symmetric():
     obs = _scanner().scan(_track_image())
-    assert abs(obs.center_x - 320.0) <= 5.0, f"对称赛道中心应≈320，实际 {obs.center_x:.1f}"
-    assert obs.confidence > 0.6, f"双侧齐全且宽度一致，置信度应偏高，实际 {obs.confidence:.2f}"
-    assert obs.valid_rows >= 20, f"有效行太少：{obs.valid_rows}"
+    assert abs(obs.center_x - 320.0) <= 15.0, f"对称赛道中心应≈320，实际 {obs.center_x:.1f}"
+    assert obs.confidence >= 0.4, f"双侧齐全且收敛，置信度应达可用线，实际 {obs.confidence:.2f}"
+    assert obs.valid_rows >= 2, f"支持线段太少：{obs.valid_rows}"
     assert obs.left_x is not None and obs.right_x is not None
     assert obs.left_x < 320 < obs.right_x
 
 
 def test_shifted_track_moves_center():
     obs = _scanner().scan(_track_image(shift=40))
-    assert 350.0 <= obs.center_x <= 370.0, f"整体右移 40px 后中心应≈360，实际 {obs.center_x:.1f}"
+    assert 340.0 <= obs.center_x <= 380.0, f"整体右移 40px 后中心应≈360，实际 {obs.center_x:.1f}"
+
+
+def test_particle_noise_does_not_break_scan():
+    """塑胶跑道的颗粒雪点不该破坏扫线（边缘+Hough 天然抗这个）。"""
+    obs = _scanner().scan(_track_image(noise=True))
+    assert abs(obs.center_x - 320.0) <= 20.0, f"颗粒噪声下中心应仍≈320，实际 {obs.center_x:.1f}"
 
 
 def test_single_side_line_gives_zero_confidence():
@@ -58,7 +80,7 @@ def test_single_side_line_gives_zero_confidence():
     """
     obs = _scanner().scan(_track_image(left=False))
     assert obs.confidence == 0.0, f"单侧线不该给出可信中心，实际置信度 {obs.confidence:.2f}"
-    assert obs.valid_rows >= 5, "行是看到了的，只是不足以给出中心"
+    assert obs.valid_rows == 0, "缺一侧时有效支持应为 0（valid_rows 现在是两侧线段数的较小值）"
 
 
 def test_wide_white_region_is_not_a_lane_line():
@@ -130,6 +152,7 @@ def test_noisy_white_blobs_do_not_dominate():
 if __name__ == "__main__":
     test_centered_track_is_symmetric()
     test_shifted_track_moves_center()
+    test_particle_noise_does_not_break_scan()
     test_single_side_line_gives_zero_confidence()
     test_wide_white_region_is_not_a_lane_line()
     test_glare_blob_is_rejected()

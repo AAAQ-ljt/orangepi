@@ -83,8 +83,8 @@ START_USE_EDGE_DENSITY = False              # 是否同时要求边缘密度判�
 START_EDGE_DENSITY_THRESH = 0.02            # 边缘密度阈值（START_USE_EDGE_DENSITY=True 时生效）
 
 # ---------------------------------------------------------------- 扫线
-LANE_ROI_TOP_RATIO = 0.45       # ROI 上边界占画面高度比例
-LANE_ROI_BOTTOM_MARGIN = 16     # 距画面底部保留的像素（避免拍到车头）
+LANE_ROI_TOP_RATIO = 0.35   # ROI 上沿（0.35 → y=168）【现场可调】
+LANE_ROI_BOTTOM_MARGIN = 200   # ROI 下沿（200 → y=280）【现场可调】
 LANE_ROW_STEP = 2               # 每隔多少行扫一次
 LANE_WEIGHT_PEAK = 8.0          # 纵向权重峰值（中间行权重最大，对应"看得不远不近"）
 LANE_WHITE_S_MAX = 70           # 白线饱和度上限（HSV）
@@ -103,6 +103,28 @@ LANE_MAX_LINE_W_PX = 60         # 白线连通段最大宽度：更宽的是地�
 # ⚠️ 不要改回"厚度 ≤ N 像素"的绝对阈值：前视浅角度下白线的投影厚度本来就大，
 #    绝对阈值会把真线一起滤掉（2026-09-16 因此把置信度从 0.6 打到 0.1、车完全不动）。
 LANE_MASK_OPEN_PX = 3           # 掩膜开运算核（去颗粒雪点）；0=关闭
+
+# ---- 边缘 + Hough 直线扫线（2026-09-19 操场重写，移植参考实现 oldCode/src/vision/vision.cpp）----
+# 参考实现用 Canny 边缘 + HoughLinesP，完全绕开"颜色/亮度分不开反光"的问题；
+# 关键先验是**车道线的斜率有物理范围**（把地面纹理、颗粒、反光的边缘全滤掉）。
+LANE_CANNY_LOW = 60             # Canny 低阈值（参考实现初始值）
+LANE_CANNY_HIGH = 140           # Canny 高阈值
+LANE_CANNY_ADAPT = 1            # 自适应：边缘太多就提高阈值、太少就降低（参考实现同款）
+LANE_CANNY_TARGET_LO = 2000     # 边缘像素数低于它 → 阈值下调
+LANE_CANNY_TARGET_HI = 2500     # 边缘像素数高于它 → 阈值上调
+LANE_HOUGH_THRESH = 50          # HoughLinesP 阈值（参考实现）
+LANE_HOUGH_MIN_LEN = 30         # 最短线段
+LANE_HOUGH_MAX_GAP = 5          # 线段内最大允许间隙
+LANE_SLOPE_MIN = 0.5            # 车道线斜率 |dx/dy| 下限（等价参考实现的 |dy/dx| ≤ 2）
+LANE_SLOPE_MAX = 4.0            # 斜率上限（等价参考实现 |dy/dx| ≥ 0.25）
+LANE_MIN_SEG_LEN_SUM = 120      # 一侧所有支持线段的总长度下限（不够就是没真线）
+LANE_LOOKAHEAD_RATIO = 0.6      # 前瞻带占 ROI 的比例（0.6 = 看 ROI 上部 60% 的行）
+# ---- 直线拟合（2026-09-19 操场重写：车道线在画面里是直线，拟合比逐行跟踪稳得多）----
+LANE_FIT_TOL_PX = 6.0           # 内点判据：点到直线的距离上限（像素）
+LANE_FIT_ITERS = 120            # RANSAC 迭代次数
+LANE_FIT_ROW_STEP = 2           # 取候选点时的行步长
+LANE_FIT_MIN_SPAN_PX = 40       # 内点必须覆盖的纵向跨度（太小说明只是局部碎点）
+LANE_CONVERGE_MAX_RATIO = 0.98  # 透视校验：远端宽度 / 近端宽度 必须小于它（要收敛）
 LANE_LINE_MIN_LEN_PX = 20       # 连通域最长边至少这么长才算「线」
 LANE_LINE_MIN_ELONG = 3.0       # 细长比下限（块状反光约 1~2.5，白线通常 >5）【现场可调】
 LANE_LINE_MAX_THICK_PX = 80     # 次级保险：只挡"整片亮区"，不要用它做精细判据
@@ -116,8 +138,8 @@ LANE_TRACK_SEED_STEP = 8        # 多种子扫描的取样步长（越大越快�
 # 配对宽度闸门：车道是 1.22m，在画面里的投影宽度有物理上下界。
 # 2026-09-19 加：多种子跟踪在"画面里没有真线"时也能凑出很长的路径（反光/斑马线），
 # 所以要求"左右都在、且配对宽度落在这个区间"才算有效行——宁可不给中心，也不给错中心。
-LANE_PAIR_W_MIN_PX = 110
-LANE_PAIR_W_MAX_PX = 620
+LANE_PAIR_W_MIN_PX = 120
+LANE_PAIR_W_MAX_PX = 700
 
 # 转向符号：+1 = 角度增大 → 右转；实车若相反就改成 -1（可写进 config/site.yaml，不必改代码）
 STEER_SIGN = 1

@@ -50,6 +50,18 @@ def test_fsm_board_flicker_resets_release_counter():
 
 # --------------------------------------------------------------------- 规划
 def test_planner_steers_toward_lane_center():
+    """⚠️ 显式固定 STEER_SIGN=+1：车端 site.yaml 可能有 steer_sign: -1（现场标定），
+    单测必须与现场标定解耦，否则在车上会红。"""
+    from config import settings
+    old_sign = settings.STEER_SIGN
+    settings.STEER_SIGN = 1.0
+    try:
+        _planner_steers_toward_lane_center_body()
+    finally:
+        settings.STEER_SIGN = old_sign
+
+
+def _planner_steers_toward_lane_center_body():
     planner = Planner(target_x=320.0)
     # 车道中心出现在画面右侧 → 车偏左 → 应右转（角度 > 90）
     right = planner.plan(PerceptionMessage(center_x=400.0), dt=0.05)

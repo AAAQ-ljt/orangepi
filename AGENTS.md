@@ -340,6 +340,7 @@ StartGateState(blocked: bool, armed: bool, released: bool, blue_ratio: float, ti
 
 | 我要… | 看这篇 |
 |---|---|
+| **去操场调试** | `doc/实地调试清单.md` |
 | 知道现在该干什么 | `doc/执行路线图.md` |
 | 理解方案与决策 | `doc/具体实施方案.md` |
 | 采数据 / 标注 / 训练 / 转 RKNN | `doc/数据与模型方案.md` |

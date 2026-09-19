@@ -58,3 +58,21 @@ profiles:
       obstacle_cone_blue: cone
       obstacle_cone_red: cone
       parking_area: parking_area
+
+  # 我们自己训练的 4 类检测（2026-09-19 车上有 models/best_4cls_640x480_fp16.rknn，
+  # 输入正好是摄像头原生 480x640 → 模型零缩放、坐标即原图坐标）
+  # id 是靠"已知目标反推"认出来的，1/3 已实测确认，0/2 待确认（画面上还没出现过对应目标）
+  car4cls:
+    task: detect
+    imgsz: [480, 640]
+    conf: 0.25
+    names:
+      0: traffic_light          # 【待确认】推测：红绿灯（标{红/绿/灭}先都映射到 light）
+      1: crosswalk              # 实测：含斑马线画面 0.708 ✓
+      2: cone                   # 【待确认】推测：蓝色锥桶
+      3: blue_board             # 实测：蓝板充满画面 0.638 ✓（停车标志位=同一块蓝板）
+    map:
+      traffic_light: light
+      crosswalk: zebra
+      cone: cone
+      blue_board: blue_board

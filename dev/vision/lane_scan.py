@@ -35,8 +35,11 @@ def white_mask(frame_bgr: np.ndarray,
                roi_bottom_margin: int = None) -> Tuple[np.ndarray, Tuple[int, int]]:
     """返回 (整幅二值掩膜, (roi_y0, roi_y1))。
 
-    白线判据：饱和度低 + 亮度高；亮度阈值**自适应**（取 ROI 内 V 的 95 分位乘系数），
-    这样强光/阴影下不用重新标定，同时保留一个绝对下限防止纯黑画面产生噪声。
+    白线判据：饱和度低 + 亮度高；亮度阈值**自适应**：
+        thr = max(V_MIN, 中位数 + SPLIT × (95分位 − 中位数))
+    也就是在"地面/纸面底色"与"更亮的白线"之间自动切一刀。
+    （旧公式 max(V_MIN, 0.75×V95) 在地板与打印白线只差 20~30 级亮度时会把整片地板判成白，
+     详见 config/settings.py 的 LANE_WHITE_V_SPLIT 注释。）
     """
     top_ratio = settings.LANE_ROI_TOP_RATIO if roi_top_ratio is None else roi_top_ratio
     bottom_margin = (settings.LANE_ROI_BOTTOM_MARGIN
@@ -52,8 +55,13 @@ def white_mask(frame_bgr: np.ndarray,
     v = hsv[:, :, 2]
 
     roi_v = v[roi_y0:roi_y1, :]
-    v_hi = float(np.percentile(roi_v, 95)) if roi_v.size else 0.0
-    v_thresh = max(settings.LANE_WHITE_V_MIN, settings.LANE_WHITE_ADAPT_RATIO * v_hi)
+    if roi_v.size:
+        v_med = float(np.percentile(roi_v, 50))
+        v_hi = float(np.percentile(roi_v, 95))
+        v_thresh = max(settings.LANE_WHITE_V_MIN,
+                       v_med + settings.LANE_WHITE_V_SPLIT * (v_hi - v_med))
+    else:
+        v_thresh = float(settings.LANE_WHITE_V_MIN)
 
     mask = ((s <= settings.LANE_WHITE_S_MAX) & (v >= v_thresh)).astype(np.uint8) * 255
     mask[:roi_y0, :] = 0
@@ -87,19 +95,47 @@ class LaneScanner:
 
     # ------------------------------------------------------------------ 内部
     @staticmethod
+    def _run_width(row: np.ndarray, idx: int) -> int:
+        """idx 所在的白色连通段宽度（像素）。"""
+        l = idx
+        while l > 0 and row[l - 1]:
+            l -= 1
+        r = idx
+        w = row.size
+        while r < w - 1 and row[r + 1]:
+            r += 1
+        return r - l + 1
+
+    @classmethod
+    def _pick(cls, row: np.ndarray, candidates: np.ndarray, from_center: bool,
+              max_line_w: int) -> Optional[int]:
+        """从候选中挑一个"像车道线"的：**从靠近画面中心的一侧往外找**，
+        取第一个宽度不超过 max_line_w 的连通段。
+
+        为什么要限宽（2026-09-16 实车教训）：实验室地面/纸边的亮区也会被判成"白"，
+        它们是大片连通区（几十~上百像素宽），而车道线只有几~十几像素宽。
+        不限宽的话，扫线会锁到大片亮区上，中心值乱跳 → 车左右猛打。
+        """
+        order = candidates[::-1] if from_center else candidates
+        for idx in order:
+            if cls._run_width(row, int(idx)) <= max_line_w:
+                return int(idx)
+        return None
+
+    @staticmethod
     def _row_boundaries(row: np.ndarray, center0: int,
-                        margin: int = settings.LANE_EDGE_MARGIN) -> Tuple[Optional[int], Optional[int]]:
+                        margin: int = settings.LANE_EDGE_MARGIN,
+                        max_line_w: int = settings.LANE_MAX_LINE_W_PX) -> Tuple[Optional[int], Optional[int]]:
         """在一行里找左右边界。
 
         `center0` 是期望中心；若该像素本身就是白线（车压线），先跳过它所在的连通段，
         避免把"车下的白线"当成车道边界。
-        距画面边缘 `margin` 像素内的白点忽略——那里出现的通常是画面边框/远处墙体等伪影，
-        不是车道线。
+        距画面边缘 `margin` 像素内的白点忽略——那里出现的通常是画面边框/远处墙体等伪影。
+        超过 `max_line_w` 的白色连通段不算车道线（那是地面/纸边的亮区，见 _pick 注释）。
         """
         xs = np.flatnonzero(row)
         if xs.size == 0:
             return None, None
-        # 去掉贴边的伪影
         xs = xs[(xs >= margin) & (xs < row.size - margin)]
         if xs.size == 0:
             return None, None
@@ -117,15 +153,19 @@ class LaneScanner:
             left_limit = l - 1
             right_start = r + 1
 
-        left_candidates = xs[xs <= left_limit]
-        right_candidates = xs[xs >= right_start]
-        left = int(left_candidates.max()) if left_candidates.size else None
-        right = int(right_candidates.min()) if right_candidates.size else None
+        left = LaneScanner._pick(row, xs[xs <= left_limit], from_center=True, max_line_w=max_line_w)
+        right = LaneScanner._pick(row, xs[xs >= right_start], from_center=True, max_line_w=max_line_w)
         return left, right
 
     # ------------------------------------------------------------------ 接口
     def scan(self, frame_bgr: np.ndarray) -> LaneObservation:
-        """对一帧做扫线，返回观测量。"""
+        """对一帧做扫线，返回观测量。
+
+        ⚠️ 关键改动（2026-09-16 实车教训）：**只有左右两侧都找到的行才参与求中心**。
+        旧写法照官方实现"缺哪侧就用 0 / w-1 兜底"，结果单侧丢线时行中点被拉飞
+        （最远能偏半幅画面），而置信度还有 0.5~0.6 被当成有效 —— 车就会左右猛打、冲出赛道。
+        现在：单侧行只用于统计（不参与中心计算），且会拉低置信度。
+        """
         h, w = frame_bgr.shape[:2]
         mask, (roi_y0, roi_y1) = white_mask(frame_bgr, self.roi_top_ratio, self.roi_bottom_margin)
         center0 = int(min(max(self.target_x, 0), w - 1))
@@ -146,16 +186,17 @@ class LaneScanner:
             left, right = self._row_boundaries(mask[y], center0)
             if left is None and right is None:
                 continue
-            # 缺哪侧就用画面边界兜底（官方做法），但这行只算"部分有效"
-            if left is None:
-                left, right = 0, right
+            if left is None or right is None:
+                # 单侧缺失：只统计，不参与中心计算（避免"0 / w-1 兜底"把中点拉飞）
                 partial_rows += 1
-            elif right is None:
-                right = w - 1
-                partial_rows += 1
-            else:
-                full_rows += 1
-                widths.append(right - left)
+                if left is not None:
+                    left_sum += left; left_n += 1
+                if right is not None:
+                    right_sum += right; right_n += 1
+                continue
+
+            full_rows += 1
+            widths.append(right - left)
             left_sum += left
             left_n += 1
             right_sum += right
@@ -169,20 +210,21 @@ class LaneScanner:
 
         valid_rows = full_rows + partial_rows
         total_rows = len(rows)
-        if valid_rows < self.min_valid_rows or weight_total <= 0:
+        # 双侧齐全的行太少 → 直接判不可信（宁可让仲裁层降级，也不要输出乱跳的中心）
+        if full_rows < self.min_valid_rows or weight_total <= 0:
             return LaneObservation(center_x=self.target_x, confidence=0.0,
                                    valid_rows=valid_rows, total_rows=total_rows, source="scan")
 
         center_x = weighted_sum / weight_total
 
-        # 置信度 = 有效行占比 × 宽度一致性（宽度越稳定越可信）
-        coverage = (full_rows + 0.5 * partial_rows) / float(total_rows)
+        # 置信度 = 双侧齐全行占比 × 宽度一致性（宽度越稳定越可信）
+        coverage = full_rows / float(total_rows)
         if len(widths) >= 2:
             mean_w = float(np.mean(widths))
             cv = float(np.std(widths)) / mean_w if mean_w > 1e-6 else 1.0
             consistency = float(np.clip(1.0 - cv, 0.0, 1.0))
         else:
-            consistency = 0.6      # 只有单侧线时给中等一致性
+            consistency = 0.6
         confidence = float(np.clip(coverage * (0.5 + 0.5 * consistency), 0.0, 1.0))
 
         return LaneObservation(

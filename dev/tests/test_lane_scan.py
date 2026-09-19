@@ -44,11 +44,23 @@ def test_shifted_track_moves_center():
     assert 350.0 <= obs.center_x <= 370.0, f"整体右移 40px 后中心应≈360，实际 {obs.center_x:.1f}"
 
 
-def test_single_side_line_reduces_confidence():
+def test_single_side_line_gives_zero_confidence():
+    """只有单侧线时**不给中心**（不用 0/w-1 兜底）→ 置信度必须为 0，让仲裁层去降级。
+
+    2026-09-16 实车教训：旧实现用画面边界兜底，单侧丢线时行中点被拉飞，
+    而置信度还有 0.5~0.6 → 被当成有效 → 车左右猛打冲出赛道。
+    """
     obs = LaneScanner().scan(_track_image(left=False))
-    assert obs.confidence < 0.6, f"只剩单侧线时置信度应下降，实际 {obs.confidence:.2f}"
-    assert obs.confidence > 0.0, "单侧线仍是有效信息，不应直接判 0"
-    assert obs.center_x < 320.0, "只有右侧线时（左侧用 0 兜底）中心会被拉向左侧"
+    assert obs.confidence == 0.0, f"单侧线不该给出可信中心，实际置信度 {obs.confidence:.2f}"
+    assert obs.valid_rows >= 5, "行是看到了的，只是不足以给出中心"
+
+
+def test_wide_white_region_is_not_a_lane_line():
+    """大片白色区域（实验室地面/纸边）不应被当成车道线。"""
+    frame = _track_image()
+    frame[int(H * 0.45):H - 16, :] = 235        # 下半幅全白
+    obs = LaneScanner().scan(frame)
+    assert obs.confidence == 0.0, "整片白不是两条线，应判无有效车道"
 
 
 def test_blank_track_has_zero_confidence():
@@ -76,7 +88,8 @@ def test_noisy_white_blobs_do_not_dominate():
 if __name__ == "__main__":
     test_centered_track_is_symmetric()
     test_shifted_track_moves_center()
-    test_single_side_line_reduces_confidence()
+    test_single_side_line_gives_zero_confidence()
+    test_wide_white_region_is_not_a_lane_line()
     test_blank_track_has_zero_confidence()
     test_noisy_white_blobs_do_not_dominate()
     print("test_lane_scan: all passed")

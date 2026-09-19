@@ -113,6 +113,9 @@ def main() -> int:
                     help="忽略'无有效车道'保护（台架观察转向用，比赛绝不能用）")
     ap.add_argument("--calibrate", type=int, default=0, metavar="N",
                     help="静止标定车道中心：车摆正在车道中央，采 N 帧求平均并输出 --target-x（不动电机）")
+    ap.add_argument("--steer-test", action="store_true",
+                    help="转向方向自检：把舵机依次打到 中位/右/左/中位（每档 1.5s）—— 你看着前轮，"
+                         "确认\"角度大\"是不是右转；不对就往 config/site.yaml 写 steer_sign: -1")
     ap.add_argument("--show", action="store_true", help="显示预览窗口（需要 X11）")
     ap.add_argument("--no-motor", action="store_true", help="只跑视觉与决策，不输出动力")
     ap.add_argument("--allow-motion", "--i-know-wheels-are-up", dest="allow_motion", action="store_true",
@@ -196,6 +199,24 @@ def main() -> int:
     rc = 0
     try:
         with MotorSession(state, enabled=use_motor, speed_us_max=max(args.speed_us, args.start_us)) as pca:
+            # ---- 转向方向自检（电调保持中位，车不会动，只有前轮会转）----
+            if args.steer_test:
+                if pca is None:
+                    print("[STEER-TEST] 需要电机通道（别加 --no-motor）")
+                    return 2
+                print("[STEER-TEST] 转向方向自检开始：电调保持中位 1500us，车不会走，只看前轮")
+                steps = ((90, "中位（车轮应朝正前）"),
+                         (90 + 20, "'角度大 20°' —— 若前轮此时【向右】，说明 STEER_SIGN=+1 是对的"),
+                         (90 - 20, "'角度小 20°' —— 若前轮此时【向左】，进一步确认"),
+                         (90, "回中位"))
+                for ang, note in steps:
+                    print(f"[STEER-TEST]   舵机 = {ang}°   {note}")
+                    pca.set_steering_angle(ang)
+                    time.sleep(1.5)
+                print("[STEER-TEST] 结束。结论：")
+                print("[STEER-TEST]   · 角度大=右转  → 不用改，默认就是对的")
+                print("[STEER-TEST]   · 角度大=左转  → 在 /root/dev/config/site.yaml 里写一行 steer_sign: -1")
+                return 0
             with camera_exclusive():
                 cap = cv2.VideoCapture(args.camera, cv2.CAP_V4L)
                 cap.set(cv2.CAP_PROP_FRAME_WIDTH, args.width)

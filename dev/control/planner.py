@@ -40,10 +40,14 @@ class Planner:
         self.error_filter.reset()
 
     def steering_offset(self, center_x: float, dt: float) -> float:
-        """由横向观测量算出转向角增量（度）。"""
+        """由横向观测量算出转向角增量（度）。
+
+        转向符号由 `settings.STEER_SIGN` 决定（+1：角度增大=右转）。实车若发现"越修越偏"，
+        说明符号反了 —— 把 `steer_sign: -1` 写进 `config/site.yaml` 即可，不用改代码。
+        """
         error_px = max(-settings.LANE_MAX_ERROR_PX,
                        min(settings.LANE_MAX_ERROR_PX, float(center_x) - self.target_x))
-        error_units = error_px / float(settings.LANE_ERROR_SCALE)
+        error_units = error_px / float(settings.LANE_ERROR_SCALE) * float(settings.STEER_SIGN)
         filtered = self.error_filter.update(error_units)
         offset = self.pid.update(filtered, dt)
         return max(-self.max_steer, min(self.max_steer, offset))

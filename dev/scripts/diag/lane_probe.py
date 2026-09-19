@@ -124,9 +124,8 @@ def _annotate(frame: np.ndarray, name: str | None = None, out_dir: str | None = 
     cv2.line(vis, (int(settings.TARGET_X), 0), (int(settings.TARGET_X), frame.shape[0]),
              (255, 0, 255), 1)
     cv2.line(vis, (int(obs.center_x), 0), (int(obs.center_x), frame.shape[0]), (0, 255, 255), 1)
-    verdict = (f"OK 双侧跟踪 左{len(left)}行 右{len(right)}行" if obs.confidence >= 0.4 else
-               f"线不足: 左{len(left)}行 右{len(right)}行")
-    cv2.putText(vis, f"{verdict} center={obs.center_x:.0f} conf={obs.confidence:.2f}",
+    cv2.putText(vis, f"center={obs.center_x:.0f} conf={obs.confidence:.2f} "
+                     f"left={len(left)}row right={len(right)}row",
                 (6, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
     if out_dir:
         cv2.imwrite(os.path.join(out_dir, f"annotated_{name}.jpg"), vis)
@@ -134,19 +133,40 @@ def _annotate(frame: np.ndarray, name: str | None = None, out_dir: str | None = 
     return vis
 
 
-def analyze_frame(frame: np.ndarray, name: str, out_dir: str | None = None, verbose: bool = True) -> None:
+def verdict_of(frame: np.ndarray) -> tuple:
+    """(是否可用, 结论文本, 左右跟踪行数) —— 终端与叠加图共用同一套判据。"""
+    mask, (roi_y0, roi_y1) = white_mask(frame)
+    left = trace_boundary(mask, roi_y1, roi_y0, "left")
+    right = trace_boundary(mask, roi_y1, roi_y0, "right")
+    obs = LaneScanner().scan(frame)
+    ok = obs.confidence >= 0.4
+    if ok:
+        text = f"✅ 可用：双侧跟踪 左{len(left)}行 右{len(right)}行 conf={obs.confidence:.2f}"
+    elif len(left) < 10 and len(right) < 10:
+        text = (f"❌ 线不在画面里（左{len(left)}行/右{len(right)}行 conf={obs.confidence:.2f}）"
+                f"→ **先调下摄俯仰角**：让两条白线进画面下半部，别调阈值")
+    else:
+        text = (f"⚠️ 只跟到零碎边（左{len(left)}行/右{len(right)}行 conf={obs.confidence:.2f}）"
+                f"→ 多半是锁在地面反光/边缘上了，看上面逐行白点图确认白线位置")
+    return ok, text, (len(left), len(right))
+
+
+def analyze_frame(frame: np.ndarray, name: str, out_dir: str | None = None, verbose: bool = True) -> tuple:
     if verbose:
         print(f"  ---- {name}  ({frame.shape[1]}x{frame.shape[0]}) ----")
         _row_map(frame)
         _print_components(frame)
         _print_roi_sweep(frame)
+    _ok, text, _rows = verdict_of(frame)
+    print(f"    判定：{text}")
     if out_dir:
         _annotate(frame, name, out_dir)
         print(f"    存图：{os.path.join(out_dir, 'annotated_' + name + '.jpg')}")
+    return verdict_of(frame)
 
 
 def live_view(camera: int, quiet: bool = False) -> int:
-    """实时预览：**调下摄俯仰角时用**。
+    """实时预览（需要 X11；本车目前没装 X 服务器，用浏览器看图传 + 下面的数字模式即可）。
 
     目标画面（决定了扫线能不能工作）：
       · 两条白线从画面**下半部**向中间上方收拢（成 V），左右大致对称；
@@ -158,8 +178,10 @@ def live_view(camera: int, quiet: bool = False) -> int:
     from vision.camera_guard import camera_exclusive
 
     if not os.environ.get("DISPLAY"):
-        print("[PROBE] 没有 DISPLAY：车机是无桌面环境，先 `bash x11.sh` 再跑 --show；"
-              "不需要看画面可以去掉 --show（只抓图分析）")
+        print("[PROBE] 没有 DISPLAY（本车没装 X 服务器）：改用不需要画面的两招——")
+        print("[PROBE]   · 调角度：用浏览器看你平时那路图传（副摄 cam_car0027_sub），"
+              "把两条白线调进画面下半部、左右对称")
+        print("[PROBE]   · 看数字：不带 --show 跑本脚本，终端会直接给出『可用/线不足』的结论 + 叠加图")
         return 2
 
     print("[PROBE] 实时预览：把两条白线调到画面下半部、左右对称（V 字），按 q 退出")
@@ -196,7 +218,7 @@ def main() -> int:
     ap.add_argument("--out", default="/root/dev/logs/lane_probe", help="存图目录")
     ap.add_argument("--analyze", default="", help="只分析已有图片（本地跑，不需要摄像头）")
     ap.add_argument("--show", action="store_true",
-                    help="实时预览（调下摄俯仰角用；需要 X11：先 bash x11.sh）")
+                    help="实时预览窗口（需要 X11；本车没装 X 服务器，用浏览器看图传 + 本脚本的数字/叠加图即可）")
     ap.add_argument("--save-annotated", action="store_true",
                     help="离线分析时也输出叠加图（绿=判为线，红=被形状过滤丢弃，黄=中心，品红=target_x）")
     ap.add_argument("--quiet", action="store_true", help="只存图不打印明细")
@@ -225,6 +247,8 @@ def main() -> int:
     from vision.camera_guard import camera_exclusive
 
     print(f"[PROBE] 打开摄像头 {args.camera}（会临时停掉两路推流，退出自动恢复）")
+    good = 0
+    last = ("", (0, 0))
     with camera_exclusive():
         cap = cv2.VideoCapture(args.camera, cv2.CAP_V4L)
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, settings.IMG_W)
@@ -237,9 +261,23 @@ def main() -> int:
             ok, frame = cap.read()
             if not ok or frame is None:
                 continue
-            analyze_frame(frame, f"{i:02d}", out_dir=args.out, verbose=not args.quiet)
+            ok_v, text, rows = analyze_frame(frame, f"{i:02d}", out_dir=args.out,
+                                             verbose=not args.quiet)
+            good += 1 if ok_v else 0
+            last = (text, rows)
         cap.release()
-    print(f"[PROBE] 完成，图在 {args.out}（拉回本地：python scripts/ssh_get.py -r {args.out} .）")
+
+    print(f"\n[PROBE] ===== 结论：{args.frames} 帧里 {good} 帧可用 =====")
+    print(f"[PROBE] 最后一帧：{last[0]}")
+    if good == 0:
+        print("[PROBE] 下一步（按顺序试）：")
+        print("[PROBE]   1) **调下摄俯仰角**：让两条白线进入画面下半部、左右大致对称（用浏览器看图传，"
+              "或看存下来的 annotated_*.jpg）")
+        print("[PROBE]   2) 若白线已在画面里但仍判不可用 → 看上面的『逐行白点图』确认白线的高度范围，"
+              "再按『不同 ROI』那栏把 settings.LANE_ROI_TOP_RATIO 调到合适的值")
+        print("[PROBE]   3) 若白线根本找不到 → 看『连通域表』：白线是不是被亮度阈值漏掉了"
+              "（LANE_WHITE_V_MIN / LANE_WHITE_S_MAX）")
+    print(f"[PROBE] 图在 {args.out}（拉回本地看：python scripts/ssh_get.py -r {args.out} .）")
     return 0
 
 

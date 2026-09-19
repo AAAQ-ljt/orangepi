@@ -217,7 +217,12 @@ sudo python3 /root/dev/scripts/bench_test.py --steer-test --allow-motion # 转�
 bash /root/dev/scripts/run_tests.sh                                      # 车上跑全部单测
 ```
 
-- 需要看画面：先 `bash x11.sh`，再跑 `python3 vision/debug_view.py`（`vision_main.py` **没有** `--debug` 参数）。
+- 需要看画面：**本车没有 X 服务器**（无 Xorg/Xvfb 进程），`cv2.imshow` 之类的窗口程序会直接崩
+  （`x11.sh` 这个名字在车上并不存在，旧文档里的说法已作废）。
+  看画面的正规途径有三条：
+  1. **浏览器看图传**（自建 mediamtx：主摄/副摄两路，见 `doc/图传与模式切换方案.md`）——调相机角度、看车前方都用它；
+  2. **`dev/scripts/diag/lane_probe.py`**：抓帧 + 掩膜/跟踪叠加图 + 终端数字结论，专治"扫线到底看到了什么"；
+  3. 若你的 SSH 客户端自带 X 服务器（MobaXterm / Xming）且 `DISPLAY` 能连通，才可以用 `--show` / `debug_view.py`。
 - 日志：`/root/dev/logs/{vision,control}.log`、`/tmp/smartcar_status.json`。
 - `start_autonomous.sh` / `stop_autonomous.sh` 现在是 `car-mode.sh` 的薄包装，保留只为兼容旧文档。
 - **绝不要**在不清楚车是否在动、是否有人在遥控的情况下跑 `auto --real`。

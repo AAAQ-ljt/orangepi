@@ -124,6 +124,18 @@ def test_align_verdict_detects_direction():
     assert "不判断" in align_verdict([10.0, 11.0]), "样本太少时必须说不判断，别乱下结论"
 
 
+# ------------------------------------------------------- 跑偏保护
+def test_driving_off_course():
+    from scripts.bench_test import NEUTRAL_US, driving_off_course
+    # 有动力 + 大误差 + 持续超时 → 停
+    assert driving_off_course(120.0, 1575.0, since=0.0, now=3.0)
+    # 时间没到 / 误差回到范围内 / 没有动力 / 还没开始计时 → 不停
+    assert not driving_off_course(120.0, 1575.0, since=1.0, now=2.0)
+    assert not driving_off_course(30.0, 1575.0, since=0.0, now=9.0)
+    assert not driving_off_course(120.0, NEUTRAL_US, since=0.0, now=9.0)
+    assert not driving_off_course(120.0, 1575.0, since=None, now=9.0)
+
+
 if __name__ == "__main__":
     test_never_runs_without_board()
     test_board_stops()
@@ -136,6 +148,7 @@ if __name__ == "__main__":
     test_auto_target_accepts_stable_samples()
     test_auto_target_rejects_unstable_or_absurd()
     test_align_verdict_detects_direction()
+    test_driving_off_course()
     test_bench_common_exposes_safety_api()
     test_restore_is_idempotent()
     print("test_bench_logic: all passed")

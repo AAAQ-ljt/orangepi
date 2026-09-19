@@ -82,6 +82,20 @@ AUTO_TARGET_SPREAD_PX = 25.0
 AUTO_TARGET_MIN_PX = 120.0
 AUTO_TARGET_MAX_PX = 540.0
 
+# 跑偏保护：车在动、误差却持续这么大 → 疑似转向方向反了 / 车没跟上，直接停车
+# （80px ≈ 34cm 横向误差，已经在 1.22m 赛道里明显偏离中线；2s 是"确认真跑偏"的去抖时间）
+DIVERGENCE_PX = 80.0
+DIVERGENCE_S = 2.0
+
+
+def driving_off_course(error: float, out_us: float, since: Optional[float], now: float,
+                       limit_px: float = DIVERGENCE_PX,
+                       limit_s: float = DIVERGENCE_S) -> bool:
+    """持续在给动力、误差却一直超过限值 → 该停车（纯函数，便于单测）。"""
+    if out_us <= NEUTRAL_US or error <= limit_px or since is None:
+        return False
+    return (now - since) > limit_s
+
 
 def auto_target(samples) -> Optional[float]:
     """从静止画面采样里算新的车道中心；不可信时返回 None（纯函数，便于单测）。"""
@@ -198,6 +212,7 @@ def main() -> int:
     align_errors = []       # 对齐阶段误差走势 → 给转向方向下结论
     auto_target_done = False
     verdict_printed = False
+    diverge_since = None    # 跑偏保护：大误差持续多久了
 
     # ---------------------------------------------------------- 静止标定
     if args.calibrate > 0:
@@ -373,6 +388,20 @@ def main() -> int:
                             d = decide(gs.blocked, seen_board, lane_ok, aligned,
                                        args.force_run, args.speed_us, args.start_us,
                                        no_lane=args.no_lane)
+
+                            # ---- 跑偏保护：在有动力的状态下持续大误差 → 停车并给诊断 ----
+                            if d.out_us > NEUTRAL_US and error > DIVERGENCE_PX:
+                                if diverge_since is None:
+                                    diverge_since = now
+                            else:
+                                diverge_since = None
+                            if driving_off_course(error, d.out_us, diverge_since, now):
+                                print(f"[BENCH] ⛔ 连续 {DIVERGENCE_S:.0f}s 误差 > {DIVERGENCE_PX:.0f}px"
+                                      f"（当前 {error:.0f}px）：疑似转向方向反了或车没跟上，已停车")
+                                print("[BENCH]    先跑 --steer-test 看前轮方向；若『角度大=左转』，"
+                                      "就往 config/site.yaml 写 steer_sign: -1")
+                                state["stopped"] = True
+                                d = Decision(NEUTRAL_US, "stopped", "跑偏保护")
 
                             # ---- 转向：停车→回中（清 PID 防踢腿）；否则真 PID + 限速 ----
                             if d.out_us <= NEUTRAL_US:

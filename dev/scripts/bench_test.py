@@ -401,8 +401,10 @@ def main() -> int:
                                 if align_since is None:
                                     align_since = acquire_since = now
                                 if args.no_align:               # 实地上省时间：不等对齐，直接走
+                                    # ⚠️ 但**不能**顺手关掉「边跑边标定」：场地车道中心常常不是默认值，
+                                    # 关掉就会带着偏差跑（2026-09-19 现场：目标 407 / 实际中心 343 →
+                                    # 车一直往一边修 → 画圈）。采样窗口很短（前 12 帧），车还没走远。
                                     aligned = True
-                                    auto_target_done = True     # 已经在动，别再改车道中心
                                 # 「边跑边标定」：板刚移开、车还没动，用这段画面修正车道中心
                                 if (obs is not None and not auto_target_done
                                         and obs.confidence >= AUTO_TARGET_MIN_CONF
@@ -510,12 +512,14 @@ def main() -> int:
                             if frames % max(1, args.print_every) == 0:
                                 extra = ""
                                 if obs is not None:
-                                    extra = f"车道中心={obs.center_x:5.1f} 置信={obs.confidence:.2f} " \
-                                            f"误差={error:4.1f} "
+                                    # 打「维持值(本帧观测)」+ **带符号误差**（正=车在目标右侧）：
+                                    # 现场判断"往哪边偏"全靠这两个数（绝对值看不出方向，吃过亏）
+                                    extra = (f"中心={steer_center:5.1f}(本帧{obs.center_x:5.1f}) "
+                                             f"置信={obs.confidence:.2f} 误差={error_signed:+6.1f} ")
                                 print(f"[BENCH] {now - t0:6.1f}s  {extra}"
                                       f"有板={int(gs.blocked)} 武装={int(seen_board)} 对准={int(aligned)}  "
                                       f"舵机={steering:5.1f}°  电调={out_us:.0f}us"
-                                      f"{'' if throttle_scale >= 0.999 else f'(降速×{throttle_scale:.1f})'}"
+                                      f"{'' if eff_scale >= 0.999 else f'(降速×{eff_scale:.1f})'}"
                                       f"  ({d.reason})")
 
                             if args.show:

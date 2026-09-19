@@ -13,12 +13,14 @@
 """
 from __future__ import annotations
 
-from scripts.bench_test import NEUTRAL_US, START_US_DEFAULT, decide
+from config import settings
+from scripts.bench_test import (NEUTRAL_US, SPEED_US_DEFAULT, START_US_DEFAULT,
+                                align_verdict, auto_target, decide)
 
 
 def _d(**kw):
     base = dict(blocked=False, seen_board=True, lane_ok=True, aligned=True,
-                force_run=False, speed_us=1550.0, start_us=START_US_DEFAULT)
+                force_run=False, speed_us=SPEED_US_DEFAULT, start_us=START_US_DEFAULT)
     base.update(kw)
     return decide(**base)
 
@@ -53,18 +55,32 @@ def test_align_uses_start_speed():
     """未对准 → 低速蠕动（起步脉宽），不是循迹速度。"""
     d = _d(aligned=False)
     assert d.out_us == START_US_DEFAULT and d.phase == "align"
-    assert START_US_DEFAULT < 1550.0, "起步脉宽应低于循迹脉宽"
+    assert START_US_DEFAULT < SPEED_US_DEFAULT, "起步脉宽应低于循迹脉宽"
 
 
 def test_aligned_uses_track_speed():
     d = _d(aligned=True)
-    assert d.out_us == 1550.0 and d.phase == "track"
+    assert d.out_us == SPEED_US_DEFAULT and d.phase == "track"
 
 
 def test_no_lane_mode_skips_alignment():
     """--no-lane（只测蓝板+电调）：不判车道、不对齐，直接按速度跑。"""
     d = _d(no_lane=True, lane_ok=False, aligned=False)
-    assert d.out_us == 1550.0 and d.phase == "track"
+    assert d.out_us == SPEED_US_DEFAULT and d.phase == "track"
+
+
+# ------------------------------------------------------- 电调死区（2026-09-16 实车教训）
+def test_default_pulses_are_above_esc_deadband():
+    """默认脉宽必须高于电调死区，否则台架跑起来车根本不走。
+
+    实测：1540us 轮子不转、≈1545us 才起转。曾用 1530/1550 默认值 → 整段"起步对齐"白跑。
+    """
+    assert START_US_DEFAULT >= settings.ESC_DEADBAND_US, \
+        f"起步脉宽 {START_US_DEFAULT} 低于死区 {settings.ESC_DEADBAND_US}"
+    assert SPEED_US_DEFAULT >= settings.ESC_DEADBAND_US, \
+        f"循迹脉宽 {SPEED_US_DEFAULT} 低于死区 {settings.ESC_DEADBAND_US}"
+    assert settings.ESC_CREEP_US > settings.ESC_DEADBAND_US > settings.ESC_STOP_US
+    assert settings.ESC_DEBUG_MAX_US > settings.ESC_CREEP_US, "调试上限必须高于蠕动脉宽，否则跑不快"
 
 
 # ------------------------------------------------------- 公共安全层
@@ -88,6 +104,26 @@ def test_restore_is_idempotent():
     assert state["restored"] is True
 
 
+# ------------------------------------------------------- 边跑边标定 / 转向方向判定
+def test_auto_target_accepts_stable_samples():
+    """车摆正在车道中央时的稳定读数 → 采纳为新的车道中心。"""
+    val = auto_target([420.0 + (i % 3) - 1 for i in range(14)])
+    assert val is not None and abs(val - 420.0) <= 2.0
+
+
+def test_auto_target_rejects_unstable_or_absurd():
+    """样本不足/乱跳/数值离谱一律不采纳（宁可用旧值，也不能把车道中心改坏）。"""
+    assert auto_target([420.0, 422.0, 418.0]) is None, "帧数不够不该采纳"
+    assert auto_target([200.0, 420.0, 600.0] * 5) is None, "波动过大不该采纳"
+    assert auto_target([30.0] * 14) is None, "数值超出合理范围（锁到别的东西）不该采纳"
+
+
+def test_align_verdict_detects_direction():
+    assert "正确" in align_verdict([30, 28, 25, 20, 15, 10, 8, 6, 5, 4])
+    assert "变大" in align_verdict([5, 6, 7, 9, 12, 16, 22, 28, 33, 40])
+    assert "不判断" in align_verdict([10.0, 11.0]), "样本太少时必须说不判断，别乱下结论"
+
+
 if __name__ == "__main__":
     test_never_runs_without_board()
     test_board_stops()
@@ -96,6 +132,10 @@ if __name__ == "__main__":
     test_align_uses_start_speed()
     test_aligned_uses_track_speed()
     test_no_lane_mode_skips_alignment()
+    test_default_pulses_are_above_esc_deadband()
+    test_auto_target_accepts_stable_samples()
+    test_auto_target_rejects_unstable_or_absurd()
+    test_align_verdict_detects_direction()
     test_bench_common_exposes_safety_api()
     test_restore_is_idempotent()
     print("test_bench_logic: all passed")

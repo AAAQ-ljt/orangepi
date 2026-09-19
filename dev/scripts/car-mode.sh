@@ -23,7 +23,7 @@
 #   --camera N        我们使用哪一路摄像头（0=云台主摄 /dev/video0，2=下摄 /dev/video2）
 #                     默认 2：巡线扫线用下摄；此时保留云台主摄推流给裁判看
 #   --model PATH      RKNN 模型路径（不给则只跑扫线+发车检测）
-#   --max-us N        电调最大脉宽（默认 1540，调试限速）
+#   --max-us N        电调最大脉宽（默认 1600，调试限速；注意 1500 停、≈1545 才起转）
 #   --port N          UDP 端口（默认 5000）
 #   --minimal         连不需要的服务也停掉（省 CPU，但裁判看不到画面）
 #   --yes             跳过确认（仍会做体检）
@@ -314,7 +314,7 @@ cmd_manual() {
 
 cmd_auto() {
   require_root
-  local dry_run=1 camera=2 model="" max_us=1540 port=5000 minimal=0 skip_confirm=0 no_lane=0
+  local dry_run=1 camera=2 model="" max_us=1600 port=5000 minimal=0 skip_confirm=0 no_lane=0
 
   while [[ $# -gt 0 ]]; do
     case "$1" in

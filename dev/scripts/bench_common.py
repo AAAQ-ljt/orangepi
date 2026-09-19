@@ -14,7 +14,7 @@
     state = {"stopped": False, "driver": None, "restored": False}
     install_signal_guard(state)
     atexit.register(restore_remote_stage, state, "atexit")
-    with MotorSession(speed_us_max=1550) as session:      # 不用电机就 MotorSession(None)
+    with MotorSession(speed_us_max=1575) as session:      # 不用电机就 MotorSession(None)
         ...
 """
 from __future__ import annotations
@@ -45,6 +45,24 @@ def svc_active(name: str) -> bool:
         return False
 
 
+def svc_start(name: str) -> None:
+    """拉起服务；**收尾路径绝不能抛异常**（没有 systemctl / 启动失败都只当"没起来"）。"""
+    try:
+        subprocess.run(["systemctl", "start", name], check=False,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except (FileNotFoundError, OSError) as exc:
+        print(f"[BENCH]   ⚠️ 无法执行 systemctl（{exc}）")
+
+
+def svc_stop(name: str) -> None:
+    """停服务（同样是"尽力而为"，失败只提示不抛）。"""
+    try:
+        subprocess.run(["systemctl", "stop", name], check=False,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except (FileNotFoundError, OSError) as exc:
+        print(f"[BENCH]   ⚠️ 无法执行 systemctl（{exc}）")
+
+
 def restore_remote_stage(state: dict, reason: str = "") -> None:
     """停电机 + 恢复**远程控制阶段**并逐项验证（幂等；任何退出路径都调它）。"""
     if state.get("restored"):
@@ -60,8 +78,7 @@ def restore_remote_stage(state: dict, reason: str = "") -> None:
         except Exception as exc:    # 收尾阶段不能再抛异常
             print(f"[BENCH]   ⚠️ 释放驱动异常：{exc}")
     if state.get("used_motor"):
-        subprocess.run(["systemctl", "start", "opi-control.service"], check=False,
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        svc_start("opi-control.service")
         time.sleep(2)
         checks = [("opi-control.service", "远程控制（网页摇杆/键盘）")]
         checks += [(s, "图传推流") for s in STREAM_SERVICES]
@@ -88,7 +105,10 @@ def install_signal_guard(state: dict) -> None:
         print(f"\n[BENCH] 收到信号 {signum}，准备收尾…")
         state["stopped"] = True
 
-    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP, signal.SIGQUIT, signal.SIGABRT):
+    for name in ("SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT", "SIGABRT"):
+        sig = getattr(signal, name, None)      # Windows 没有 SIGHUP/SIGQUIT
+        if sig is None:
+            continue
         try:
             signal.signal(sig, _on_signal)
         except (ValueError, OSError):
@@ -119,7 +139,7 @@ class MotorSession:
             return None
         from control.driver import Driver
         print("[BENCH] 停止 opi-control（暂时让出 PCA9685；退出时会自动恢复）")
-        subprocess.run(["systemctl", "stop", "opi-control.service"], check=False)
+        svc_stop("opi-control.service")
         time.sleep(1.5)
         driver = Driver(real=True, esc_max_us=int(max(self.speed_us_max, settings.ESC_DEBUG_MAX_US)))
         driver.arm()

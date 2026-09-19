@@ -3,7 +3,8 @@
 
 默认 dry-run（不碰硬件）；显式加 --real 才会驱动 PCA9685。
 运动前必须加 --arm 解锁，否则即使 real 模式也不会输出动力。
-调试阶段默认把电调最大脉宽限制在 1540us，避免速度过快。
+调试阶段默认把电调最大脉宽限制在 1600us，避免速度过快。
+注意：1500us 停、**≈1545us 才起转**（2026-09-16 架空实测），调试脉宽的可用下限是 1545 而不是 1500。
 """
 from __future__ import annotations
 
@@ -27,7 +28,7 @@ def main() -> int:
     parser.add_argument("--target-x", type=float, default=settings.TARGET_X,
                         help="期望车道中心 x")
     parser.add_argument("--max-us", type=int, default=settings.ESC_DEBUG_MAX_US,
-                        help="电调最大脉宽，调试默认 1540us")
+                        help=f"电调最大脉宽，调试默认 {settings.ESC_DEBUG_MAX_US}us（死区 {settings.ESC_DEADBAND_US}us）")
     parser.add_argument("--zebra-seconds", type=float, default=settings.ZEBRA_STOP_SECONDS,
                         help="斑马线停车时长（规则要求 10s；调试可调小，但比赛必须 ≥10）")
     args = parser.parse_args()

@@ -53,6 +53,7 @@ import statistics
 import sys
 import time
 from dataclasses import dataclass
+from typing import Optional
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -67,10 +68,49 @@ from vision.lane_scan import LaneScanner
 from vision.start_gate import StartGate
 
 # 台架默认参数（都可用命令行覆盖）
-START_US_DEFAULT = 1530.0     # 起步对齐时的脉宽（最低能动的量级）
-SPEED_US_DEFAULT = 1550.0     # 对准后的循迹速度
+# 2026-09-16 架空实测：电调 1540us 轮子不转、≈1545us 起转 → 取值必须在死区之上
+START_US_DEFAULT = float(settings.ESC_CREEP_US)   # 起步对齐时的脉宽（1560us）
+SPEED_US_DEFAULT = 1575.0     # 对准后的循迹速度（≈15% 行程，慢速起步用）
 ALIGN_TOL_PX = 15.0           # 对齐容差（像素）
 ALIGN_FRAMES = 8              # 连续多少帧在容差内算对准
+
+# 「边跑边标定」：竞速比赛里裁判不会留出"先标定再跑"的时间，
+# 所以标定必须发生在正式流程内部 —— 发车瞬间车正停在车道中央（人工摆位就是这个前提），
+# 那段静止画面就是标定样本：采够 AUTO_TARGET_FRAMES 帧、波动够小、数值在合理范围内，才敢改车道中心。
+AUTO_TARGET_FRAMES = 12
+AUTO_TARGET_SPREAD_PX = 25.0
+AUTO_TARGET_MIN_PX = 120.0
+AUTO_TARGET_MAX_PX = 540.0
+
+
+def auto_target(samples) -> Optional[float]:
+    """从静止画面采样里算新的车道中心；不可信时返回 None（纯函数，便于单测）。"""
+    if len(samples) < AUTO_TARGET_FRAMES:
+        return None
+    if (max(samples) - min(samples)) > AUTO_TARGET_SPREAD_PX:
+        return None
+    avg = statistics.mean(samples)
+    if not (AUTO_TARGET_MIN_PX <= avg <= AUTO_TARGET_MAX_PX):
+        return None
+    return float(avg)
+
+
+def align_verdict(errors) -> str:
+    """用对齐阶段误差的走势判断"转向方向对不对"（纯函数，便于单测）。
+
+    对齐阶段车在低速蠕动、舵机在按 PID 修正：如果方向对，像素误差会变小；
+    方向反了（STEER_SIGN 写反）误差会越修越大 —— 与其等它冲出去，不如在这里说清楚。
+    """
+    if len(errors) < 8:
+        return "样本太少，这次不判断转向方向"
+    head = statistics.median(errors[:5])
+    tail = statistics.median(errors[-5:])
+    if tail <= max(6.0, head * 0.7):
+        return f"✅ 转向方向正确：对齐期误差 {head:.0f}px → {tail:.0f}px（在收敛）"
+    if tail >= head * 1.3 and tail > 12.0:
+        return (f"⚠️ 对齐期误差在变大（{head:.0f}px → {tail:.0f}px）：先跑 --steer-test 确认方向，"
+                f"反向就往 config/site.yaml 写 steer_sign: -1；也可能是车摆得太斜/白线被挡")
+    return f"对齐期误差基本不变（{head:.0f}px → {tail:.0f}px，幅度小看不出方向）"
 
 
 @dataclass
@@ -100,8 +140,10 @@ def decide(blocked: bool, seen_board: bool, lane_ok: bool, aligned: bool,
 def main() -> int:
     ap = argparse.ArgumentParser(description="台架测试：蓝板发车 + 扫线循迹 + 起步对齐")
     ap.add_argument("--camera", type=int, default=2, help="摄像头：2=下摄（默认，蓝板+循迹都用它），0=云台主摄")
-    ap.add_argument("--start-us", type=float, default=START_US_DEFAULT, help="起步对齐脉宽（默认 1530）")
-    ap.add_argument("--speed-us", type=float, default=SPEED_US_DEFAULT, help="对准后的循迹脉宽（默认 1550）")
+    ap.add_argument("--start-us", type=float, default=START_US_DEFAULT,
+                    help=f"起步对齐脉宽（默认 {START_US_DEFAULT:.0f}，必须 > 死区 {settings.ESC_DEADBAND_US}）")
+    ap.add_argument("--speed-us", type=float, default=SPEED_US_DEFAULT,
+                    help=f"对准后的循迹脉宽（默认 {SPEED_US_DEFAULT:.0f}，必须 > 死区 {settings.ESC_DEADBAND_US}）")
     ap.add_argument("--align-tol", type=float, default=ALIGN_TOL_PX, help="对齐容差 px（默认 15）")
     ap.add_argument("--align-frames", type=int, default=ALIGN_FRAMES, help="容差内连续帧数（默认 8）")
     ap.add_argument("--align-max-s", type=float, default=6.0, help="对齐阶段最长秒数（超时即提速）")
@@ -116,6 +158,8 @@ def main() -> int:
     ap.add_argument("--steer-test", action="store_true",
                     help="转向方向自检：把舵机依次打到 中位/右/左/中位（每档 1.5s）—— 你看着前轮，"
                          "确认\"角度大\"是不是右转；不对就往 config/site.yaml 写 steer_sign: -1")
+    ap.add_argument("--no-auto-target", action="store_true",
+                    help="关掉「边跑边标定」：默认会在起步对齐阶段用车前静止画面自动修正车道中心并写入 site.yaml")
     ap.add_argument("--show", action="store_true", help="显示预览窗口（需要 X11）")
     ap.add_argument("--no-motor", action="store_true", help="只跑视觉与决策，不输出动力")
     ap.add_argument("--allow-motion", "--i-know-wheels-are-up", dest="allow_motion", action="store_true",
@@ -132,6 +176,17 @@ def main() -> int:
               "再加 --allow-motion；只想看读数就加 --no-motor")
         return 2
 
+    # 死区守卫：低于死亡脉宽 = 白跑一次台架（2026-09-16 实测 1540us 轮子不转）
+    if use_motor and min(args.start_us, args.speed_us) < settings.ESC_DEADBAND_US:
+        print(f"[BENCH] 拒绝运行：脉宽低于电调死区。实测 1540us 不动、≈{settings.ESC_DEADBAND_US}us 才起转，"
+              f"现在 起步={args.start_us:.0f} / 循迹={args.speed_us:.0f} → 车不会动。")
+        print(f"[BENCH] 请用 ≥ {settings.ESC_CREEP_US}us（建议 起步 {settings.ESC_CREEP_US} / 循迹 1575）")
+        return 2
+    if use_motor and args.speed_us > settings.ESC_DEBUG_MAX_US:
+        print(f"[BENCH] ⚠️ 循迹脉宽 {args.speed_us:.0f}us 超过调试上限 {settings.ESC_DEBUG_MAX_US}us"
+              f"（未验证过的速度），5 秒内可 Ctrl-C 中止")
+        time.sleep(5.0)
+
     scanner = LaneScanner(target_x=args.target_x)
     gate = StartGate()
     arbiter = LaneArbiter(target_x=args.target_x)
@@ -139,6 +194,10 @@ def main() -> int:
     steer_limit = float(args.max_steer or settings.LANE_STEER_LIMIT_DEG)
     steering = float(settings.SERVO_CENTER_ANGLE)
     seen_board = False
+    align_samples = []      # 对齐阶段（车基本静止）的车道中心采样 → 边跑边标定
+    align_errors = []       # 对齐阶段误差走势 → 给转向方向下结论
+    auto_target_done = False
+    verdict_printed = False
 
     # ---------------------------------------------------------- 静止标定
     if args.calibrate > 0:
@@ -190,11 +249,13 @@ def main() -> int:
     print("[BENCH] 规则：没见板→中位；见板→中位；板移开→低速对齐→循迹；再见板→立即停")
     if not args.no_lane:
         from config import site as _site
-        if "target_x" not in _site.applied():
-            print("[BENCH] 提示：还没做过车道中心标定（现在用默认 TARGET_X=320）。"
-                  "把车摆正在车道中央后跑一次：")
-            print("[BENCH]    sudo python3 /root/dev/scripts/bench_test.py --calibrate 30"
-                  "   ← 标定值会自动写入本地配置，之后跑车不用再传参数")
+        applied = _site.applied()
+        if "target_x" in applied:
+            print(f"[BENCH] 车道中心用 site.yaml 的值：target_x = {applied['target_x']}"
+                  f"（起步瞬间还会用静止画面自动修正一次）")
+        else:
+            print("[BENCH] 提示：还没有车道中心标定值（先用默认 320）。**不用单独标定**——"
+                  "把车摆正在车道中央直接跑，程序会在起步瞬间自动标定并写入 site.yaml")
 
     rc = 0
     try:
@@ -260,9 +321,32 @@ def main() -> int:
                             if gs.blocked or not seen_board:
                                 align_since, align_hits, aligned = None, 0, False
                                 no_lane_since = None
+                                align_samples.clear()
+                                align_errors.clear()
                             elif not args.no_lane:
                                 if align_since is None:
                                     align_since = now
+                                # 「边跑边标定」：板刚移开、车还没动，用这段画面修正车道中心
+                                if (obs is not None and lane_ok and not auto_target_done
+                                        and not args.no_auto_target):
+                                    align_samples.append(obs.center_x)
+                                    value = auto_target(align_samples)
+                                    if value is not None:
+                                        auto_target_done = True
+                                        delta = value - planner.target_x
+                                        scanner.target_x = arbiter.target_x = planner.target_x = value
+                                        print(f"[BENCH] 🎯 边跑边标定：车道中心 = {value:.1f}px"
+                                              f"（{len(align_samples)} 帧静止画面，波动 "
+                                              f"{max(align_samples) - min(align_samples):.0f}px，"
+                                              f"原值 {value - delta:.1f} → 修正 {delta:+.1f}px）")
+                                        try:
+                                            from config import site
+                                            site.save({"target_x": round(value, 1)})
+                                            print("[BENCH]    已写入 config/site.yaml，本次与以后都用它")
+                                        except Exception as exc:
+                                            print(f"[BENCH]    ⚠️ 写入 site.yaml 失败（本次仍用它）：{exc}")
+                                if not aligned:
+                                    align_errors.append(error)
                                 if lane_ok and error <= args.align_tol:
                                     align_hits += 1
                                     if align_hits >= args.align_frames:
@@ -271,6 +355,9 @@ def main() -> int:
                                     align_hits = 0
                                 if not aligned and (now - align_since) >= args.align_max_s:
                                     aligned = True      # 对齐超时 → 先走起来（避免原地磨蹭）
+                                if aligned and not verdict_printed:
+                                    verdict_printed = True
+                                    print(f"[BENCH] {align_verdict(align_errors)}")
                                 # 对齐期间长时间没车道 → 已按保护停车，给一次明确提示（不盲目前冲）
                                 if lane_ok:
                                     no_lane_since = None

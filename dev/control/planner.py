@@ -55,12 +55,18 @@ class Planner:
         offset = self.pid.update(filtered, dt)
         return max(-self.max_steer, min(self.max_steer, offset))
 
-    def _adaptive_throttle_scale(self) -> float:
+    def _adaptive_throttle_scale(self, throttle_scale: float) -> float:
         """按横向误差大小调油门（oldCode Control_FollowTrail 的自适应速度策略）。
 
         误差小（直道）→ 提速；误差大（弯道/正在纠偏）→ 减速保稳定。
         没有有效观测量时恒为 1.0。
+
+        ⚠️ 只在仲裁层**未降级**（throttle_scale >= 1.0）时生效：
+        降级路径（如半油门 50% ≈ 1550us）本来就在电调死区（1545us）边缘，
+        再乘 0.85 → 42.5% ≈ 1542us 掉进死区，车直接停死（会被判"停止超 20s"）。
         """
+        if throttle_scale < 1.0:
+            return 1.0
         err = self._last_error_units
         if err is None:
             return 1.0
@@ -87,7 +93,7 @@ class Planner:
             target.throttle = 0.0
             return target
 
-        scale = float(throttle_scale) * self._adaptive_throttle_scale()
+        scale = float(throttle_scale) * self._adaptive_throttle_scale(float(throttle_scale))
         if msg.blue_cone_count > 0 or msg.yellow_cone_count > 0:
             scale *= settings.CONE_THROTTLE_SCALE
         target.throttle = self.cruise_throttle * scale

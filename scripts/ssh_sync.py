@@ -1,14 +1,19 @@
 """代码同步助手 —— 把本地 dev/ 镜像到小车 /root/dev/（免交互、增量、可预览）。
 
-设计目标：**只传变化的文件**，不碰小车上的运行数据（数据集、模型、日志、测试图片）。
+设计目标：**只传变化的文件**，不碰小车上的运行数据（数据集、模型、日志、测试图片）；
+**并且绝不把「在车上改得更新的文件」悄悄覆盖掉**（2026-09-19 就这么丢过一次车端代码）。
 
 用法:
     python scripts/ssh_sync.py --dry-run            # 预览：列出将要上传/删除的文件
     python scripts/ssh_sync.py                      # 同步 dev/ -> /root/dev/
+    python scripts/ssh_sync.py --force              # 远端更新的文件也强行覆盖（确认过再用）
     python scripts/ssh_sync.py --delete             # 同时删除远端多余文件（谨慎！默认不删）
     python scripts/ssh_sync.py --include-models     # 连 *.rknn 一起传（默认跳过，通常用 U 盘/其他方式传）
     python scripts/ssh_sync.py --direct             # 热点直连（隧道不通时）
     python scripts/ssh_sync.py --src dev --dst /root/dev
+
+⚠️ 同步是**单向的（本地 → 车）**：在车上直接改过的代码必须手动拉回仓库
+   （`python scripts/ssh_get.py <远端文件> <本地路径>`），否则下次同步就是覆盖。
 
 排除规则（可按需在 EXCLUDE_DIRS / EXCLUDE_SUFFIXES 里调整）:
     __pycache__、*.pyc、.git、logs/、img 下采集的测试图片、*.rknn/*.pt/*.onnx
@@ -69,9 +74,9 @@ def collect_local(src: str, include_models: bool) -> Dict[str, Tuple[str, int]]:
     return out
 
 
-def remote_listing(sftp: paramiko.SFTPClient, base: str) -> Dict[str, int]:
-    """递归列出远端文件 {相对路径: 字节数}；目录不存在则返回空。"""
-    out: Dict[str, int] = {}
+def remote_listing(sftp: paramiko.SFTPClient, base: str) -> Dict[str, Tuple[int, float]]:
+    """递归列出远端文件 {相对路径: (字节数, mtime)}；目录不存在则返回空。"""
+    out: Dict[str, Tuple[int, float]] = {}
 
     def walk(path: str, rel: str) -> None:
         try:
@@ -86,10 +91,40 @@ def remote_listing(sftp: paramiko.SFTPClient, base: str) -> Dict[str, int]:
                     continue
                 walk(child, child_rel)
             else:
-                out[child_rel] = e.st_size or 0
+                out[child_rel] = (e.st_size or 0, float(e.st_mtime or 0))
 
     walk(base, "")
     return out
+
+
+def content_equal(local_path: str, remote_bytes: bytes) -> bool:
+    """内容是否一致；**行尾差异（LF↔CRLF）不算差异**。
+
+    为什么需要：Windows 工作区里 git 会把 .py 换成 CRLF（每行多 1 字节），
+    于是"按字节数比大小"的增量同步会认为**每个文件都变了**——2026-09-19 就是这样
+    一次性上传 56 个文件、把车端更新的实现覆盖掉的。
+    """
+    try:
+        with open(local_path, "rb") as fh:
+            local_bytes = fh.read()
+    except OSError:
+        return False
+    if local_bytes == remote_bytes:
+        return True
+    if b"\0" in local_bytes or b"\0" in remote_bytes:      # 二进制不按行尾比较
+        return False
+    return (local_bytes.replace(b"\r\n", b"\n")
+            == remote_bytes.replace(b"\r\n", b"\n"))
+
+
+def read_remote(sftp: paramiko.SFTPClient, path: str, limit: int = 4 << 20) -> bytes:
+    """读远端文件内容（超过 limit 字节的文件不读，返回空串表示"没法比"）。"""
+    try:
+        with sftp.open(path, "rb") as fh:
+            fh.prefetch()
+            return fh.read(limit)
+    except IOError:
+        return b""
 
 
 def ensure_remote_dir(sftp: paramiko.SFTPClient, path: str, cache: set) -> None:
@@ -113,6 +148,8 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true", help="只预览，不传输")
     parser.add_argument("--delete", action="store_true", help="删除远端多余文件（默认保留）")
     parser.add_argument("--include-models", action="store_true", help="连 *.rknn/*.pt/*.onnx 一起传")
+    parser.add_argument("--force", action="store_true",
+                       help="远端文件比本地新时也覆盖（默认跳过并告警，防止覆盖车上直接改的代码）")
     args = parser.parse_args()
 
     local = collect_local(args.src, args.include_models)
@@ -128,9 +165,29 @@ def main() -> int:
     sftp = c.open_sftp()
     try:
         remote = remote_listing(sftp, args.dst)
-        to_upload = [rel for rel, (_p, size) in sorted(local.items())
-                     if remote.get(rel) != size]
+        to_upload: List[str] = []
+        skipped_newer: List[str] = []
+        for rel, (full, size) in sorted(local.items()):
+            info = remote.get(rel)
+            if info is None:
+                to_upload.append(rel)                      # 远端还没有
+                continue
+            r_size, r_mtime = info
+            if r_size == size:
+                continue                                   # 大小一致，先当没变
+            dst_path = posixpath.join(args.dst, rel)
+            if content_equal(full, read_remote(sftp, dst_path)):
+                continue                                   # 只是行尾差异，别当改动
+            if not args.force and r_mtime > os.path.getmtime(full) + 2:
+                skipped_newer.append(rel)                  # 远端更新 → 疑似在车上直接改的
+                continue
+            to_upload.append(rel)
         stale = [rel for rel in sorted(remote) if rel not in local]
+
+        if skipped_newer:
+            print(f"[SYNC] ⚠️ 跳过 {len(skipped_newer)} 个「远端更新」的文件（不覆盖车上直接改的内容）：")
+            for rel in skipped_newer:
+                print(f"  [skip] {rel}   ← 要覆盖请加 --force；要保留请先 ssh_get 拉回仓库")
 
         if args.delete and stale:
             print(f"[SYNC] 将删除远端多余文件 {len(stale)} 个：")

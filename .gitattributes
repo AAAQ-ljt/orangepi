@@ -1,2 +1,17 @@
-# 脚本统一 LF 换行(部署到 Linux 服务器/小车不因 CRLF 出错)
-*.sh text eol=lf
+# 代码/配置统一 LF（部署到 Linux 服务器/小车不因 CRLF 出错）
+#
+# 为什么连 .py/.yaml 也要管：Windows 工作区里 core.autocrlf 会把它们换成 CRLF，
+# 于是"按大小比差异"的同步工具会以为**每个文件都变了**，一次性全量上传——
+# 2026-09-19 就是这样把车端更新过的实现覆盖掉的（见 AGENTS.md §1.3）。
+* text=auto eol=lf
+
+# 二进制：不要做任何换行转换
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.pdf binary
+*.drawio binary
+*.rknn binary
+*.pt binary
+*.onnx binary
+*.tar.gz binary

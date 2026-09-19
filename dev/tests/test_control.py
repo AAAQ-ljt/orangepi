@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+from config import settings
 from common.protocol import PerceptionMessage
 from control.controller import Controller
 from control.driver import Driver
@@ -51,12 +52,17 @@ def test_fsm_board_flicker_resets_release_counter():
 # --------------------------------------------------------------------- 规划
 def test_planner_steers_toward_lane_center():
     planner = Planner(target_x=320.0)
-    # 车道中心出现在画面右侧 → 车偏左 → 应右转（角度 > 90）
+    # 车道中心出现在画面右侧 → 车偏左 → 修正方向由 settings.STEER_SIGN 决定
+    # （site.yaml 可标定 steer_sign: -1——实车"角度增大=左转"，见 config/site.py），
+    # 所以这里断言"偏移方向与符号一致"，不写死 >90/<90。
+    sign = float(settings.STEER_SIGN)
     right = planner.plan(PerceptionMessage(center_x=400.0), dt=0.05)
-    assert right.steering > 90.0, f"应向右侧修正，实际 {right.steering}"
+    assert (right.steering - 90.0) * sign > 0, \
+        f"center_x>target 应沿 STEER_SIGN({sign:+g}) 方向修正，实际 {right.steering}"
     planner.reset()
     left = planner.plan(PerceptionMessage(center_x=240.0), dt=0.05)
-    assert left.steering < 90.0, f"应向左侧修正，实际 {left.steering}"
+    assert (left.steering - 90.0) * sign < 0, \
+        f"center_x<target 应反向修正，实际 {left.steering}"
 
 
 def test_planner_center_x_no_error():

@@ -33,9 +33,64 @@ import cv2
 import numpy as np
 
 from config import settings
-from vision.lane_scan import LaneScanner, line_like, white_mask
 
 ROI_CANDIDATES = (0.0, 0.15, 0.25, 0.35, 0.45, 0.55)
+
+
+# ------------------------------------------------------------------ 自带白线掩膜
+# 2026-09-19：旧的 lane_scan 模块已归档到 dev/attic/，本探针自带实现（只做诊断用）。
+def white_mask(frame_bgr, roi_top_ratio=None, roi_bottom_margin=None,
+               apply_shape_filter=True):
+    """低饱和 + 自适应亮度的白线掩膜；返回 (掩膜, (roi_y0, roi_y1))。"""
+    top = settings.LANE_ROI_TOP_RATIO if roi_top_ratio is None else roi_top_ratio
+    bot = settings.LANE_ROI_BOTTOM_MARGIN if roi_bottom_margin is None else roi_bottom_margin
+    h, w = frame_bgr.shape[:2]
+    y0 = max(0, int(h * top))
+    y1 = min(h, h - int(bot))
+    hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
+    s_chan, v_chan = hsv[:, :, 1], hsv[:, :, 2]
+    roi_v = v_chan[y0:y1, :]
+    if roi_v.size:
+        v_med = float(np.percentile(roi_v, 50))
+        v_hi = float(np.percentile(roi_v, 95))
+        thr = max(settings.LANE_WHITE_V_MIN,
+                  v_med + settings.LANE_WHITE_V_SPLIT * (v_hi - v_med))
+    else:
+        thr = float(settings.LANE_WHITE_V_MIN)
+    mask = ((s_chan <= settings.LANE_WHITE_S_MAX) & (v_chan >= thr)).astype(np.uint8) * 255
+    mask[:y0, :] = 0
+    mask[y1:, :] = 0
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
+    open_px = int(getattr(settings, "LANE_MASK_OPEN_PX", 3))
+    if open_px >= 3:
+        mask = cv2.morphologyEx(
+            mask, cv2.MORPH_OPEN,
+            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (open_px, open_px)))
+    if apply_shape_filter:
+        n, labels, stats, _c = cv2.connectedComponentsWithStats(mask, 8)
+        keep = np.zeros_like(mask)
+        for i in range(1, n):
+            _x, _yy, bw, bh, area = stats[i]
+            length = max(int(bw), int(bh))
+            if length < settings.LANE_LINE_MIN_LEN_PX:
+                continue
+            thick = area / float(max(1, length))
+            if thick > settings.LANE_LINE_MAX_THICK_PX:
+                continue
+            if length / max(1e-6, thick) >= settings.LANE_LINE_MIN_ELONG:
+                keep[labels == i] = 255
+        mask = keep
+    return mask, (y0, y1)
+
+
+def line_like(bw: int, bh: int, area: int) -> bool:
+    """连通域"像不像线"（探针表里显示用）。"""
+    length = max(int(bw), int(bh))
+    if length < settings.LANE_LINE_MIN_LEN_PX:
+        return False
+    thick = area / float(max(1, length))
+    return (thick <= settings.LANE_LINE_MAX_THICK_PX
+            and length / max(1e-6, thick) >= settings.LANE_LINE_MIN_ELONG)
 
 
 def _components(mask: np.ndarray):
@@ -90,11 +145,15 @@ def _print_components(frame: np.ndarray, top: int = 8) -> None:
 
 
 def _print_roi_sweep(frame: np.ndarray) -> None:
+    """不同 ROI 下的扫线读数（需要扫线模块；已归档就跳过，本探针仍给掩膜诊断）。"""
+    if _scan(frame) is None:
+        print("    不同 ROI 下的扫线结果：跳过（旧扫线模块已归档到 dev/attic/，"
+              "循迹请用 scripts/lane_ref_test.py --image）")
+        return
     print("    不同 ROI 下的扫线结果（看哪个才是真锁在线上）")
     print("      ROI_TOP  y范围       中心   置信度  有效行   左   右   宽度")
     for ratio in ROI_CANDIDATES:
-        sc = LaneScanner(roi_top_ratio=ratio)
-        obs = sc.scan(frame)
+        obs = _scan(frame)
         lw = (obs.right_x - obs.left_x) if (obs.left_x is not None and obs.right_x is not None) else None
         mark = " ←当前" if abs(ratio - settings.LANE_ROI_TOP_RATIO) < 1e-6 else ""
         print(f"      {ratio:<8} {int(frame.shape[0] * ratio):>4}~{frame.shape[0] - settings.LANE_ROI_BOTTOM_MARGIN:<6}"
@@ -111,9 +170,8 @@ def _annotate(frame: np.ndarray, name: str | None = None, out_dir: str | None = 
     vis = cv2.addWeighted(vis, 0.55, frame, 0.45, 0)
 
     # 扫线结果（蓝=拟合出的左线，红=右线，黄=前瞻带里逐行的车道中心）
-    sc = LaneScanner()
-    obs = sc.scan(frame)
-    if obs.left_x is not None and obs.right_x is not None:
+    obs = _scan(frame)
+    if obs is not None and obs.left_x is not None and obs.right_x is not None:
         y_mid = (roi_y0 + roi_y1) // 2
         cv2.line(vis, (int(obs.left_x), y_mid), (int(obs.left_x), roi_y1), (255, 80, 0), 2)
         cv2.line(vis, (int(obs.right_x), y_mid), (int(obs.right_x), roi_y1), (0, 0, 255), 2)
@@ -123,7 +181,7 @@ def _annotate(frame: np.ndarray, name: str | None = None, out_dir: str | None = 
 
     cv2.line(vis, (0, roi_y0), (frame.shape[1], roi_y0), (255, 128, 0), 1)
     cv2.line(vis, (0, roi_y1), (frame.shape[1], roi_y1), (255, 128, 0), 1)
-    obs = LaneScanner().scan(frame)
+    obs = _scan(frame)
     cv2.line(vis, (int(settings.TARGET_X), 0), (int(settings.TARGET_X), frame.shape[0]),
              (255, 0, 255), 1)
     cv2.line(vis, (int(obs.center_x), 0), (int(obs.center_x), frame.shape[0]), (0, 255, 255), 1)
@@ -164,9 +222,20 @@ def angle_advice(frame: np.ndarray) -> str:
             "再决定是压角度还是调 LANE_ROI_TOP_RATIO")
 
 
+def _scan(frame):
+    """有扫线模块就用它，没有就返回 None（探针仍能给出掩膜诊断）。"""
+    try:
+        from vision.lane_scan import LaneScanner
+    except ImportError:
+        return None
+    return _scan(frame)
+
+
 def verdict_of(frame: np.ndarray) -> tuple:
     """(是否可用, 结论文本, 左右跟踪行数) —— 终端与叠加图共用同一套判据。"""
-    obs = LaneScanner().scan(frame)
+    obs = _scan(frame)
+    if obs is None:
+        return (False, "（无扫线模块）本轮只做掩膜诊断：看上面的逐行白点图与连通域表", (0, 0))
     ok = obs.confidence >= 0.4
     if ok:
         text = (f"✅ 可用：两侧各 {obs.valid_rows} 条支持线段，"
@@ -188,7 +257,8 @@ def analyze_frame(frame: np.ndarray, name: str, out_dir: str | None = None, verb
     raw, _roi = white_mask(frame, apply_shape_filter=False)
     kept, _ = white_mask(frame, apply_shape_filter=True)
     pct_kept = float((kept > 0).mean()) * 100.0
-    conf = float(LaneScanner().scan(frame).confidence)
+    _o = _scan(frame)
+    conf = float(_o.confidence) if _o is not None else 0.0
     print(f"    白像素占比：过滤前 {float((raw > 0).mean()) * 100:.1f}% → 过滤后 {pct_kept:.1f}%"
           f"（占比高但判定不可用 = 那些白都在反光/地面上）")
     print(f"    判定：{text}")
@@ -235,7 +305,7 @@ def sweep_tilt(camera: int, tilts=None, frames: int = 3, step_s: float = 1.2) ->
                             ok, frame = cap.read()
                             if not ok or frame is None:
                                 continue
-                            obs = LaneScanner().scan(frame)
+                            obs = _scan(frame)
                             if obs.confidence >= best_conf:
                                 best_conf, rows = obs.confidence, (obs.valid_rows, obs.valid_rows)
                         results.append((best_conf, tilt, rows))

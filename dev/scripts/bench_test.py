@@ -64,7 +64,16 @@ from control.lane_arbiter import LaneArbiter
 from control.planner import Planner
 from scripts.bench_common import NEUTRAL_US, MotorSession, install_signal_guard
 from vision.camera_guard import camera_exclusive, open_camera
-from vision.lane_scan import LaneScanner
+
+# 扫线模块：2026-09-19 起两条旧实现（lane_scan/lane_hough）已归档到 dev/attic/，
+# 循迹改用 scripts/lane_ref_test.py（参考实现版、独立自包含）。这里做成可选导入：
+# 没有扫线模块时，--no-lane 直行档与蓝板档照常可用，只有循迹档会禁用。
+try:
+    from vision.lane_scan import LaneScanner          # noqa: F401  （旧版，若还在就用）
+    _HAS_LANE_SCAN = True
+except ImportError:
+    LaneScanner = None
+    _HAS_LANE_SCAN = False
 from vision.start_gate import StartGate
 
 # 台架默认参数（都可用命令行覆盖）
@@ -239,7 +248,11 @@ def main() -> int:
               f"（未验证过的速度），5 秒内可 Ctrl-C 中止")
         time.sleep(5.0)
 
-    scanner = LaneScanner(target_x=args.target_x)
+    if not _HAS_LANE_SCAN and not args.no_lane:
+        print("[BENCH] 扫线模块已移除：循迹档不可用。请用 scripts/lane_ref_test.py 做循迹测试，"
+              "或加 --no-lane 只测蓝板/直行。")
+        return 2
+    scanner = LaneScanner(target_x=args.target_x) if _HAS_LANE_SCAN else None
     gate = StartGate()
     arbiter = LaneArbiter(target_x=args.target_x,
                           conf_thresh=args.lane_conf,

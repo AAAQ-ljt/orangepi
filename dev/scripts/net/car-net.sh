@@ -105,7 +105,9 @@ net_ok() {
 default_iface() { ip route show default 2>/dev/null | awk '{print $5}' | head -1; }
 
 cellular_ip()  { iface_ip "$WWAN_IF"; }
-wifi_active()  { nmcli -t -f DEVICE,STATE 2>/dev/null | grep -q "^${WIFI_IF}:connected"; }
+# 注意用 wifi_iface() 而不是直接用 $WIFI_IF：后者留空时会把 grep 模式拼成 "^:connected"，
+# 永远判为"未连接"（2026-09-20 修）。wifi_iface() 在 WIFI_IF 为空时会自动探测网卡。
+wifi_active()  { local i; i=$(wifi_iface); [[ -n "$i" ]] && nmcli -t -f DEVICE,STATE 2>/dev/null | grep -q "^${i}:connected"; }
 
 # ------------------------------------------------------------------ 蜂窝
 VENDOR_DIALER="/root/SIM8200_for_RPI/Goonline/simcom-cm"   # 厂商拨号器（对本模组已验证可用）

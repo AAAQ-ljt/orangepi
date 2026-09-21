@@ -21,8 +21,14 @@ import numpy as np
 from config import settings
 from vision.camera_guard import camera_exclusive
 from vision.elements import load_profile
-from vision.lane_hough import HoughLaneScanner
-from vision.lane_scan import LaneScanner
+try:  # 扫线两个通道已归档（dev/attic/lane-old-*.tar.gz）
+    from vision.lane_hough import HoughLaneScanner
+    from vision.lane_scan import LaneScanner
+    _HAS_LANE_MODULES = True
+except ImportError:
+    HoughLaneScanner = None
+    LaneScanner = None
+    _HAS_LANE_MODULES = False
 from vision.postprocess import postprocess
 from vision.start_gate import StartGate
 
@@ -92,6 +98,10 @@ def main() -> int:
             print("[DEBUG] model load failed")
             return 1
 
+    if not _HAS_LANE_MODULES:  # 本工具的核心就是扫线掩膜预览，模块没了就别起
+        print("[DEBUG] 扫线通道已归档：本工具暂不可用，循迹请用 "
+              "dev/scripts/lane_ref_test.py，看画面请用 diag/lane_probe.py")
+        return 1
     scanner = HoughLaneScanner() if args.lane_method == "hough" else LaneScanner()
     gate = StartGate(verbose=False)
     show_mask = True

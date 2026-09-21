@@ -25,8 +25,14 @@ from config import settings
 from common.protocol import PerceptionMessage
 from vision.camera_guard import camera_exclusive
 from vision.elements import load_profile
-from vision.lane_hough import HoughLaneScanner
-from vision.lane_scan import LaneScanner
+try:  # 扫线两个通道已归档（dev/attic/lane-old-*.tar.gz），循迹统一走 scripts/lane_ref_test.py
+    from vision.lane_hough import HoughLaneScanner
+    from vision.lane_scan import LaneScanner
+    _HAS_LANE_MODULES = True
+except ImportError:  # 归档后本进程仍要能起（元素检测 / 发车检测不受影响）
+    HoughLaneScanner = None
+    LaneScanner = None
+    _HAS_LANE_MODULES = False
 from vision.postprocess import postprocess
 from vision.start_gate import StartGate
 
@@ -112,8 +118,12 @@ def main() -> int:
     args = parser.parse_args()
 
     profile = load_profile(args.profile)
-    scanner = None if args.no_lane else (HoughLaneScanner() if args.lane_method == "hough"
-                                        else LaneScanner())
+    scanner = None
+    if not args.no_lane:
+        if _HAS_LANE_MODULES:
+            scanner = HoughLaneScanner() if args.lane_method == "hough" else LaneScanner()
+        else:
+            print("[VISION] 扫线通道已归档，本次不做扫线（循迹请用 scripts/lane_ref_test.py）")
     gate = None if args.no_start_gate else StartGate()
     gate_camera = args.camera if args.gate_camera < 0 else args.gate_camera
 

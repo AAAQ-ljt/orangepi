@@ -14,7 +14,9 @@ from __future__ import annotations
 
 import numpy as np
 
-from scripts.lane_ref_test import LaneRefDetector, PidRef, adaptive_pulse
+from config import settings
+from scripts.lane_ref_test import (SPEED_FAST_US, SPEED_FLOOR_MARGIN_US,
+                                  LaneRefDetector, PidRef, adaptive_pulse)
 
 W, H = 640, 480
 
@@ -92,10 +94,19 @@ def test_angle_limited_and_smoothed():
 
 
 def test_adaptive_pulse_direction():
-    """误差小加速、误差大减速（参考实现的自适应速度）。"""
-    assert adaptive_pulse(1.0, 1575.0) > 1575.0
-    assert adaptive_pulse(8.0, 1575.0) == 1575.0
-    assert adaptive_pulse(40.0, 1575.0) < 1575.0
+    """自适应速度：默认只减速不提速，且减速档不得掉进电调死区。
+
+    用户 2026-09-20：巡线 1575 太快 → 基准 1560（参考实现是 +15/-20）。
+    基准降到 1560 后，"误差大 -20" 会算出 1540 < 死区 1545 → 车会从"减速"变"停车"，
+    所以减速档必须有硬下限。
+    """
+    base = 1560.0
+    assert adaptive_pulse(1.0, base) == base          # 默认增量 0：直道不提速
+    assert adaptive_pulse(8.0, base) == base
+    assert adaptive_pulse(40.0, base) == base - 10.0  # 大误差减速 10us
+    floor = float(settings.ESC_DEADBAND_US) + SPEED_FLOOR_MARGIN_US
+    assert adaptive_pulse(40.0, base, SPEED_FAST_US, -40.0) == floor, "减速档不得低于死区"
+    assert adaptive_pulse(40.0, 1546.0, SPEED_FAST_US, -20.0) == floor
 
 
 if __name__ == "__main__":

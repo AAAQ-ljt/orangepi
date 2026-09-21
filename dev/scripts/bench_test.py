@@ -79,7 +79,7 @@ from vision.start_gate import StartGate
 # 台架默认参数（都可用命令行覆盖）
 # 2026-09-16 架空实测：电调 1540us 轮子不转、≈1545us 起转 → 取值必须在死区之上
 START_US_DEFAULT = float(settings.ESC_CREEP_US)   # 起步对齐时的脉宽（1560us）
-SPEED_US_DEFAULT = 1575.0     # 对准后的循迹速度（≈15% 行程，慢速起步用）
+SPEED_US_DEFAULT = 1560.0     # 行进速度（用户 2026-09-20：1575 太快 → 1560）
 ALIGN_TOL_PX = 15.0           # 对齐容差（像素）
 ALIGN_FRAMES = 8              # 连续多少帧在容差内算对准
 ACQUIRE_S = 3.0               # 发车后允许"低速探路找线"的窗口（秒）：看不到线也能往前拱一小段
@@ -241,7 +241,7 @@ def main() -> int:
     if use_motor and min(args.start_us, args.speed_us) < settings.ESC_DEADBAND_US:
         print(f"[BENCH] 拒绝运行：脉宽低于电调死区。实测 1540us 不动、≈{settings.ESC_DEADBAND_US}us 才起转，"
               f"现在 起步={args.start_us:.0f} / 循迹={args.speed_us:.0f} → 车不会动。")
-        print(f"[BENCH] 请用 ≥ {settings.ESC_CREEP_US}us（建议 起步 {settings.ESC_CREEP_US} / 循迹 1575）")
+        print(f"[BENCH] 请用 ≥ {settings.ESC_CREEP_US}us（建议 起步/循迹都用 {settings.ESC_CREEP_US}）")
         return 2
     if use_motor and args.speed_us > settings.ESC_DEBUG_MAX_US:
         print(f"[BENCH] ⚠️ 循迹脉宽 {args.speed_us:.0f}us 超过调试上限 {settings.ESC_DEBUG_MAX_US}us"

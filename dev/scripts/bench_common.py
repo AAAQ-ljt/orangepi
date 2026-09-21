@@ -14,7 +14,7 @@
     state = {"stopped": False, "driver": None, "restored": False}
     install_signal_guard(state)
     atexit.register(restore_remote_stage, state, "atexit")
-    with MotorSession(speed_us_max=1575) as session:      # 不用电机就 MotorSession(None)
+    with MotorSession(speed_us_max=1560) as session:      # 不用电机就 MotorSession(None)
         ...
 """
 from __future__ import annotations

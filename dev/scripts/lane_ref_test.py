@@ -78,7 +78,11 @@ LIMIT_DEG0 = 15.0
 SMOOTH0 = 0.7                              # 输出平滑：0.7*新 + 0.3*旧
 TARGET_RATIO0 = 375.0 / 640.0              # ★ 操场实测：车摆正时车道中心在画面 375 处
                                            #   （参考实现是 226/320；那是它的摄像头安装）
-SPEED_FAST_US, SPEED_SLOW_US = 15.0, -20.0 # 误差小/大时的脉宽增减（参考实现的自适应速度）
+SPEED_FAST_US, SPEED_SLOW_US = 0.0, -10.0  # 误差小/大时的脉宽增减
+                                           # ★ 用户 2026-09-20 实测：循迹 1575 太快 → 基准降到 1560，
+                                           #   自适应只减速不提速（参考实现是 +15/-20，见调试清单 §2.6）
+SPEED_FLOOR_MARGIN_US = 5.0                # 减速档下限 = 死区 + 这个余量（低于死区车会直接停，
+                                           #   基准 1560 时 1560-20=1540 < 1545 正好掉进死区）
 
 
 @dataclass
@@ -259,21 +263,34 @@ class PidRef:
         return angle
 
 
-def adaptive_pulse(error: float, base_us: float) -> float:
-    """参考实现的自适应速度：误差小加速、误差大减速（单位 us）。"""
+def adaptive_pulse(error: float, base_us: float,
+                   fast: float = SPEED_FAST_US, slow: float = SPEED_SLOW_US) -> float:
+    """参考实现的自适应速度：误差小加速、误差大减速（单位 us）。
+
+    减速档有硬下限（死区 + 余量）：基准 1560 时 1560-20=1540 已低于死区 1545，
+    那样"减速"会变成"停车"（用户 2026-09-20 把巡线速度降到 1560 后才出现这个风险）。
+    """
     e = abs(error)
     if e < 5:
-        return base_us + SPEED_FAST_US
-    if e < 15:
-        return base_us
-    return base_us + SPEED_SLOW_US
+        us = base_us + fast
+    elif e < 15:
+        us = base_us
+    else:
+        us = base_us + slow
+    return max(us, float(settings.ESC_DEADBAND_US) + SPEED_FLOOR_MARGIN_US)
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="循迹测试（参考实现版，独立自包含）")
     ap.add_argument("--image", default="", help="只分析一张图（本地可跑，不碰硬件）")
     ap.add_argument("--camera", type=int, default=2, help="摄像头（默认 2=下摄）")
-    ap.add_argument("--speed-us", type=float, default=1575.0, help="循迹脉宽（默认 1575）")
+    ap.add_argument("--speed-us", type=float, default=1560.0,
+                    help="循迹脉宽（默认 1560；死区 1545，调试上限 1600）")
+    ap.add_argument("--speed-fast", type=float, default=SPEED_FAST_US,
+                    help=f"误差小(<5px)时的脉宽增量（默认 {SPEED_FAST_US:+.0f}，0=不提速）")
+    ap.add_argument("--speed-slow", type=float, default=SPEED_SLOW_US,
+                    help=f"误差大(≥15px)时的脉宽增量（默认 {SPEED_SLOW_US:+.0f}，"
+                         f"下限=死区+{SPEED_FLOOR_MARGIN_US:.0f}us）")
     ap.add_argument("--start-us", type=float, default=1560.0, help="起步/探路脉宽")
     ap.add_argument("--max-seconds", type=float, default=120.0)
     ap.add_argument("--kp", type=float, default=KP0)
@@ -334,8 +351,9 @@ def main() -> int:
     print(f"[REF] 参考实现循迹：kp={args.kp} ki={args.ki} kd={args.kd} 限幅±{args.limit_deg}° "
           f"平滑={args.smooth} 目标比={args.target_ratio:.3f} ROI={args.roi_top}~{args.roi_bottom_ratio} "
           f"选线={args.pick}")
-    print(f"[REF] 脉宽 起步={args.start_us:.0f} → 循迹={args.speed_us:.0f}us；"
-          f"规则：板在→停；移开→循迹；再见板→停")
+    print(f"[REF] 脉宽 起步={args.start_us:.0f} → 循迹={args.speed_us:.0f}us"
+          f"（直道 {args.speed_us + args.speed_fast:.0f} / 大误差 {max(args.speed_us + args.speed_slow, settings.ESC_DEADBAND_US + SPEED_FLOOR_MARGIN_US):.0f}）"
+          f"；规则：板在→停；移开→循迹；再见板→停")
 
     csv_fh = open(args.log_csv, "w", encoding="utf-8") if args.log_csv else None
     if csv_fh:
@@ -379,7 +397,8 @@ def main() -> int:
                             if r.error is not None:
                                 pid_out = pid.step(r.error)
                                 steer = pid_out
-                                out_us = adaptive_pulse(r.error, args.speed_us)
+                                out_us = adaptive_pulse(r.error, args.speed_us,
+                                                        args.speed_fast, args.speed_slow)
                                 phase = "track"
                             elif exploring:
                                 # 探路：没有线也低速往前拱（用中位舵角），窗口结束仍无线就停

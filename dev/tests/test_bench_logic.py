@@ -52,10 +52,12 @@ def test_lane_loss_stops_unless_forced():
 
 # ------------------------------------------------------- 起步对齐
 def test_align_uses_start_speed():
-    """未对准 → 低速蠕动（起步脉宽），不是循迹速度。"""
+    """未对准 → 低速蠕动（起步脉宽），不是行进速度。"""
     d = _d(aligned=False)
     assert d.out_us == START_US_DEFAULT and d.phase == "align"
-    assert START_US_DEFAULT < SPEED_US_DEFAULT, "起步脉宽应低于循迹脉宽"
+    # 2026-09-20：巡线速度由 1575 降到 1560 → 起步/行进同为 1560；仍必须高于电调死区
+    assert START_US_DEFAULT <= SPEED_US_DEFAULT, "起步脉宽不应高于行进脉宽"
+    assert START_US_DEFAULT > settings.ESC_DEADBAND_US, "要动车的脉宽必须高于死区"
 
 
 def test_aligned_uses_track_speed():

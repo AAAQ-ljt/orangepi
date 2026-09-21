@@ -180,6 +180,14 @@ python scripts/ssh_get.py /root/dev/log.txt .            # 下载
 # 网络全断时（或本地网络封了 SSH 端口）—— 走串口，不经网络
 python scripts/serial_car.py "ip -4 a show wwan0"        # 串口执行命令（COM8@1500000，自动登录）
 python scripts/serial_push.py dev/scripts/net/car-net.sh /root/dev/scripts/net/car-net.sh --mode 755
+python scripts/serial_push.py xx.tar.gz /tmp/xx.tar.gz --binary --chunk 3500   # 二进制必须 --binary
+
+⚠️ 串口三条铁律（2026-09-21 实测踩过）：
+1. **绝不要发 Ctrl+C** —— Rockchip FIQ Debugger 以它为触发键，一按就掉进 `debug>`（系统还在跑）；
+   切回来敲 `console`。卡住的命令行只发回车。
+2. 命令要**短、单层引号、不用 `$(...)`/`\"`**：长命令会被传坏（`echo`→`ecHo`），
+   出现"半截执行"（删了文件却没留归档）；archive/rm 这类破坏性动作分开跑并立刻 `ls` 验证。
+3. 车有蜂窝网时优先**让车自己从 GitHub 拉仓库**（4MB/~20s），串口只补未 push 的提交。
 ```
 
 ⚠️ 传**绝对远端路径**时加 `MSYS_NO_PATHCONV=1` 最稳（Git Bash 的路径转换坑，见 §6）。

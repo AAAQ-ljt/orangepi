@@ -44,14 +44,17 @@ def sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def push(console: SerialConsole, local: str, remote: str, mode: str, chunk: int) -> bool:
+def push(console: SerialConsole, local: str, remote: str, mode: str, chunk: int,
+         binary: bool = False) -> bool:
     remote = normalize_remote(remote)
     # 先刷新 sudo 凭据（否则各条 sudo 命令会停在密码提示上，把串口会话卡死）
     console.run(f"echo {console.password} | sudo -S -v", timeout=25)
     with open(local, "rb") as fh:
         raw = fh.read()
-    # 统一 LF：脚本在 Linux 上带 CR 会炸
-    raw = raw.replace(b"\r\n", b"\n")
+    if not binary:
+        # 统一 LF：文本脚本在 Linux 上带 CR 会炸。二进制（tar.gz 等）必须加 --binary，
+        # 否则这种替换会随机破坏内容（校验一定失败）。
+        raw = raw.replace(b"\r\n", b"\n")
     b64 = base64.b64encode(raw).decode()
     local_hash = sha256(raw)
     print(f"[push] {local} → {remote}（{len(raw)} 字节，base64 {len(b64)}，分 {(len(b64)+chunk-1)//chunk} 块）")
@@ -88,6 +91,8 @@ def main() -> int:
     ap.add_argument("--baud", type=int, default=1500000)
     ap.add_argument("--mode", default="644", help="远端权限（脚本用 755）")
     ap.add_argument("--chunk", type=int, default=700, help="每块 base64 字符数")
+    ap.add_argument("--binary", action="store_true",
+                    help="二进制文件（tar.gz 等）：不做 CRLF→LF 替换，否则内容会被破坏")
     ap.add_argument("--verify-only", action="store_true")
     args = ap.parse_args()
 
@@ -95,7 +100,10 @@ def main() -> int:
     try:
         if args.verify_only:
             with open(args.local, "rb") as fh:
-                local_hash = sha256(fh.read().replace(b"\r\n", b"\n"))
+                data = fh.read()
+            if not args.binary:
+                data = data.replace(b"\r\n", b"\n")
+            local_hash = sha256(data)
             remote = normalize_remote(args.remote)
             out = console.run(f"echo HASH=$(sudo sha256sum {remote} | cut -d' ' -f1)", timeout=30)
             m = re.search(r"HASH=([0-9a-f]{64})", out)
@@ -103,7 +111,8 @@ def main() -> int:
             same = remote_hash == local_hash
             print(f"[verify] {'✅ 一致' if same else '❌ 不一致'} 本地 {local_hash[:12]}… 远端 {remote_hash[:12] or '(空)'}")
             return 0 if same else 1
-        return 0 if push(console, args.local, args.remote, args.mode, args.chunk) else 1
+        return 0 if push(console, args.local, args.remote, args.mode, args.chunk,
+                         args.binary) else 1
     finally:
         console.close()
 

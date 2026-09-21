@@ -191,10 +191,13 @@ def _annotate(frame: np.ndarray, name: str | None = None, out_dir: str | None = 
     obs = _scan(frame)
     cv2.line(vis, (int(settings.TARGET_X), 0), (int(settings.TARGET_X), frame.shape[0]),
              (255, 0, 255), 1)
-    cv2.line(vis, (int(obs.center_x), 0), (int(obs.center_x), frame.shape[0]), (0, 255, 255), 1)
-    cv2.putText(vis, f"center={obs.center_x:.0f} conf={obs.confidence:.2f} "
-                     f"L={obs.left_x} R={obs.right_x} segs={obs.valid_rows}",
-                (6, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
+    if obs is not None and obs.center_x is not None:      # 没配到成对线时 center 是 None，别崩
+        cv2.line(vis, (int(obs.center_x), 0), (int(obs.center_x), frame.shape[0]),
+                 (0, 255, 255), 1)
+    if obs is not None:
+        cv2.putText(vis, f"center={'-' if obs.center_x is None else f'{obs.center_x:.0f}'} "
+                         f"L={obs.left_x} R={obs.right_x} segs={obs.valid_rows}",
+                    (6, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
     if out_dir:
         cv2.imwrite(os.path.join(out_dir, f"annotated_{name}.jpg"), vis)
         cv2.imwrite(os.path.join(out_dir, f"frame_{name}.jpg"), frame)

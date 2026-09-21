@@ -306,6 +306,12 @@ def main() -> int:
     ap.add_argument("--limit-deg", type=float, default=LIMIT_DEG0, help="舵角限幅（默认 15）")
     ap.add_argument("--smooth", type=float, default=SMOOTH0)
     ap.add_argument("--target-ratio", type=float, default=TARGET_RATIO0)
+    ap.add_argument("--auto-target", dest="auto_target", action="store_true", default=True,
+                    help="起步前自动标定目标点（默认开：用板未出现时那几帧的中位数）")
+    ap.add_argument("--no-auto-target", dest="auto_target", action="store_false",
+                    help="不做自动标定，严格用 --target-ratio / site.yaml 的值")
+    ap.add_argument("--auto-frames", type=int, default=6,
+                    help="自动标定用几帧（默认 6）")
     # ★ ROI 用操场实测的"两条白线同时可见"的那条带（参考实现是 0.50~0.85，
     #   但那个区间里我们下摄的右线已经跑出画面 → 只会找到单侧）
     ap.add_argument("--roi-top", type=float, default=0.35)
@@ -383,6 +389,8 @@ def main() -> int:
     print("[REF] 误差滤波："
           + ("关（--no-filter）" if err_filter is None else
              f"窗口 {err_filter.window} / 离群阈值 {err_filter.outlier:.0f}px（中位数剔除 + 越新权重越大）"))
+    print(f"[REF] 目标点：{'自动标定（板未出现时用前 ' + str(args.auto_frames) + ' 帧中位数）' if args.auto_target else f'固定 {args.target_ratio * settings.IMG_W:.0f}px'}"
+          f"；命令行给的 {args.target_ratio * settings.IMG_W:.0f}px 只在关掉自动标定时生效")
     print(f"[REF] 转向符号 steer_sign={steer_sign:+.0f}"
           f"（{'+1：角度增大=右转' if steer_sign > 0 else '-1：角度增大=左转'}，"
           f"来自 {'命令行' if args.steer_sign is not None else 'settings/site.yaml'}）"
@@ -394,6 +402,10 @@ def main() -> int:
 
     seen_board = False
     big_err_since = None      # 跑偏保护的计时起点（误差小/无读数时清空）
+    target_px = None          # 自动标定出的目标点（None = 还没标定完）
+    auto_target = bool(args.auto_target)
+    auto_samples: List[float] = []
+    n_center_frames = 0       # 有有效中心的帧数（收尾时报告）
     steer = 90.0
     rc = 0
     t0 = time.time()
@@ -421,6 +433,22 @@ def main() -> int:
                             acquire_since = now
 
                         r = det.detect(frame)
+                        if r.center_x is not None:
+                            n_center_frames += 1
+                        # ★ 起步前自动标定目标点：板还没出现 = 车静止、镜头对着赛道，
+                        #   用这几帧的中位数当"车在车道正中时中心该在的像素值"。
+                        #   （2026-09-21 实验室：target_x 还是操场标定的 375，而实验室这个
+                        #    视角下居中时中心只有 ~346 → 恒 -30px 误差 → 车一直往左跑。）
+                        if target_px is None and auto_target and not seen_board \
+                                and not gs.blocked and r.center_x is not None:
+                            auto_samples.append(r.center_x)
+                            if len(auto_samples) >= args.auto_frames:
+                                target_px = float(np.median(auto_samples))
+                                det.target_ratio = target_px / float(frame.shape[1])
+                                spread = max(auto_samples) - min(auto_samples)
+                                print(f"[REF] ✅ 自动标定目标点：{target_px:.1f}px"
+                                      f"（{len(auto_samples)} 帧中位，跨距 {spread:.0f}px；"
+                                      f"命令行/site.yaml 的 {args.target_ratio * frame.shape[1]:.0f}px 本次不用）")
                         driving = seen_board and not gs.blocked
                         exploring = driving and acquire_since is not None and \
                             (now - acquire_since) < args.acquire_s
@@ -498,8 +526,14 @@ def main() -> int:
 
                     if not seen_board:
                         print("[REF] ⚠️ 全程没见过蓝板：车不会动（这是安全设计）")
-                    elif driving and det.detect(frame).error is None:
+                    elif n_center_frames == 0:
                         print("[REF] ⚠️ 结束时没有有效车道：检查 ROI/斜率范围，或跑 lane_probe 看画面")
+                    elif target_px is not None:
+                        print(f"[REF] 本次用的目标点 = {target_px:.1f}px（自动标定），"
+                              f"有效读数 {n_center_frames} 帧")
+                    elif auto_target:
+                        print(f"[REF] ⚠️ 自动标定没成（起步前那几帧没有有效中心）："
+                              f"本次用的是 site.yaml/命令行的 {args.target_ratio * 640:.0f}px")
     finally:
         if csv_fh is not None:
             csv_fh.close()

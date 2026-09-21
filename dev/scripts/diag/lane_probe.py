@@ -297,6 +297,48 @@ def verdict_of(frame: np.ndarray) -> tuple:
     return ok, text, (obs.valid_rows, obs.valid_rows)
 
 
+def camera_aim(frame: np.ndarray, step: int = 8) -> tuple:
+    """镜头朝向体检：白线到底落在画面的哪一段、离边缘多近。
+
+    返回 (是否够用, 文本)。判据（2026-09-21 实验室教训：线只在 y≈168~264 的一条窄带、
+    且挤在 x 0~140 / 570~630 的边缘上，车一动就丢一侧）：
+      · 需要"左右两侧同时有白点"一直延伸到 **y ≥ 300**（画面下半部）才算够用；
+      · 若左右白点的横向位置贴边（左 < 40 或 右 > 600）也要警告 —— 车一动线就出画面。
+    """
+    kept, _ = white_mask(frame, roi_top_ratio=0.0, roi_bottom_margin=0,
+                         apply_shape_filter=True)   # ★ 看整幅画面，不能被 ROI 裁掉
+    h, w = kept.shape[:2]
+    both_rows, left_xs, right_xs = [], [], []
+    for y in range(0, h, step):
+        row = kept[y]
+        nl = int(np.count_nonzero(row[: w // 2] > 0))
+        nr = int(np.count_nonzero(row[w // 2:] > 0))
+        if nl >= 3 and nr >= 3:
+            both_rows.append(y)
+            left_xs.extend(np.nonzero(row[: w // 2])[0].tolist())
+            right_xs.extend((np.nonzero(row[w // 2:])[0] + w // 2).tolist())
+    if not both_rows:
+        return False, "左右两侧从来没有同时出现白点 → 先把两条线都弄进画面（压角度/换广角）"
+    y_lo, y_hi = min(both_rows), max(both_rows)
+    lx = float(np.median(left_xs)) if left_xs else 0.0
+    rx = float(np.median(right_xs)) if right_xs else 0.0
+    edge = []
+    if lx < 40:
+        edge.append(f"左线贴左边（x≈{lx:.0f}）")
+    if rx > w - 40:
+        edge.append(f"右线贴右边（x≈{rx:.0f}）")
+    edge_txt = "；".join(edge) if edge else f"两侧都不贴边（左 x≈{lx:.0f} / 右 x≈{rx:.0f}）"
+    ok = y_hi >= 300 and not edge
+    if ok:
+        return True, (f"✅ 够用：左右同时有白点的 y 范围 {y_lo}~{y_hi}（已进画面下半部），{edge_txt}")
+    why = []
+    if y_hi < 300:
+        why.append(f"只看得到远处（最低到 y={y_hi}，下半部 y≥300 没有）→ **把下摄再往下压**")
+    if edge:
+        why.append("线贴画面边缘，车一动就会丢一侧 → 压角度/换广角让线往里收")
+    return False, f"❌ 不够用：{y_lo}~{y_hi}；" + "；".join(why)
+
+
 def analyze_frame(frame: np.ndarray, name: str, out_dir: str | None = None, verbose: bool = True) -> tuple:
     if verbose:
         print(f"  ---- {name}  ({frame.shape[1]}x{frame.shape[0]}) ----")
@@ -309,8 +351,10 @@ def analyze_frame(frame: np.ndarray, name: str, out_dir: str | None = None, verb
     pct_kept = float((kept > 0).mean()) * 100.0
     _o = _scan(frame)
     conf = float(_o.confidence) if _o is not None else 0.0
+    aim_ok, aim_txt = camera_aim(frame)
     print(f"    白像素占比：过滤前 {float((raw > 0).mean()) * 100:.1f}% → 过滤后 {pct_kept:.1f}%"
           f"（占比高但判定不可用 = 那些白都在反光/地面上）")
+    print(f"    镜头朝向体检：{aim_txt}")
     print(f"    判定：{text}")
     print(f"    镜头建议：{angle_advice(frame)}")
     if out_dir:
@@ -493,6 +537,7 @@ def main() -> int:
     print(f"[PROBE] 打开摄像头 {args.camera}（会临时停掉两路推流，退出自动恢复）")
     good = 0
     last = ("", (0, 0))
+    last_frame = None
     kept_pcts: list = []
     confs: list = []
     with camera_exclusive():
@@ -507,6 +552,7 @@ def main() -> int:
                                                                verbose=not args.quiet)
             good += 1 if ok_v else 0
             last = (text, rows)
+            last_frame = frame
             kept_pcts.append(pct_kept)
             confs.append(conf_v)
         cap.release()
@@ -518,6 +564,9 @@ def main() -> int:
     print(f"[PROBE] 对比用读数：白像素占比（过滤后）均值 {avg_kept:.1f}%，最好置信度 {best_conf:.2f}"
           f"   ← 开灯/关灯/换角度前后各跑一次，比这两个数最直接")
     print(f"[PROBE] 最后一帧：{last[0]}")
+    if last_frame is not None:
+        _aim_ok, aim_txt = camera_aim(last_frame)
+        print(f"[PROBE] 镜头朝向体检（最后一帧）：{aim_txt}")
     if good == 0:
         print("[PROBE] 下一步（按顺序试，别一上来就调阈值）：")
         print("[PROBE]   1) 看『白像素占比（过滤后）』：若 >3% 却判定不可用，说明白都在**反光/地面**上 → "

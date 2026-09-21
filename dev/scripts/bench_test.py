@@ -248,7 +248,10 @@ def main() -> int:
               f"（未验证过的速度），5 秒内可 Ctrl-C 中止")
         time.sleep(5.0)
 
-    if not _HAS_LANE_SCAN and not args.no_lane:
+    # 只有"真的要用扫线"的档才需要扫线模块：转向自检/标定/直行/蓝板档都不需要
+    # （2026-09-21 实验室实测：--steer-test 被这一条挡掉，白跑一次）
+    need_lane = not (args.no_lane or args.steer_test or args.calibrate)
+    if not _HAS_LANE_SCAN and need_lane:
         print("[BENCH] 扫线模块已移除：循迹档不可用。请用 scripts/lane_ref_test.py 做循迹测试，"
               "或加 --no-lane 只测蓝板/直行。")
         return 2

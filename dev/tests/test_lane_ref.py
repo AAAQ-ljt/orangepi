@@ -77,13 +77,19 @@ def test_single_side_gives_no_center():
 
 
 def test_pid_matches_reference_convention():
-    """参考实现：angle = 90 - pid；误差为正 → 角度小于 90（往一侧打）。"""
-    pid = PidRef(kp=0.15, ki=0.01, kd=0.12, limit_deg=15, smooth=1.0)
+    """转向符号与 settings.STEER_SIGN 同口径：
+       sign=-1（参考实现原式 `90 - pid`）→ 正误差输出 <90°；
+       sign=+1（"角度增大=右转"）→ 正误差输出 >90°。
+    """
+    pid = PidRef(kp=0.15, ki=0.01, kd=0.12, limit_deg=15, smooth=1.0, sign=-1.0)
     a_pos = pid.step(+40.0)
-    assert a_pos < 90.0, f"正误差应输出 <90°，实际 {a_pos}"
+    assert a_pos < 90.0, f"sign=-1 时正误差应输出 <90°，实际 {a_pos}"
     pid.reset()
     a_neg = pid.step(-40.0)
-    assert a_neg > 90.0, f"负误差应输出 >90°，实际 {a_neg}"
+    assert a_neg > 90.0, f"sign=-1 时负误差应输出 >90°，实际 {a_neg}"
+
+    pid2 = PidRef(kp=0.15, ki=0.01, kd=0.12, limit_deg=15, smooth=1.0, sign=+1.0)
+    assert pid2.step(+40.0) > 90.0, "sign=+1 时必须与 sign=-1 反向（否则改 site.yaml 没效果）"
 
 
 def test_angle_limited_and_smoothed():

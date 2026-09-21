@@ -60,6 +60,7 @@ import cv2
 import numpy as np
 
 from config import settings
+from control.filters import ErrorFilter
 from vision.camera_guard import camera_exclusive, open_camera
 from vision.start_gate import StartGate
 
@@ -235,10 +236,12 @@ class PidRef:
     """参考实现的 PID（像素误差口径，输出角度增量，带输出平滑）。"""
 
     def __init__(self, kp: float = KP0, ki: float = KI0, kd: float = KD0,
-                 limit_deg: float = LIMIT_DEG0, smooth: float = SMOOTH0) -> None:
+                 limit_deg: float = LIMIT_DEG0, smooth: float = SMOOTH0,
+                 sign: float = 1.0) -> None:
         self.kp, self.ki, self.kd = kp, ki, kd
         self.limit_deg = limit_deg
         self.smooth = smooth
+        self.sign = float(sign)      # +1：角度增大=右转（与 settings.STEER_SIGN 同口径）
         self.integral = 0.0
         self.last_error = 0.0
         self.last_angle: Optional[float] = None
@@ -253,7 +256,11 @@ class PidRef:
         self.integral = max(-INTEGRAL_LIMIT, min(INTEGRAL_LIMIT, self.integral))
         pid = self.kp * error + self.ki * self.integral + self.kd * (error - self.last_error)
         self.last_error = error
-        angle = 90.0 - pid                                   # 参考实现：90 - pid
+        # 参考实现是 `90 - pid`；这里接上 settings.STEER_SIGN，让它和 planner 同口径：
+        #   sign=+1 表示"角度增大 = 右转" → 90 + pid；sign=-1 → 90 - pid（= 参考实现原式）
+        # （2026-09-21 实验室：site.yaml 的 -1 与 bench_test --steer-test 的说明相反，
+        #   而 --steer-test 当时被脚本 bug 挡住了没验成 —— 方向必须实测一次。）
+        angle = 90.0 + self.sign * pid
         angle = max(90.0 - self.limit_deg, min(90.0 + self.limit_deg, angle))
         if self.last_angle is None:
             self.last_angle = angle
@@ -307,6 +314,21 @@ def main() -> int:
     ap.add_argument("--pick", choices=("steepest", "longest"), default="steepest",
                     help="每侧选哪条线段：steepest=参考实现；longest=更稳（备选）")
     ap.add_argument("--acquire-s", type=float, default=3.0, help="发车后低速探路找线窗口")
+    ap.add_argument("--err-stop-px", type=float, default=60.0,
+                    help="跑偏保护：误差绝对值 ≥ 此值（像素）")
+    ap.add_argument("--err-stop-s", type=float, default=1.5,
+                    help="跑偏保护：连续这么多秒都大误差 → 停车（0 表示关闭）")
+    ap.add_argument("--steer-sign", type=float, default=None,
+                    help="转向符号：+1=角度增大是右转（与 settings.STEER_SIGN 同口径）；"
+                         "默认取 settings.STEER_SIGN（当前 site.yaml 里是 "
+                         f"{settings.STEER_SIGN:+.0f}）——方向不对就改这里或 site.yaml")
+    ap.add_argument("--no-filter", action="store_true",
+                    help="关掉误差滤波（默认开：中位数剔离群 + 越新权重越大，"
+                         "实测能压掉 345/367 来回跳）")
+    ap.add_argument("--filter-window", type=int, default=None,
+                    help=f"滤波窗口（默认 settings.ERROR_FILTER_WINDOW={settings.ERROR_FILTER_WINDOW}）")
+    ap.add_argument("--filter-outlier", type=float, default=None,
+                    help=f"离群阈值（默认 settings.ERROR_FILTER_OUTLIER={settings.ERROR_FILTER_OUTLIER}）")
     ap.add_argument("--no-motor", action="store_true", help="只跑视觉与决策")
     ap.add_argument("--allow-motion", "--i-know-wheels-are-up", dest="allow_motion",
                     action="store_true", help="确认车可以移动")
@@ -347,19 +369,31 @@ def main() -> int:
     install_signal_guard(state)
 
     gate = StartGate()
-    pid = PidRef(args.kp, args.ki, args.kd, args.limit_deg, args.smooth)
+    steer_sign = float(settings.STEER_SIGN if args.steer_sign is None else args.steer_sign)
+    pid = PidRef(args.kp, args.ki, args.kd, args.limit_deg, args.smooth, sign=steer_sign)
+    err_filter = None if args.no_filter else ErrorFilter(args.filter_window, args.filter_outlier)
     print(f"[REF] 参考实现循迹：kp={args.kp} ki={args.ki} kd={args.kd} 限幅±{args.limit_deg}° "
           f"平滑={args.smooth} 目标比={args.target_ratio:.3f} ROI={args.roi_top}~{args.roi_bottom_ratio} "
           f"选线={args.pick}")
     print(f"[REF] 脉宽 起步={args.start_us:.0f} → 循迹={args.speed_us:.0f}us"
           f"（直道 {args.speed_us + args.speed_fast:.0f} / 大误差 {max(args.speed_us + args.speed_slow, settings.ESC_DEADBAND_US + SPEED_FLOOR_MARGIN_US):.0f}）"
           f"；规则：板在→停；移开→循迹；再见板→停")
+    print(f"[REF] 跑偏保护：误差 ≥{args.err_stop_px:.0f}px 持续 {args.err_stop_s:.1f}s 就停车"
+          if args.err_stop_s > 0 else "[REF] 跑偏保护：已关闭（--err-stop-s 0）")
+    print("[REF] 误差滤波："
+          + ("关（--no-filter）" if err_filter is None else
+             f"窗口 {err_filter.window} / 离群阈值 {err_filter.outlier:.0f}px（中位数剔除 + 越新权重越大）"))
+    print(f"[REF] 转向符号 steer_sign={steer_sign:+.0f}"
+          f"（{'+1：角度增大=右转' if steer_sign > 0 else '-1：角度增大=左转'}，"
+          f"来自 {'命令行' if args.steer_sign is not None else 'settings/site.yaml'}）"
+          f" —— 先用 bench_test.py --steer-test 验方向")
 
     csv_fh = open(args.log_csv, "w", encoding="utf-8") if args.log_csv else None
     if csv_fh:
         csv_fh.write("t,phase,center_x,error_px,angle_deg,esc_us,left_x,right_x,n_left,n_right,edge_pct\n")
 
     seen_board = False
+    big_err_since = None      # 跑偏保护的计时起点（误差小/无读数时清空）
     steer = 90.0
     rc = 0
     t0 = time.time()
@@ -393,24 +427,51 @@ def main() -> int:
                         phase = "stop"
                         out_us = NEUTRAL_US
                         angle = 90.0
+                        err_c = None                      # 送进控制器的误差（已滤波）
+                        if r.error is not None:
+                            err_c = r.error if err_filter is None else err_filter.update(r.error)
+                        # ★ 跑偏保护：一直大误差说明"锁到的不是本车道"或"转向方向不对"，
+                        #   参考实现没有这一层（2026-09-21 实验室：误差恒在 -33px、舵机一直
+                        #   往左打到冲出跑道，226 帧里误差从没回到 0 附近）。
+                        guard_trip = False
+                        if args.err_stop_s > 0 and driving and err_c is not None \
+                                and abs(err_c) >= args.err_stop_px:
+                            if big_err_since is None:
+                                big_err_since = now
+                            elif now - big_err_since >= args.err_stop_s:
+                                print(f"[REF] ⚠️ 连续 {args.err_stop_s:.1f}s 误差 ≥{args.err_stop_px:.0f}px"
+                                      f"（当前 {err_c:+.1f}）→ 判定跑偏/锁错线，停车")
+                                state["stopped"] = True
+                                guard_trip = True
+                        else:
+                            big_err_since = None
                         if driving:
-                            if r.error is not None:
-                                pid_out = pid.step(r.error)
+                            if err_c is not None:
+                                pid_out = pid.step(err_c)
                                 steer = pid_out
-                                out_us = adaptive_pulse(r.error, args.speed_us,
+                                out_us = adaptive_pulse(err_c, args.speed_us,
                                                         args.speed_fast, args.speed_slow)
                                 phase = "track"
                             elif exploring:
                                 # 探路：没有线也低速往前拱（用中位舵角），窗口结束仍无线就停
                                 pid.reset()
+                                if err_filter is not None:
+                                    err_filter.reset()
                                 out_us = args.start_us
                                 phase = "explore"
                             else:
                                 pid.reset()
+                                if err_filter is not None:
+                                    err_filter.reset()
                             angle = steer
                         else:
                             pid.reset()
+                            if err_filter is not None:
+                                err_filter.reset()
                             steer = 90.0
+                            angle = 90.0
+                        if guard_trip:                    # 触发的这一帧就不再输出动力
+                            out_us = NEUTRAL_US
                             angle = 90.0
 
                         if use_motor and pca is not None:

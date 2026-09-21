@@ -4,11 +4,15 @@
     python scripts/ssh_put.py <本地文件> <远端绝对路径>           # 默认:小车(走服务器转发隧道)
     python scripts/ssh_put.py --direct <本地文件> <远端绝对路径>   # 小车热点直连(隧道不通时)
     python scripts/ssh_put.py --server <本地文件> <远端绝对路径>   # 公网服务器本身
+
+⚠️ 远端绝对路径（/root/...）在 Git Bash 下会被转成 Windows 路径，
+   本脚本会自动纠正；也可自行加 MSYS_NO_PATHCONV=1。
 """
 import argparse
-import sys
 
 import paramiko
+
+from remote_path import normalize_remote
 
 TUNNEL = dict(host="121.40.149.155", port=2222, user="root", pwd="orangepi")
 DIRECT = dict(host="10.68.1.43", port=22, user="root", pwd="orangepi")
@@ -22,6 +26,7 @@ def main() -> None:
     parser.add_argument("local", help="本地文件")
     parser.add_argument("remote", help="远端绝对路径")
     args = parser.parse_args()
+    args.remote = normalize_remote(args.remote)
 
     if args.server:
         target = SERVER

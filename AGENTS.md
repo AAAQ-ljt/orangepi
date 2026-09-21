@@ -182,8 +182,9 @@ python scripts/serial_car.py "ip -4 a show wwan0"        # 串口执行命令（
 python scripts/serial_push.py dev/scripts/net/car-net.sh /root/dev/scripts/net/car-net.sh --mode 755
 ```
 
-⚠️ 传**绝对远端路径**时务必加 `MSYS_NO_PATHCONV=1`（Git Bash 的路径转换坑，见 §6；
-`serial_push.py`/`ssh_sync.py` 已内置纠正，`ssh_put.py` 还没有）。
+⚠️ 传**绝对远端路径**时加 `MSYS_NO_PATHCONV=1` 最稳（Git Bash 的路径转换坑，见 §6）。
+`ssh_put.py` / `ssh_get.py` / `serial_push.py` / `ssh_sync.py` 都会自动纠正被转换的路径，
+所以忘加也不会真出错（纠正是共享模块 `scripts/remote_path.py`）。
 详细参数、排障见 `doc/远程连接与服务器手册.md` 与 `doc/车端网络方案.md`。
 
 ### 4.3 车上运行
@@ -299,7 +300,7 @@ StartGateState(blocked: bool, armed: bool, released: bool, blue_ratio: float, ti
 | 强杀/断电对待蜂窝连接 | 会留下**未释放的 CID** → 下次拨号必然失败；退出前用 `car-net.sh cellular down`（关机已自动挂上） |
 | 同时让蜂窝和 WiFi 都自动连 | 两条默认路由互抢，表现为"时通时断"；用 `car-net.sh policy` 保证**只占一条上行**（蜂窝 100 < WiFi 600） |
 | 换服务器时只改了一处 | 推流地址与 frp 隧道地址是两套配置，容易半切换；统一改 `car-net.conf` 后 `car-net.sh apply` |
-| **Git Bash 会把 `/root/xxx` 这类参数转成 Windows 路径** | 远端收到的是 `C:/Program Files/Git/root/...`，报 `No such file`。用 `ssh_put.py`/`ssh_sync.py` 传绝对路径前加 **`MSYS_NO_PATHCONV=1`** |
+| **Git Bash 会把 `/root/xxx` 这类参数转成 Windows 路径** | 远端收到的是 `C:/Program Files/Git/root/...`，报 `No such file`。传绝对路径时加 **`MSYS_NO_PATHCONV=1`**；`ssh_put/ssh_get/serial_push/ssh_sync` 已内置自动纠正（`scripts/remote_path.py`） |
 | 摄像头 index 搞反（会把云台画面当赛道） | **实测确认（2026-09-16）**：`/dev/video0`(index 0) = icspring = **主摄＝云台摄像头**（推流 `cam_car0027`，红绿灯环节看灯）；`/dev/video2`(index 2) = Global Shutter = **副摄＝下摄**（推流 `cam_car0027_sub`，**巡线扫线用它**）。自动驾驶默认 `--camera 2`；不确定时跑 `dev/scripts/cam-identify.py` 复验 |
 | 以为摄像头能跑 30fps | 实测 640×480 只有 **~15fps**（驱动谎报 30）。视觉进程 14 FPS 是摄像头限制，不是我们的代码慢 |
 | **下摄"看着赛道"就以为白线在画面里** | 2026-09-19 抓图实锤：下摄俯仰角太**平**（几乎水平看出去）时，画面里只有赛道中段 + 塑料膜褶皱反光，两条白线贴在**画面左右外沿/画面外** → 扫线无论如何都锁不到线（实测：左 18 行、右 8 行碎片，conf 0）。**先看画面再调参数**：`sudo python3 scripts/diag/lane_probe.py --camera 2 --frames 6`（终端直接给结论 + 叠加图），把两条白线调进画面下半部再谈阈值 |

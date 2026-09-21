@@ -391,6 +391,9 @@ def main() -> int:
              f"窗口 {err_filter.window} / 离群阈值 {err_filter.outlier:.0f}px（中位数剔除 + 越新权重越大）"))
     print(f"[REF] 目标点：{'自动标定（板未出现时用前 ' + str(args.auto_frames) + ' 帧中位数）' if args.auto_target else f'固定 {args.target_ratio * settings.IMG_W:.0f}px'}"
           f"；命令行给的 {args.target_ratio * settings.IMG_W:.0f}px 只在关掉自动标定时生效")
+    if args.auto_target:
+        print("[REF] ⚠️ 用法：先让镜头对着赛道（板拿在手上别挡）→ 出现 "
+              "'✅ 自动标定目标点' → 再把板挡到镜头前 → 移开板发车")
     print(f"[REF] 转向符号 steer_sign={steer_sign:+.0f}"
           f"（{'+1：角度增大=右转' if steer_sign > 0 else '-1：角度增大=左转'}，"
           f"来自 {'命令行' if args.steer_sign is not None else 'settings/site.yaml'}）"
@@ -404,6 +407,7 @@ def main() -> int:
     big_err_since = None      # 跑偏保护的计时起点（误差小/无读数时清空）
     target_px = None          # 自动标定出的目标点（None = 还没标定完）
     auto_target = bool(args.auto_target)
+    warned_late_board = False
     auto_samples: List[float] = []
     n_center_frames = 0       # 有有效中心的帧数（收尾时报告）
     steer = 90.0
@@ -429,6 +433,10 @@ def main() -> int:
                         if gs.blocked:
                             seen_board = True
                             acquire_since = None
+                            if auto_target and target_px is None and not warned_late_board:
+                                warned_late_board = True
+                                print("[REF] ⚠️ 板来得太快：自动标定没成（镜头被挡住时扫不到线）。"
+                                      "想让目标点自动标定，下次先让镜头看赛道约 1 秒再挡板。")
                         elif seen_board and acquire_since is None:
                             acquire_since = now
 
@@ -474,23 +482,34 @@ def main() -> int:
                         else:
                             big_err_since = None
                         if driving:
-                            if err_c is not None:
+                            if err_c is not None and abs(err_c) < args.err_stop_px:
                                 pid_out = pid.step(err_c)
                                 steer = pid_out
                                 out_us = adaptive_pulse(err_c, args.speed_us,
                                                         args.speed_fast, args.speed_slow)
                                 phase = "track"
+                            elif err_c is not None:
+                                # 大误差读数不可信（锁错线/跑到别处）：**先回正、低速慢慢走**，
+                                # 不能照它打满舵 —— 2026-09-21 实验室就是"一帧垃圾读数打出 105°，
+                                # 探路那几秒一直保持满左舵"把车带到赛道外。持续大误差由上面的
+                                # 跑偏保护停车。
+                                steer = 90.0
+                                out_us = args.start_us
+                                phase = "hold"
                             elif exploring:
-                                # 探路：没有线也低速往前拱（用中位舵角），窗口结束仍无线就停
+                                # 探路：没有线也低速往前拱，**舵角回中位**（原来的注释这么写、
+                                # 代码却沿用了上次的 steer，是 bug），窗口结束仍无线就停
                                 pid.reset()
                                 if err_filter is not None:
                                     err_filter.reset()
+                                steer = 90.0
                                 out_us = args.start_us
                                 phase = "explore"
                             else:
                                 pid.reset()
                                 if err_filter is not None:
                                     err_filter.reset()
+                                steer = 90.0
                             angle = steer
                         else:
                             pid.reset()

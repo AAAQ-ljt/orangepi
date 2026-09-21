@@ -351,17 +351,22 @@ def main() -> int:
                     print("[STEER-TEST] 需要电机通道（别加 --no-motor）")
                     return 2
                 print("[STEER-TEST] 转向方向自检开始：电调保持中位 1500us，车不会走，只看前轮")
+                print("[STEER-TEST] 顺序：90°（中位）→ 110°（角度大）→ 70°（角度小）→ 90°（回中）")
+                print("[STEER-TEST]   盯住前轮看 110° 那一下往哪边：")
+                print("[STEER-TEST]     · 前轮往【左】 → '角度大=左转' → site.yaml 写 steer_sign: -1"
+                      "（2026-09-21 实车就是这个）")
+                print("[STEER-TEST]     · 前轮往【右】 → '角度大=右转' → site.yaml 写 steer_sign: +1")
                 steps = ((90, "中位（车轮应朝正前）"),
-                         (90 + 20, "'角度大 20°' —— 若前轮此时【向右】，说明 STEER_SIGN=+1 是对的"),
-                         (90 - 20, "'角度小 20°' —— 若前轮此时【向左】，进一步确认"),
+                         (90 + 20, "角度大 20° ← 记住前轮往哪边"),
+                         (90 - 20, "角度小 20°（应与上一步相反）"),
                          (90, "回中位"))
                 for ang, note in steps:
                     print(f"[STEER-TEST]   舵机 = {ang}°   {note}")
                     pca.set_steering_angle(ang)
                     time.sleep(1.5)
-                print("[STEER-TEST] 结束。结论：")
-                print("[STEER-TEST]   · 角度大=右转  → 不用改，默认就是对的")
-                print("[STEER-TEST]   · 角度大=左转  → 在 /root/dev/config/site.yaml 里写一行 steer_sign: -1")
+                print("[STEER-TEST] 结束。把上面看到的方向写进 /root/dev/config/site.yaml 的 steer_sign："
+                      "角度大=左转 → -1；角度大=右转 → +1")
+                print("[STEER-TEST] （lane_ref_test.py 会读同一个值；也可用 --steer-sign 临时覆盖）")
                 return 0
             with camera_exclusive():
                 cap = open_camera(args.camera, args.width, args.height)

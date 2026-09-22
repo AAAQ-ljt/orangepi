@@ -152,20 +152,23 @@ D:\5g\orangepi\
 PY="E:/venvs/smartcar-ultra/Scripts/python.exe"   # numpy 2.2 + cv2 5.0
 cd dev && export PYTHONPATH=.
 
-# 单测（纯函数 + __main__ 风格，不需要 pytest）
-for t in test_filters test_pid test_lane_arbiter test_protocol test_start_gate test_lane_scan test_control; do
-  "$PY" tests/$t.py
-done
+# 单测（纯函数 + __main__ 风格，不需要 pytest）—— 直接全部跑一遍
+for t in tests/test_*.py; do "$PY" "$t" || echo "FAIL $t"; done
+# 当前 14 个文件：filters/pid/lane_arbiter/protocol/start_gate/control/elements/site_config/
+#   camera_guard/rknn_detector/bench_logic/lane_ref/lane_ref_run + integration
 "$PY" tests/test_integration.py        # 端到端：起控制端 + UDP 打假数据（dry-run）
+"$PY" tests/test_lane_ref_run.py       # 循迹：假摄像头跑完整状态机（自检→发车→跟线→丢线停车）
 
 # 视觉单模块自测（不需要摄像头/模型）
 "$PY" vision/vision_main.py --test-image 某张赛道图.jpg   # 打印 lane / start gate 判据
+"$PY" scripts/lane_ref_test.py --image 某张赛道图.jpg     # 循迹检测器单图读数 + 镜头朝向体检
 "$PY" main.py --port 5000                                 # dry-run 控制端
 ```
 
 - 所有新模块**必须能在没有摄像头、没有 PCA9685、没有模型的机器上 import 并测试**（用 mock 与合成图）。
 - 测试文件命名 `test_*.py`，用断言 + `if __name__ == "__main__"` 直接跑，别引入新的测试框架依赖。
-- 提交前**必须**跑通上面全部 8 个文件。
+- 提交前**必须**跑通 `tests/test_*.py` 全部文件（当前 14 个）；高风险运动代码（循迹、台架、
+  退出路径）除了纯函数测试，还要有"假硬件跑完整流程"的集成测试（照 `tests/test_lane_ref_run.py`）。
 
 ### 4.2 连车（免交互）
 
@@ -314,6 +317,8 @@ StartGateState(blocked: bool, armed: bool, released: bool, blue_ratio: float, ti
 | **下摄"看着赛道"就以为白线在画面里** | 2026-09-19 抓图实锤：下摄俯仰角太**平**（几乎水平看出去）时，画面里只有赛道中段 + 塑料膜褶皱反光，两条白线贴在**画面左右外沿/画面外** → 扫线无论如何都锁不到线（实测：左 18 行、右 8 行碎片，conf 0）。**先看画面再调参数**：`sudo python3 scripts/diag/lane_probe.py --camera 2 --frames 6`（终端直接给结论 + 叠加图），把两条白线调进画面下半部再谈阈值 |
 | 以为「云台压下去」就能拿到俯视视角（**巡线固定用下摄 video2，云台不参与巡线**） | 2026-09-19 实测**云台俯仰行程不够**：`--sweep-tilt` 扫了 40°~140° 共 9 档，最好的一档（tilt=105°）conf 也只有 0.24（可用要 ≥0.4），画面依旧是"顺着赛道看"（上方还能看到实验室）。**结论：现有两路摄像头都拿不到"俯视车道"的视角，白线循迹在本车上做不成**（代码与单测保留，等镜头能朝下/换广角再启用） |
 | 把"扫线循迹"当成完赛的必要条件 | **不是**。规则只罚"压线 +10s/次"，而赛道是直道：直线用**固定舵角 + 中位微调**（`site.yaml` 里改 `servo_center_angle`）就能不压线；变道/绕锥/入库可以按官方上届的做法**开环（时间/距离触发）**，停车与斑马线用**元素检测**触发。别让一个拿不到视角的功能卡死整个进度 |
+| 凭注释/二手结论判断"参考实现怎么做的" | **必须查原码**。2026-09-21 查 `oldCode/src/vision/vision.cpp::picture()` 才发现"参考实现单侧丢线不给中心"**是错的**——它对丢线的一侧直接代画面边界（`l=0` / `r=frame.cols`），读数照样给中心；照错结论改出来的"单侧就丢帧"让车一丢线就停（详见 `doc/循迹脚本交接.md` §1.1/§6.2） |
+| 把 `settings` 里的阈值直接喂给另一个模块 | **先核单位**。`ERROR_FILTER_OUTLIER=15` 的单位是"误差单位（1 单位 = 4px）"，而循迹脚本的误差是**像素** → 直接传 15 会把任何 >15px 的正常变化当离群点丢掉、滤波后误差长期冻在旧值（正确值 60px，2026-09-21 修） |
 | 用"每行独立从中心往外找第一个白点"找车道线 | 打印跑道塑料膜的反光是**低饱和亮区**，颜色上与白线无法区分（实测反光最亮像素 S≈23、白线 S≈40），且正好在画面中间 → 每行都会先撞上反光。已改为 **`trace_boundary()` 连续跟踪**（多种子 + 双向行走；线：连续/平滑/宽度稳定，反光：一团一团/宽度突变），并保留形状过滤（尺度无关的细长比）与**配对宽度闸门**兜底 |
 | 用"当前无挡板"直接发车 | **上电即冲**。必须边沿触发（`start_gate.py`） |
 | `is_barrier` 之类字段硬编码成常量 | 会让 FSM 走进错误分支；协议字段必须来自真实感知 |

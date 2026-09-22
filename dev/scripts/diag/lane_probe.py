@@ -28,15 +28,12 @@ import os
 import sys
 import time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-sys.path.insert(1, os.path.dirname(  # dev/scripts —— 参考实现版循迹检测器 lane_ref_test.py 在这
-    os.path.dirname(os.path.abspath(__file__))))
 
 import cv2
 import numpy as np
 
 from config import settings
-
-ROI_CANDIDATES = (0.0, 0.15, 0.25, 0.35, 0.45, 0.55)
+from vision.lane_ref import LaneParams, LaneRefDetector, sweep_bands
 
 
 # ------------------------------------------------------------------ 自带白线掩膜
@@ -146,28 +143,6 @@ def _print_components(frame: np.ndarray, top: int = 8) -> None:
         print("      （一个连通域都没有：白线判据（亮度/饱和度阈值）根本没抓到东西）")
 
 
-def _print_roi_sweep(frame: np.ndarray) -> None:
-    """不同 ROI 下的扫线读数（用参考实现版检测器；拿不到就跳过，本探针仍给掩膜诊断）。"""
-    if _scan(frame) is None:
-        print("    不同 ROI 下的扫线结果：跳过（循迹检测器导不进来，"
-              "可直接用 scripts/lane_ref_test.py --image 看读数）")
-        return
-    print("    不同 ROI 下的扫线结果（看哪个才是真锁在线上）")
-    print("      ROI_TOP  y范围       中心   置信度  支持段   左   右   宽度")
-    for ratio in ROI_CANDIDATES:
-        obs = _scan(frame, roi_top_ratio=ratio)
-        lw = (obs.right_x - obs.left_x) if (obs.left_x is not None and obs.right_x is not None) else None
-        mark = " ←当前" if abs(ratio - settings.LANE_ROI_TOP_RATIO) < 1e-6 else ""
-        cx = "-" if obs.center_x is None else f"{obs.center_x:7.1f}"
-        lx = "-" if obs.left_x is None else f"{obs.left_x:.0f}"
-        rx = "-" if obs.right_x is None else f"{obs.right_x:.0f}"
-        wd = "-" if lw is None else f"{lw:.0f}"
-        y1 = frame.shape[0] - settings.LANE_ROI_BOTTOM_MARGIN
-        print(f"      {ratio:<8} {int(frame.shape[0] * ratio):>4}~{y1:<6}"
-              f"{cx} {obs.confidence:7.2f} {obs.valid_rows:6d} "
-              f"{lx:>5} {rx:>5} {wd:>6}{mark}")
-
-
 def _annotate(frame: np.ndarray, name: str | None = None, out_dir: str | None = None) -> np.ndarray:
     raw, (roi_y0, roi_y1) = white_mask(frame, apply_shape_filter=False)
     kept, _ = white_mask(frame, apply_shape_filter=True)
@@ -233,68 +208,74 @@ def angle_advice(frame: np.ndarray) -> str:
 
 
 class _Reading:
-    """把参考实现版的 LaneReading 映射成本文件一直在用的字段名。"""
+    """把 `vision/lane_ref.py` 的 LaneReading 映射成本文件一直在用的字段名。"""
 
-    __slots__ = ("center_x", "left_x", "right_x", "error", "confidence", "valid_rows")
+    __slots__ = ("center_x", "left_x", "right_x", "error", "confidence", "valid_rows",
+                 "both_sides", "quality", "note")
 
     def __init__(self, r) -> None:
         self.center_x = r.center_x
         self.left_x = r.left_x
         self.right_x = r.right_x
         self.error = r.error
-        segs = r.n_left + r.n_right
-        # 参考实现不直接给置信度：它只判"能不能算出中心"，而算中心需要两侧都在。
-        self.confidence = 1.0 if r.error is not None else (0.5 if segs else 0.0)
-        self.valid_rows = segs
-
-
-_DET_CACHE: dict = {}
+        self.confidence = r.quality          # 老名字，值来自检测器的质量分
+        self.quality = r.quality
+        self.both_sides = r.both_sides
+        self.valid_rows = r.n_left + r.n_right
+        self.note = r.note
 
 
 def _detector(roi_top_ratio=None, roi_bottom_ratio=None):
-    """参考实现版检测器（scripts/lane_ref_test.py）；导不进来返回 None。
+    """参考实现版检测器（`vision/lane_ref.py`，与 `lane_ref_test.py` 同一个类）。
 
     不传 ROI 就用现场标定值（settings ← config/site.yaml），保证探针结论与
-    lane_ref_test.py 的 --roi-top/--roi-bottom-ratio 默认值一致。
+    `lane_ref_test.py` 自检时选的带一致。
     """
-    try:
-        from lane_ref_test import LaneRefDetector
-    except ImportError:
-        return None
-    if roi_top_ratio is None:
-        roi_top_ratio = float(settings.LANE_ROI_TOP_RATIO)
-    key = (roi_top_ratio, roi_bottom_ratio)
-    if key not in _DET_CACHE:
-        kwargs = {"roi_top_ratio": roi_top_ratio}
-        if roi_bottom_ratio is not None:
-            kwargs["roi_bottom_ratio"] = roi_bottom_ratio
-        _DET_CACHE[key] = LaneRefDetector(**kwargs)
-    return _DET_CACHE[key]
+    params = LaneParams.from_settings(roi_top_ratio=roi_top_ratio,
+                                      roi_bottom_ratio=roi_bottom_ratio)
+    return LaneRefDetector(params)
 
 
 def _scan(frame: np.ndarray, roi_top_ratio=None):
     """一帧读数；检测器拿不到就返回 None（探针仍能给出掩膜诊断）。"""
     h = float(frame.shape[0])
     det = _detector(roi_top_ratio, 1.0 - float(settings.LANE_ROI_BOTTOM_MARGIN) / h)
-    if det is None:
-        return None
     return _Reading(det.detect(frame))
 
 
+def _print_roi_sweep(frame: np.ndarray) -> None:
+    """不同候选带下的扫线读数（**与 lane_ref_test 的起步前自检用同一套打分**）。"""
+    print("    不同候选带下的扫线结果（看哪个才真的锁在两条线上）")
+    print("      ROI上  ROI下  y范围      有中心  支持行占比 中心跨距  质量")
+    base = LaneParams.from_settings()
+    for row in sweep_bands([frame], base, max_frames=1):
+        mark = " ←当前" if (abs(row["roi_top_ratio"] - base.roi_top_ratio) < 1e-6
+                            and abs(row["roi_bottom_ratio"] - base.roi_bottom_ratio) < 1e-6) else ""
+        print(f"      {row['roi_top_ratio']:.2f}  {row['roi_bottom_ratio']:.2f}  "
+              f"{row['y_range'][0]:>4}~{row['y_range'][1]:<5}"
+              f"{row['paired_frames']:>5}/{row['n_frames']}   "
+              f"{row['support_frac'] * 100:>7.0f}%  {row['spread_px']:>5.0f}px  "
+              f"{row['q_med']:.2f}{mark}")
+
+
 def verdict_of(frame: np.ndarray) -> tuple:
-    """(是否可用, 结论文本, 左右跟踪行数) —— 终端与叠加图共用同一套判据。"""
+    """(是否可用, 结论文本, 支持线段数) —— 终端与叠加图共用同一套判据。"""
     obs = _scan(frame)
-    if obs is None:
-        return (False, "（无扫线模块）本轮只做掩膜诊断：看上面的逐行白点图与连通域表", (0, 0))
-    ok = obs.error is not None  # 参考实现只在两侧都成立时才给中心，这里等同"可用"
-    if ok:
-        text = (f"✅ 可用：中心 {obs.center_x:.1f}（L={obs.left_x:.0f} R={obs.right_x:.0f}，"
-                f"左右支持线段合计 {obs.valid_rows} 条）")
-    else:
-        text = (f"❌ 没配到成对车道线（支持线段合计 {obs.valid_rows} 条，conf={obs.confidence:.2f}）"
-                f"→ 看上面的『逐行白点图』确认白线在哪、斜率对不对；"
-                f"必要时调 lane_ref_test.py 的 --roi-top/--band 或斜率范围")
-    return ok, text, (obs.valid_rows, obs.valid_rows)
+    quality_ok = float(getattr(settings, "ARBITER_CONF_THRESH", 0.28))
+    if obs.center_x is not None and obs.quality >= quality_ok:
+        kind = "双侧" if obs.both_sides else "单侧兜底"
+        return (True,
+                f"✅ 可用：中心 {obs.center_x:.1f}（{kind}，质量 {obs.quality:.2f}；"
+                f"L={'-' if obs.left_x is None else f'{obs.left_x:.0f}'} "
+                f"R={'-' if obs.right_x is None else f'{obs.right_x:.0f}'}，"
+                f"支持线段 {obs.valid_rows} 条）",
+                (obs.valid_rows, obs.valid_rows))
+    why = "没配到成对车道线" if obs.center_x is None else \
+        f"读数质量偏低（{obs.quality:.2f} < {quality_ok:.2f}）"
+    return (False,
+            f"❌ {why}（支持线段 {obs.valid_rows} 条）→ 看上面的『逐行白点图』确认白线在哪、"
+            f"斜率对不对；候选带表里若有『有中心』的一档，就用 --roi-top/--roi-bottom-ratio 指定它",
+            (obs.valid_rows, obs.valid_rows))
 
 
 def camera_aim(frame: np.ndarray, step: int = 8) -> tuple:

@@ -35,6 +35,34 @@ def test_outlier_is_rejected_and_not_stored():
     assert f.update(5.0) != before
 
 
+def test_consecutive_rejects_accept_the_new_level():
+    """★ 连续被拒到上限 → 必须接受新值（"世界真的变了"），不能永久冻结。
+
+    2026-09-22 落地实测：误差从 −30 阶跃到 +60~+160 后，原版滤波器一直沿用旧值 **1.6 秒**，
+    期间车偏了十几厘米而控制器毫无反应、跑偏保护也不触发（它读的也是滤波值）。
+    """
+    f = ErrorFilter(window=5, outlier=60, max_rejects=4)
+    for _ in range(5):
+        f.update(0.0)
+    assert f.last == 0.0
+    outs = [f.update(200.0) for _ in range(3)]
+    assert all(o == 0.0 for o in outs), f"前几次仍应沿用旧值（抗毛刺），实际 {outs}"
+    out = f.update(200.0)                    # 第 4 次 → 认定世界变了
+    assert out == 200.0, f"连续被拒到上限后应接受新值，实际 {out}"
+    assert f.update(200.0) == 200.0, "接受之后应当稳定跟随新水平"
+
+
+def test_rejects_counter_resets_on_good_value():
+    """中间插一个正常值就要把"连续被拒"计数清零（否则等于不再抗毛刺）。"""
+    f = ErrorFilter(window=5, outlier=60, max_rejects=3)
+    for _ in range(5):
+        f.update(0.0)
+    f.update(200.0)          # 拒 1
+    f.update(5.0)            # 正常 → 计数清零
+    assert f.update(200.0) == f.last, "计数清零后应当重新开始抗毛刺"
+    assert f._rejects == 1
+
+
 def test_reset_clears_state():
     f = ErrorFilter()
     f.update(30.0)
@@ -53,6 +81,8 @@ if __name__ == "__main__":
     test_first_value_passthrough()
     test_weighted_average_favours_newest()
     test_outlier_is_rejected_and_not_stored()
+    test_consecutive_rejects_accept_the_new_level()
+    test_rejects_counter_resets_on_good_value()
     test_reset_clears_state()
     test_nan_is_ignored()
     print("test_filters: all passed")

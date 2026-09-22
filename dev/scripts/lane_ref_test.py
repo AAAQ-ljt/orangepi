@@ -1,58 +1,54 @@
 #!/usr/bin/env python3
-"""循迹测试脚本（参考实现版）—— 严格按 oldCode/newnewCode 的循迹方案，独立自包含。
+"""循迹实跑（参考实现版）—— 面向**操场实测**的唯一入口。
 
-为什么再写一份
---------------
-仓库里已有的两条循迹路（`vision/lane_scan.py` 的逐行跟踪、`vision/lane_hough.py`）
-在现场都跑偏过。本脚本**只按参考实现来**，不再掺入我们自己的启发式：
+一段话讲清它做什么
+------------------
+照上届 `oldCode`（纯 CV：Canny + Hough + 斜率先验）移植的循迹，带一套"到场地就能用"的流程：
+**起步前自检 → 蓝板发车 → 循迹 → 再见板停车 → 全程落盘**。检测器在 `vision/lane_ref.py`，
+诊断探针 `diag/lane_probe.py` 用的是同一个类，两处读数应当一致。
 
-    oldCode/src/vision/vision.cpp::picture()      → 纯 CV 车道线检测
-        ROI → 灰度 → GaussianBlur(5,5) → **Canny(60,140)**（按边缘像素数自适应 ±2/±4）
-        → **HoughLinesP(1, 3°, 阈值 50, 最短 30, 最大间隙 5)**
-        → 每条线段求斜率 k=dy/dx，**只保留 0.25 ≤ |k| ≤ 2**（把地面纹理/颗粒/反光滤掉）
-        → 按斜率符号分左右两组，各取 |k| 最大的那条当本侧车道线
-        → 在若干行上求左右线交点、取中点平均 → error = 中点均值 − 画面中心
+为什么和上一版不一样（上一版实验室跑不通、操场也没成功过）
+----------------------------------------------------------
+1. **起步前自检是自动的**（`_preflight`）：车静止时扫一遍候选带（哪条带真的锁住两条线）、
+   用实测"有边缘支持的行"定前瞻带、再用静止画面标定目标点。**不再让人现场猜 ROI**——
+   去一趟操场很贵，猜错一次就白跑一趟；
+2. **单侧丢线有兜底**（`vision/lane_ref.py`）：参考实现里丢一侧线时是把画面边界当代替，
+   上一版却改成了"单侧不给中心"，等于把唯一能让车继续往前走的机制扔了。现在用
+   **车道半宽先验**推中心，并给较低的质量分（控制层据此降速）；
+3. **丢线阶梯**（`control/lane_control.py`）：丢线 `--hold-s`(0.6s) 内沿用上一次有效中心
+   （误差按时间衰减回中位），超过就停车 —— 对应《具体实施方案》§3.1.4 的仲裁层设计；
+4. **全程落盘、回实验室再调**：CSV 多了"滤波后误差 / 目标点 / 质量 / 单双侧 / 半宽"等列，
+   另外定时存原图 + 叠加图到一个会话目录（本车没有 X 服务器，事后看图和数字是唯一途径），
+   `--replay` 可以在笔记本上拿这些帧重跑检测与控制律，不用为了调参再跑一趟操场。
 
-    oldCode/src/control/control.cpp::Control_FollowTrail()   → 控制
-        error 直接用**像素**：pid = kp*e + ki*∫e + kd*Δe（kp=0.15, ki=0.01, kd=0.12）
-        angle = 90 − pid，限幅 ±15°
-        输出再做一次平滑：angle = 0.7*新 + 0.3*旧（抑制舵机抖动）
-        误差大时自动减速（|e| < 5 加速 / < 15 正常 / 否则减速）
+用法（详见 `doc/实地调试清单.md` §2.6）
+--------------------------------------
+    # ① 本地：分析一张图（不碰硬件）
+    python scripts/lane_ref_test.py --image 某张赛道图.jpg
 
-    newnewCode/src/lane_follower.py               → 借用两点
-        · 目标点用**比例**表示（TARGET_X_RATIO），与分辨率无关
-        · 纵向权重表（中间行权重最大）——本脚本用等权的"前瞻带"平均，可用 --band 调
+    # ② 本地：复盘一次实跑的落盘数据（不碰硬件；可换参数重跑检测 + 控制律）
+    python scripts/lane_ref_test.py --replay logs/lane_20260922_101500 --kp 0.2 --roi-sweep
 
-用法
-----
-    # 只看画面与算法读数（不动电机）—— 本地也能跑：--image 指定一张图
-    python3 scripts/lane_ref_test.py --no-motor
-    python3 scripts/lane_ref_test.py --image /root/dev/logs/xxx.jpg
+    # ③ 车上：只看读数，不动电机
+    sudo python3 /root/dev/scripts/lane_ref_test.py --no-motor
 
-    # 现场（四轮落地、场地空旷、有人在旁能立刻断电）
-    sudo python3 /root/dev/scripts/lane_ref_test.py --allow-motion --max-seconds 120 \
-         --log-csv /root/dev/logs/lane_ref.csv
+    # ④ 车上：正式跑（场地空旷 + 有人能立刻断电）
+    sudo python3 /root/dev/scripts/lane_ref_test.py --allow-motion --max-seconds 120
 
-    # 调参（都可用命令行改，不用动代码）
-    --kp/--ki/--kd       PID（像素误差口径，默认 0.15/0.01/0.12）
-    --limit-deg          舵角限幅（默认 15）
-    --target-ratio       目标点（画面宽度比例，默认 0.706 = 参考实现的 226/320）
-    --roi-top/--roi-bottom-ratio   ROI（默认 0.50~0.85，同参考实现）
-    --band               前瞻带占 ROI 的比例（默认 0.6，看 ROI 上部 = 看远处）
-
-安全
-----
-摄像头独占（自动停/恢复推流）、电调死区守卫、任何退出路径电调归零 + 恢复远程控制阶段。
+安全（红线，见 AGENTS.md §1 与《循迹脚本交接.md》§8）
+----------------------------------------------------
+摄像头独占（自动停/恢复两路推流）、电调死区守卫、任何退出路径电调归零 + 舵机回中 +
+恢复 `opi-control` 与推流；发车**边沿触发**（先见板 → 再消失），没见过板绝不动车。
 """
 from __future__ import annotations
 
 import argparse
-import math
+import glob
+import json
 import os
 import sys
 import time
-from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -61,305 +57,653 @@ import numpy as np
 
 from config import settings
 from control.filters import ErrorFilter
+from control.lane_control import (BigErrorGuard, LIMIT_DEG0, LossGuard, LossState,
+                                  NEUTRAL_US, PidRef, SPEED_FAST_US, SPEED_SLOW_US,
+                                  SPEED_FLOOR_MARGIN_US, adaptive_pulse, floor_pulse,
+                                  gains_for)
 from vision.camera_guard import camera_exclusive, open_camera
+from vision.lane_ref import (REF_BAND, LaneParams, LaneReading, LaneRefDetector, auto_look_band,
+                             look_bounds, roi_bounds, sweep_bands, x_of_kb)
 from vision.start_gate import StartGate
 
-NEUTRAL_US = 1500.0
+CSV_HEADER = ("t,phase,center_x,error_px,error_filt,target_px,angle_deg,esc_us,"
+              "left_x,right_x,n_left,n_right,quality,both_sides,half_w,width_measured,"
+              "anchored,edge_pct,since_valid_s,note\n")
+DEFAULT_TARGET_RATIO = 375.0 / 640.0     # 2026-09-19 操场两帧的落点（只在关掉自动标定时才用）
+SETUP_FRAMES = 20                        # 起步前自检采几帧
+MIN_QUALITY0 = 0.28                      # 与 site.yaml 的 arbiter_conf_thresh 同量级
+HOLD_S0 = 0.6                            # 丢线维持窗口（设计文档：0.3~0.8s）
+WEAK_RUN_MAX = 20                        # 自检"证据够不够"的门槛：最长连续支持行数低于它
+WEAK_SPREAD_PX = 25.0                      # 门槛之二：静止时中心跨距超过它 = 锁的东西在跳
+                                            # （2026-09-22 实验室连跑三次 47~166px，目标点跟着漂）
+                                         # 就不采纳自检出的 ROI/目标点（2026-09-22 实测加的）
+INF = float("inf")
 
-# ---------------------------------------------------------------- 参考实现默认参数
-CANNY_LOW0, CANNY_HIGH0 = 60, 140          # oldCode/src/config/config.cpp
-CANNY_EDGE_LO, CANNY_EDGE_HI = 2000, 2500  # 边缘像素数目标区间（自适应）
-CANNY_LOW_MIN, CANNY_LOW_MAX = 20.0, 160.0  # 自适应钳位（跑飞会把线也滤掉）
-CANNY_HIGH_MIN, CANNY_HIGH_MAX = 40.0, 320.0
-HOUGH_THRESH, HOUGH_MIN_LEN, HOUGH_MAX_GAP = 50, 30, 5
-SLOPE_ABS_MIN, SLOPE_ABS_MAX = 0.25, 2.0   # |dy/dx| 物理范围
-KP0, KI0, KD0 = 0.15, 0.01, 0.12           # 像素误差口径
-INTEGRAL_LIMIT = 50.0
-LIMIT_DEG0 = 15.0
-SMOOTH0 = 0.7                              # 输出平滑：0.7*新 + 0.3*旧
-TARGET_RATIO0 = 375.0 / 640.0              # ★ 操场实测：车摆正时车道中心在画面 375 处
-                                           #   （参考实现是 226/320；那是它的摄像头安装）
-SPEED_FAST_US, SPEED_SLOW_US = 0.0, -10.0  # 误差小/大时的脉宽增减
-                                           # ★ 用户 2026-09-20 实测：循迹 1575 太快 → 基准降到 1560，
-                                           #   自适应只减速不提速（参考实现是 +15/-20，见调试清单 §2.6）
-SPEED_FLOOR_MARGIN_US = 5.0                # 减速档下限 = 死区 + 这个余量（低于死区车会直接停，
-                                           #   基准 1560 时 1560-20=1540 < 1545 正好掉进死区）
-
-
-@dataclass
-class LaneReading:
-    """一帧的车道读数（全部像素单位）。"""
-    left_x: Optional[float] = None
-    right_x: Optional[float] = None
-    center_x: Optional[float] = None
-    error: Optional[float] = None      # center_x - target_x
-    n_left: int = 0                    # 左侧支持线段数
-    n_right: int = 0
-    mask_pct: float = 0.0              # 边缘像素占比（诊断）
-    canny: Tuple[float, float] = (0.0, 0.0)
+# ★ `--ref-behavior`：把参考实现 oldCode 的**拍摄比例**照搬到我们的 640×480 上。
+#   它的画面是 320×240（launch.cpp），所以：
+#     画面比例 → ROI 0.50~0.85；算中心的行 130~230 → 0.542~0.958；目标点 = 画面中心 0.5；
+#     单侧丢线代画面边界；增益按画面宽度换算（--gains width）。
+#   ⚠️ 这是**对照实验**，不是推荐配置：它的镜头看得见近处地面，我们的下摄太平、近处是画外，
+#      所以这条 look band（y≈260~460）在本车上多半扫不到线 —— 但"到底是谁的问题"一试就知道。
+REF_BEHAVIOR = {
+    "roi_top": 0.50,
+    "roi_bottom_ratio": 0.85,
+    "look_top": 130.0 / 240.0,
+    "look_bottom": 230.0 / 240.0,
+    "target_ratio": 0.5,
+    "single_mode": "border",
+    "gains": "width",
+    "auto_roi": False,
+    "auto_look": False,
+    "auto_target": False,
+}
 
 
-class LaneRefDetector:
-    """按 oldCode 的 picture() 实现的车道检测（纯 CV，不依赖模型）。"""
-
-    def __init__(self, roi_top_ratio: float = 0.50, roi_bottom_ratio: float = 0.85,
-                 band_ratio: float = 0.6, target_ratio: float = TARGET_RATIO0,
-                 pick: str = "steepest", slope_min: float = SLOPE_ABS_MIN,
-                 slope_max: float = SLOPE_ABS_MAX) -> None:
-        self.roi_top_ratio = roi_top_ratio
-        self.roi_bottom_ratio = roi_bottom_ratio
-        self.band_ratio = band_ratio
-        self.target_ratio = target_ratio
-        self.pick = pick            # steepest（参考实现）| longest（更稳，备选）
-        self.slope_min = slope_min
-        self.slope_max = slope_max
-        self.canny_low = float(CANNY_LOW0)
-        self.canny_high = float(CANNY_HIGH0)
-
-    # ---------------------------------------------------------------- 检测
-    def _canny(self, frame_bgr: np.ndarray, y0: int, y1: int) -> Tuple[np.ndarray, float]:
-        gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
-        roi = gray[y0:y1, :]
-        blur = cv2.GaussianBlur(roi, (5, 5), 0.5)
-        edges = cv2.Canny(blur, int(self.canny_low), int(self.canny_high), 3)
-        n = int(np.count_nonzero(edges))
-        # 参考实现的自适应（每帧调一步）；这里**在同一帧内迭代到位**，否则单帧/慢帧率下
-        # 阈值永远追不上（操场颗粒地面实测边缘占比 34%，太高）。
-        step = 0
-        while step < 4 and (n > CANNY_EDGE_HI or n < CANNY_EDGE_LO):
-            if n > CANNY_EDGE_HI:
-                self.canny_low += 2; self.canny_high += 4
-            else:
-                self.canny_low -= 2; self.canny_high -= 4
-            # ⚠️ **必须钳位**：无上限地往上调会把车道线也滤掉（合成图/弱纹理画面实测会跑飞）
-            self.canny_low = max(CANNY_LOW_MIN, min(CANNY_LOW_MAX, self.canny_low))
-            self.canny_high = max(CANNY_HIGH_MIN, min(CANNY_HIGH_MAX, self.canny_high))
-            edges = cv2.Canny(blur, int(self.canny_low), int(self.canny_high), 3)
-            n = int(np.count_nonzero(edges))
-            step += 1
-        return edges, float(np.count_nonzero(edges)) / max(1, edges.size)
-
-    def _segments(self, edges: np.ndarray, y0: int) -> List[Tuple[float, float, float]]:
-        """返回 [(k, b, 长度)]，其中 x = (y - b) / k（与参考实现同口径：k=dy/dx）。"""
-        lines = cv2.HoughLinesP(edges, 1, math.pi / 180.0 * 3,
-                                threshold=HOUGH_THRESH, minLineLength=HOUGH_MIN_LEN,
-                                maxLineGap=HOUGH_MAX_GAP)
-        out: List[Tuple[float, float, float]] = []
-        if lines is None:
-            return out
-        for x1, y1, x2, y2 in np.asarray(lines).reshape(-1, 4):
-            dy, dx = float(y2 - y1), float(x2 - x1)
-            if abs(dx) < 1e-6:
+# ================================================================ 叠加图
+def annotate(frame: np.ndarray, r: Optional[LaneReading], params: LaneParams,
+             phase: str, extra: str = "") -> np.ndarray:
+    """把"算法到底看到了什么"画在图上（存盘用；本车没有 X 服务器，只能事后看）。"""
+    vis = frame.copy()
+    h, w = vis.shape[:2]
+    y0, y1 = roi_bounds(h, params)
+    ya, yb = look_bounds(h, params)
+    for y, color in ((y0, (255, 128, 0)), (y1, (255, 128, 0)),
+                     (ya, (0, 200, 255)), (yb, (0, 200, 255))):
+        cv2.line(vis, (0, y), (w, y), color, 1)
+    cv2.line(vis, (int(w * params.target_ratio), 0),
+             (int(w * params.target_ratio), h), (255, 0, 255), 1)
+    if r is not None:
+        for kb, color in ((r.left_kb, (255, 80, 0)), (r.right_kb, (0, 0, 255))):
+            if kb is None:
                 continue
-            k = dy / dx                                  # 参考实现：k = dy/dx
-            if not (self.slope_min <= abs(k) <= self.slope_max):
-                continue
-            b = float(y1 + y0) - k * float(x1)            # 用整幅坐标，便于后面直接代 y
-            length = math.hypot(dx, dy)
-            out.append((k, b, length))
-        return out
+            p1 = (int(np.clip(x_of_kb(kb, 0.05 * h), 0, w - 1)), int(0.05 * h))
+            p2 = (int(np.clip(x_of_kb(kb, 0.95 * h), 0, w - 1)), int(0.95 * h))
+            cv2.line(vis, p1, p2, color, 2)
+        if r.center_x is not None:
+            cv2.line(vis, (int(r.center_x), 0), (int(r.center_x), h), (0, 255, 255), 1)
+        cv2.putText(vis,
+                    f"{phase} c={_fmt(r.center_x, '%.0f')} e={_fmt(r.error, '%+.0f')} "
+                    f"q={r.quality:.2f} L={_fmt(r.left_x, '%.0f')} R={_fmt(r.right_x, '%.0f')} "
+                    f"segs={r.n_left}/{r.n_right} {'双侧' if r.both_sides else '单侧'}",
+                    (6, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
+        # 叠加图上只能画 ASCII：`cv2.putText` 画中文会变成一串 ??????
+        # （2026-09-22 实验室实测发现），所以这里用读数的 tag，中文说明留在 CSV 里。
+        if r.tag:
+            cv2.putText(vis, r.tag, (6, 38), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                        (0, 255, 255), 1, cv2.LINE_AA)
+    if extra:
+        cv2.putText(vis, extra, (6, h - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                    (0, 255, 0), 1, cv2.LINE_AA)
+    return vis
 
-    def _pick_side(self, segs: List[Tuple[float, float, float]], side: str,
-                   y_ref: float, w: int) -> Optional[Tuple[float, float]]:
-        """每侧选一条线。
 
-        参考实现只按"|k| 最大"选 —— 在它的摄像头/赛道下够用，但在我们的操场画面里
-        会选到隔壁车道或颗粒的碎线段（实测左线取到 x=439，整条线是错的）。
-        这里加两道**物理上必然成立**的约束（不改参考实现的检测流程）：
-          ① 斜率符号：左线 dy/dx<0、右线 dy/dx>0（参考实现同款）；
-          ② **位置锚定**：在参考行上，左线必须在画面中心左侧、右线在右侧
-             （车在自己的车道里，这条永远成立）。
-        再按 `--pick` 在候选里取 steepest（参考实现）或 longest（更稳）的一条。
-        """
-        cands = []
-        for k, b, length in segs:
-            if (k > 0) != (side == "right"):
-                continue
-            x_ref = self._x_at(k, b, y_ref)
-            if side == "left" and x_ref >= w * 0.5:
-                continue
-            if side == "right" and x_ref <= w * 0.5:
-                continue
-            cands.append((k, b, length))
-        if not cands:
-            return None
-        if self.pick == "longest":
-            cands.sort(key=lambda s: -s[2])
+def _fmt(v, fmt="%.1f") -> str:
+    return "-" if v is None else fmt % v
+
+
+def _sided_text(r) -> str:
+    """状态行里的"双侧/单侧/无"——没读数时写"单侧"会误导人（2026-09-22 实验室实测发现）。"""
+    if r is None or r.center_x is None:
+        return "无"
+    return "双侧" if r.both_sides else "单侧"
+
+
+class Recorder:
+    """CSV + 定时存图 + 结束统计（把复盘要用的东西一次留住）。"""
+
+    def __init__(self, csv_path: str, save_dir: str, save_every_s: float,
+                 save_max: int, annotate_on: bool = True) -> None:
+        self.csv_path = csv_path
+        self.save_dir = save_dir
+        self.save_every_s = float(save_every_s)
+        self.save_max = int(save_max)
+        self.annotate_on = annotate_on
+        self._fh = None
+        self._n_saved = 0
+        self._next_save = 0.0
+        self.phases: Dict[str, int] = {}
+        self.errors: List[float] = []
+        self.errors_filt: List[float] = []
+        self.qualities: List[float] = []
+        self.n_frames = 0
+        self.n_both = 0
+        self.n_single = 0
+        self.n_no_center = 0
+        # ★ 顺序要紧：**先建目录再开文件**。CSV 默认就写在会话目录里
+        #   （`<save_dir>/run.csv`），旧版先 open 后 makedirs → 车上一跑就
+        #   FileNotFoundError（2026-09-22 实验室实测；本地集成测试因为用了已存在的
+        #   临时目录而没抓到 —— 所以这里必须能容忍"目录还不存在"）。
+        if save_dir:
+            try:
+                os.makedirs(os.path.join(save_dir, "setup"), exist_ok=True)
+            except OSError as exc:
+                print(f"[REF] ⚠️ 建会话目录失败（{exc}）→ 本次不落盘，车照常跑")
+                self.save_dir = save_dir = ""
+        if csv_path:
+            try:
+                parent = os.path.dirname(os.path.abspath(csv_path))
+                if parent:
+                    os.makedirs(parent, exist_ok=True)
+                self._fh = open(csv_path, "w", encoding="utf-8")
+                self._fh.write(CSV_HEADER)
+            except OSError as exc:
+                print(f"[REF] ⚠️ 打不开 CSV {csv_path}（{exc}）→ 本次不写 CSV，车照常跑")
+                self._fh = None
+                self.csv_path = ""
+
+    def row(self, t: float, phase: str, r: Optional[LaneReading],
+            error_filt: Optional[float], target_px: float, angle: float,
+            esc_us: float, since_valid: float) -> None:
+        self.n_frames += 1
+        self.phases[phase] = self.phases.get(phase, 0) + 1
+        if r is None or r.center_x is None:
+            self.n_no_center += 1
+        elif r.both_sides:
+            self.n_both += 1
         else:
-            cands.sort(key=lambda s: -abs(s[0]))
-        k, b, _l = cands[0]
-        return k, b
+            self.n_single += 1
+        if r is not None:
+            self.qualities.append(r.quality)
+            if r.error is not None:
+                self.errors.append(r.error)
+        if error_filt is not None:
+            self.errors_filt.append(error_filt)
+        if self._fh is None:
+            return
 
-    @staticmethod
-    def _x_at(k: float, b: float, y: float) -> float:
-        return (y - b) / k
+        def num(v, fmt="%.1f"):
+            return "" if v is None else fmt % v
 
-    def detect(self, frame_bgr: np.ndarray) -> LaneReading:
-        h, w = frame_bgr.shape[:2]
-        y0 = int(h * self.roi_top_ratio)
-        y1 = int(h * self.roi_bottom_ratio)
-        edges, mask_pct = self._canny(frame_bgr, y0, y1)
-        segs = self._segments(edges, y0)
+        self._fh.write("%.3f,%s,%s,%s,%s,%s,%.1f,%.0f,%s,%s,%d,%d,%.2f,%d,%s,%d,%d,%.1f,%.2f,%s\n" % (
+            t, phase, num(r.center_x if r else None), num(r.error if r else None),
+            num(error_filt), "%.1f" % target_px, angle, esc_us,
+            num(r.left_x if r else None), num(r.right_x if r else None),
+            (r.n_left if r else 0), (r.n_right if r else 0), (r.quality if r else 0.0),
+            (1 if (r and r.both_sides) else 0),
+            num(r.half_width if r else None, "%.0f"),
+            (1 if (r and r.width_measured) else 0), (1 if (r and r.anchored) else 0),
+            (r.edge_pct * 100 if r else 0.0),
+            (0.0 if since_valid == INF else since_valid),
+            ((r.note if r else "") or "").replace(",", "；")))
 
-        y_ref = (y0 + (y0 + int((y1 - y0) * self.band_ratio))) * 0.5
-        left = self._pick_side(segs, "left", y_ref, w)
-        right = self._pick_side(segs, "right", y_ref, w)
-        reading = LaneReading(mask_pct=mask_pct, canny=(self.canny_low, self.canny_high),
-                              n_left=len([s for s in segs if s[0] < 0]),
-                              n_right=len([s for s in segs if s[0] > 0]))
-        if left is None or right is None:
-            # 与参考实现一致：单侧缺失时不给中心（我们不再用 0/宽 兜底，那会把中心拉飞）
-            if left is not None:
-                reading.left_x = self._x_at(*left, (y0 + y1) * 0.5)
-            if right is not None:
-                reading.right_x = self._x_at(*right, (y0 + y1) * 0.5)
-            return reading
+    def wants_save(self, t: float) -> bool:
+        """这一帧要不要存图（先问再画叠加图 —— 画图也有成本，别每帧白画）。"""
+        return bool(self.save_dir and self.save_every_s > 0
+                    and self._n_saved < self.save_max and t >= self._next_save)
 
-        # 前瞻带：ROI 上部（看远处），逐行求左右交点中点再平均
-        y_a = y0
-        y_b = y0 + int((y1 - y0) * self.band_ratio)
-        mids: List[float] = []
-        for y in range(y_a, max(y_a + 1, y_b), 2):
-            xl, xr = self._x_at(*left, y), self._x_at(*right, y)
-            if xl < xr:
-                mids.append((xl + xr) * 0.5)
-        if not mids:
-            return reading
-        reading.left_x = self._x_at(*left, (y_a + y_b) * 0.5)
-        reading.right_x = self._x_at(*right, (y_a + y_b) * 0.5)
-        reading.center_x = float(np.mean(mids))
-        reading.error = reading.center_x - w * self.target_ratio
-        return reading
+    def maybe_save(self, t: float, frame: np.ndarray, vis: np.ndarray, tag: str = "") -> None:
+        """定时存一帧（默认 1s 一张）。⚠️ 不在**每帧**写盘：`cv2.imwrite` 是阻塞 I/O。"""
+        if not self.wants_save(t):
+            return
+        self._next_save = t + self.save_every_s
+        idx = self._n_saved
+        self._n_saved += 1
+        name = f"{idx:04d}{('_' + tag) if tag else ''}.jpg"
+        try:
+            cv2.imwrite(os.path.join(self.save_dir, "frame_" + name), frame)
+            if self.annotate_on:
+                cv2.imwrite(os.path.join(self.save_dir, "ann_" + name), vis)
+        except Exception as exc:                       # 存图失败不该打断跑车
+            print(f"[REF] ⚠️ 存图失败：{exc}")
 
+    def save_setup(self, frames: List[np.ndarray], det: LaneRefDetector,
+                   params: LaneParams) -> None:
+        """起步前那几帧全存下来（它们是"该用哪条带"的证据，最有复盘价值）。"""
+        if not self.save_dir:
+            return
+        for i, f in enumerate(frames):
+            try:
+                cv2.imwrite(os.path.join(self.save_dir, "setup", f"frame_{i:02d}.jpg"), f)
+                if self.annotate_on:
+                    cv2.imwrite(os.path.join(self.save_dir, "setup", f"ann_{i:02d}.jpg"),
+                                annotate(f, det.detect(f), params, "setup"))
+            except Exception as exc:
+                print(f"[REF] ⚠️ 存 setup 图失败：{exc}")
+                return
 
-class PidRef:
-    """参考实现的 PID（像素误差口径，输出角度增量，带输出平滑）。"""
+    def summary(self) -> dict:
+        def stats(vals):
+            if not vals:
+                return {}
+            a = np.asarray(vals, dtype=float)
+            return {"n": int(a.size), "mean": float(a.mean()), "median": float(np.median(a)),
+                    "p05": float(np.percentile(a, 5)), "p95": float(np.percentile(a, 95)),
+                    "min": float(a.min()), "max": float(a.max()),
+                    "mean_abs": float(np.abs(a).mean())}
+        return {"n_frames": self.n_frames, "phases": dict(self.phases),
+                "n_both_sides": self.n_both, "n_single_side": self.n_single,
+                "n_no_center": self.n_no_center,
+                "error_px": stats(self.errors), "error_filt": stats(self.errors_filt),
+                "quality": stats(self.qualities),
+                "saved_frames": self._n_saved, "save_dir": self.save_dir,
+                "csv": self.csv_path}
 
-    def __init__(self, kp: float = KP0, ki: float = KI0, kd: float = KD0,
-                 limit_deg: float = LIMIT_DEG0, smooth: float = SMOOTH0,
-                 sign: float = 1.0) -> None:
-        self.kp, self.ki, self.kd = kp, ki, kd
-        self.limit_deg = limit_deg
-        self.smooth = smooth
-        self.sign = float(sign)      # +1：角度增大=右转（与 settings.STEER_SIGN 同口径）
-        self.integral = 0.0
-        self.last_error = 0.0
-        self.last_angle: Optional[float] = None
-
-    def reset(self) -> None:
-        self.integral = 0.0
-        self.last_error = 0.0
-        self.last_angle = None
-
-    def step(self, error: float) -> float:
-        self.integral += error
-        self.integral = max(-INTEGRAL_LIMIT, min(INTEGRAL_LIMIT, self.integral))
-        pid = self.kp * error + self.ki * self.integral + self.kd * (error - self.last_error)
-        self.last_error = error
-        # 参考实现是 `90 - pid`；这里接上 settings.STEER_SIGN，让它和 planner 同口径：
-        #   sign=+1 表示"角度增大 = 右转" → 90 + pid；sign=-1 → 90 - pid（= 参考实现原式）
-        # （2026-09-21 实验室：site.yaml 的 -1 与 bench_test --steer-test 的说明相反，
-        #   而 --steer-test 当时被脚本 bug 挡住了没验成 —— 方向必须实测一次。）
-        angle = 90.0 + self.sign * pid
-        angle = max(90.0 - self.limit_deg, min(90.0 + self.limit_deg, angle))
-        if self.last_angle is None:
-            self.last_angle = angle
-        else:                                                # 输出平滑，抑制抖动
-            angle = self.smooth * angle + (1.0 - self.smooth) * self.last_angle
-            self.last_angle = angle
-        return angle
+    def close(self) -> None:
+        if self._fh is not None:
+            self._fh.close()
+            self._fh = None
 
 
-def adaptive_pulse(error: float, base_us: float,
-                   fast: float = SPEED_FAST_US, slow: float = SPEED_SLOW_US) -> float:
-    """参考实现的自适应速度：误差小加速、误差大减速（单位 us）。
+def _print_summary(s: dict, driven: bool) -> None:
+    print("\n[REF] ===== 本次统计 =====")
+    n = max(1, s["n_frames"])
+    print(f"[REF] 帧数 {s['n_frames']}；阶段分布 "
+          + " ".join(f"{k}={v}" for k, v in sorted(s["phases"].items())))
+    ok_n = s["n_both_sides"] + s["n_single_side"]
+    print(f"[REF] 有中心 {ok_n}/{s['n_frames']}（双侧 {s['n_both_sides']}、"
+          f"单侧兜底 {s['n_single_side']}、无 {s['n_no_center']}）→ 可用率 {ok_n / n * 100:.0f}%")
+    for key, label in (("error_px", "原始误差"), ("error_filt", "滤波后误差")):
+        st = s[key]
+        if st:
+            print(f"[REF] {label}：中位 {st['median']:+.1f}px  平均|e| {st['mean_abs']:.1f}px  "
+                  f"p05~p95 {st['p05']:+.0f}~{st['p95']:+.0f}  极值 {st['min']:+.0f}~{st['max']:+.0f}")
+    if s["quality"]:
+        print(f"[REF] 质量：中位 {s['quality']['median']:.2f}（低于 --min-quality 控制层不跟线）")
+    if s["save_dir"]:
+        print(f"[REF] 落盘：{s['saved_frames']} 张图 → {s['save_dir']}；CSV → {s['csv']}")
+        print(f"[REF] 拉回本地复盘：python scripts/ssh_get.py -r {s['save_dir']} .")
+        print("[REF] 本地重跑：python scripts/lane_ref_test.py --replay <本地目录> --roi-sweep")
+    if driven and ok_n == 0:
+        print("[REF] ⚠️ 全程没有一次可信读数 → 先解决【看得到线】：压镜头角度 / 调带"
+              "（lane_roi_*，下一轮自检会自己选）/ 看 setup 目录里的原图确认线是否进画面")
 
-    减速档有硬下限（死区 + 余量）：基准 1560 时 1560-20=1540 已低于死区 1545，
-    那样"减速"会变成"停车"（用户 2026-09-20 把巡线速度降到 1560 后才出现这个风险）。
+
+# ================================================================ 起步前自检
+def _preflight(frames: List[np.ndarray], args, params: LaneParams) -> Tuple[LaneParams, Optional[float]]:
+    """车静止时把【该用哪条带 / 前瞻带在哪 / 目标点多少 / 镜头够不够】一次算完。
+
+    这是上场地时唯一需要人工配合的动作：**别挡板，让镜头看赛道**。
+    返回 (最终参数, 标定出的目标点)。
     """
-    e = abs(error)
-    if e < 5:
-        us = base_us + fast
-    elif e < 15:
-        us = base_us
+    if not frames:
+        return params, None
+    weak = False        # 自检证据够不够（不够就不采纳自检出的目标点，见 WEAK_RUN_MAX）
+    if not args.auto_roi:
+        print(f"[REF] ① 候选带扫描：已关闭（--no-auto-roi），用配置的 "
+              f"{params.roi_top_ratio:.2f}~{params.roi_bottom_ratio:.2f}")
     else:
-        us = base_us + slow
-    return max(us, float(settings.ESC_DEADBAND_US) + SPEED_FLOOR_MARGIN_US)
+        print(f"[REF] ① 候选带扫描（{len(frames)} 帧静止画面，每档独立检测器；约 5~10 秒）")
+        print("[REF]    ROI上  ROI下   y范围      有中心  连续支持  支持行占比  中心跨距  质量")
+        table = sweep_bands(frames, params)
+        best = None
+        for row in table:
+            mark = ""
+            is_cfg = (abs(row["roi_top_ratio"] - params.roi_top_ratio) < 1e-6
+                      and abs(row["roi_bottom_ratio"] - params.roi_bottom_ratio) < 1e-6)
+            is_ref = (abs(row["roi_top_ratio"] - REF_BAND[0]) < 1e-6
+                      and abs(row["roi_bottom_ratio"] - REF_BAND[1]) < 1e-6)
+            if best is None and row["paired_frames"] > 0:
+                best, mark = row, " ←采用"
+            elif is_cfg:
+                mark = " ←当前配置"
+            elif is_ref:
+                mark = " ←参考实现那一档"
+            print(f"[REF]    {row['roi_top_ratio']:.2f}  {row['roi_bottom_ratio']:.2f}   "
+                  f"{row['y_range'][0]:>3}~{row['y_range'][1]:<3}   "
+                  f"{row['paired_frames']:>2}/{row['n_frames']:<2}   "
+                  f"{row['run_max']:>5.0f}行  "
+                  f"{row['support_frac'] * 100:>7.0f}%   "
+                  f"{row['spread_px']:>5.0f}px   {row['q_med']:.2f}{mark}")
+        # ★ 证据太弱时不采纳任何"自检出来的值"：锁到的可能不是一整条连续白线
+        #   （碎边/反光/别的边也能被拟合出线）。宁可用上一次现场标定的目标点，
+        #   也不要照着一个错目标把车放出去跑（2026-09-22 实验室实测踩过：
+        #   车摆偏时自检把目标标成 417/291，真值约 341，车就照着错目标走）。
+        #   ⚠️ 两个分支都必须置位 weak（这里踩过一次：只置了 else 分支 → 警告打印了、
+        #   但目标点照样被采纳并写回 site.yaml）。
+        if best is None:
+            weak = True
+            print("[REF]    ❌ 所有候选带都锁不到两条线 → 保留当前配置；先解决画面里有没有线"
+                  "（看 setup 目录的原图，或跑 lane_probe 的镜头朝向体检）")
+        elif best["run_max"] < WEAK_RUN_MAX:
+            weak = True
+            print(f"[REF]    ⚠️ 最好的一档也只有 {best['run_max']:.0f} 行连续支持（< "
+                  f"{WEAK_RUN_MAX}）→ 证据不足：**保留 site.yaml 的带与目标点**"
+                  f"（不采纳自检值、不写回 site.yaml）。请重新摆正车（车头朝赛道、尽量居中）"
+                  f"再跑一次；每次都这样就是镜头视角问题（先把下摄往下压）")
+        else:
+            params.roi_top_ratio = best["roi_top_ratio"]
+            params.roi_bottom_ratio = best["roi_bottom_ratio"]
+            print(f"[REF]    → 采用带 {params.roi_top_ratio:.2f}~{params.roi_bottom_ratio:.2f}"
+                  f"（y {best['y_range'][0]}~{best['y_range'][1]}，"
+                  f"{best['paired_frames']}/{best['n_frames']} 帧成对，"
+                  f"最长连续支持 {best['run_max']:.0f} 行）")
+
+    if args.auto_look:
+        look, rows, info = auto_look_band(frames, params)
+        if rows:
+            params.look_top_ratio, params.look_bottom_ratio = look
+            h = frames[0].shape[0]
+            lo, hi, n = info["longest_seg"]
+            print(f"[REF] ② 自动前瞻带：支持行 {min(rows)}~{max(rows)}，"
+                  f"最长连续段 y {lo}~{hi}（{n} 行）→ 用它中间 20%~80%（y "
+                  f"{int(look[0] * h)}~{int(look[1] * h)}）算中心（look "
+                  f"{look[0]:.2f}~{look[1]:.2f}）")
+            if n < 40:
+                print(f"[REF]    ⚠️ 最长连续段只有 {n} 行 —— 线不是一整段，中心会跳；"
+                      f"建议重新摆车/压镜头")
+        else:
+            print("[REF] ② 自动前瞻带：没有找到两条线都有边缘支持的行 → 用配置的 "
+                  f"{params.look_top_ratio:.2f}~{params.look_bottom_ratio:.2f}"
+                  f"（要手改就是 --look-top/--look-bottom）")
+    else:
+        print(f"[REF] ② 自动前瞻带：已关闭（--no-auto-look），用 "
+              f"{params.look_top_ratio:.2f}~{params.look_bottom_ratio:.2f}")
+
+    det = LaneRefDetector(params)
+    centers: List[float] = []
+    for f in frames:
+        r = det.detect(f)
+        if r.center_x is not None and r.quality >= args.min_quality:
+            centers.append(float(r.center_x))
+    target = None
+    if centers and args.auto_target and not weak:
+        target = float(np.median(centers))
+        # ★ 必须先记下"自检开始前"的目标点：执行下面这行会把 params.target_ratio 覆盖成自检值，
+        #   在它**之后**再取 configured 会拿到自检值本身 → "不采纳"形同虚设、还照样写回
+        #   site.yaml（2026-09-22 实测 191511：提示"不采纳"，目标点 352.3 还是被用了/写了）。
+        configured = params.target_ratio * frames[0].shape[1]
+        det.p.target_ratio = target / float(frames[0].shape[1])
+        spread = max(centers) - min(centers)
+        print(f"[REF] ③ 自动标定目标点：{target:.1f}px（{len(centers)} 帧中位，跨距 "
+              f"{spread:.0f}px，半宽先验 {det.width_prior.value:.0f}px"
+              f"{'实测' if det.width_prior.measured else '种子'}）")
+        if abs(target - configured) > 60:
+            print(f"[REF]    ⚠️ 与配置里的目标点（{configured:.0f}px）差了 "
+                  f"{abs(target - configured):.0f}px —— 要么这次自检时车没摆正，要么现场视角变了。"
+                  f"**先确认车是不是真的在车道正中**，再决定要不要用它")
+        # ★ 静止时中心跨距大 = 车没摆正 / 锁的东西在跳 → 这帧数标定的目标点不可信，
+        #   照用的话车会对着一个错目标跑（2026-09-22 实验室连跑三次：跨距 47~166px，
+        #   目标点跟着每跑一次变一次 318→348→354）。当作"证据弱"处理：不采纳、也不写 site.yaml。
+        if spread > WEAK_SPREAD_PX:
+            weak = True
+            target = None
+            det.p.target_ratio = configured / float(frames[0].shape[1])   # 还原
+            print(f"[REF]    ⚠️ 静止时中心就跳了 {spread:.0f}px（> {WEAK_SPREAD_PX:.0f}）"
+                  f"→ **不采纳这个目标点**、不写回 site.yaml（保留旧值）。"
+                  f"车没摆正 / 线不成一整段 / 两条线选来选去 —— 重新摆车再跑一次自检")
+    elif not args.auto_target:
+        print(f"[REF] ③ 自动标定：已关闭（--no-auto-target），目标点 "
+              f"{params.target_ratio * frames[0].shape[1]:.0f}px")
+    elif weak:
+        print(f"[REF] ③ 自动标定：自检证据弱（{_weak_reason(args, params)}）→ 用配置里的目标点 "
+              f"{params.target_ratio * frames[0].shape[1]:.0f}px")
+    else:
+        print("[REF] ③ ❌ 自动标定没成（没有质量达标的帧）→ 用配置里的目标点 "
+              f"{params.target_ratio * frames[0].shape[1]:.0f}px")
+
+    aim = det.visible_range(frames[-1])
+    print(f"[REF] ④ 镜头朝向体检：{aim['text']}")
+    if not aim["ok"]:
+        print("[REF]    （体检不通过也还能跑：带扫描如果锁到了线，说明线在画面里，"
+              "只是没进下半部。要根治就是机械压角度/换广角）")
+    return params, target
 
 
+def guard_trip_text(err_px: float, hold_s: float,
+                     err_c: Optional[float], err_raw: Optional[float]) -> str:
+    """跑偏保护触发时的打印：**先区分触发原因**再报数。
+
+    2026-09-22 用户反复遇到"车已经修正了还是停"——真正的机理是：**目标点错 → 车在车道正中
+    也读出恒大的误差 → 保护把"追不上错目标"当成了"跑偏"**。为了以后一眼分得清，这里区分：
+      · err_c（滤波后、质量够的）也超标 → "判定跑偏/锁错线"（读数可信、车真的偏了）；
+      · 只有原始误差超标（ERR_C 为 None 或不足 40px）→ "读数持续不可信"（翻车/单侧兜底垃圾），
+        保护按"宁可停"兜住它而不是当跑偏。
+    """
+    base = (f"⚠️ 连续 {hold_s:.1f}s 读数 ≥{err_px:.0f}px"
+            f"（滤波后 {_fmt(err_c, '%+.1f')}，原始 {_fmt(err_raw, '%+.1f')}）")
+    if err_c is not None and abs(float(err_c)) >= err_px:
+        return (f"[REF] {base} → **判定跑偏/锁错线**：读数可信但车真的偏了/锁错线，停车。"
+                f"若每次都是同一方向，先查目标点（site.yaml 的 target_x）与转向符号")
+    return (f"[REF] {base} → **读数持续不可信**（原始误差很大但滤波后值没跟上/质量不够）"
+            f"→ 保护按『宁可停』兜住，停车。这是信号质量/锁翻车的问题，不是跑偏")
+
+
+def _weak_reason(args, params: LaneParams) -> str:
+    """自检为什么被判定为"证据弱"（打印给操作员的理由）。"""
+    return (f"最长连续支持 < {WEAK_RUN_MAX} 行 或 静止中心跨距 > {WEAK_SPREAD_PX:.0f}px"
+            f"（本次用 带 {params.roi_top_ratio:.2f}~{params.roi_bottom_ratio:.2f}、"
+            f"目标 {params.target_ratio * 640:.0f}px）")
+
+
+def _write_site(args, params: LaneParams, target_px: Optional[float]) -> None:
+    """把自检结果写回 `config/site.yaml`（车端本地、不进 git）——下次跑车直接用。"""
+    if not args.save_site:
+        print("[REF] ⑤ --no-save-site：自检结果只在本次生效")
+        return
+    from config import site
+    vals = {"lane_roi_top_ratio": round(float(params.roi_top_ratio), 3),
+            "lane_roi_bottom_margin": int(round((1.0 - float(params.roi_bottom_ratio))
+                                                * float(settings.IMG_H)))}
+    if target_px is not None:
+        vals["target_x"] = round(float(target_px), 1)
+    try:
+        path = site.save(vals)
+        print(f"[REF] ⑤ 已写入 {path}：{vals}（改错了就把这几行删掉）")
+    except Exception as exc:
+        print(f"[REF] ⚠️ 写 site.yaml 失败（本次仍用自检值）：{exc}")
+
+
+# ================================================================ 离线模式
+def analyze_image(path: str, params: LaneParams) -> int:
+    img = cv2.imread(path)
+    if img is None:
+        print(f"[REF] 读不到图片 {path}")
+        return 1
+    det = LaneRefDetector(params)
+    r = det.detect(img)
+    h, w = img.shape[:2]
+    print(f"[REF] {path}  ({w}x{h})")
+    print(f"[REF] 带 {params.roi_top_ratio:.2f}~{params.roi_bottom_ratio:.2f} "
+          f"(y {roi_bounds(h, params)[0]}~{roi_bounds(h, params)[1]})  "
+          f"前瞻 y {look_bounds(h, params)[0]}~{look_bounds(h, params)[1]}")
+    print(f"[REF] 边缘占比={r.edge_pct * 100:.1f}%  Canny=({r.canny[0]:.0f},{r.canny[1]:.0f})  "
+          f"线段 左{r.n_left}/右{r.n_right}  锚定={r.anchored}")
+    print(f"[REF] 左={_fmt(r.left_x)} 右={_fmt(r.right_x)} 中心={_fmt(r.center_x)} "
+          f"目标={w * params.target_ratio:.0f} 误差={_fmt(r.error)}")
+    print(f"[REF] 质量={r.quality:.2f} 双侧={r.both_sides} "
+          f"半宽={_fmt(r.half_width, '%.0f')}px{'实测' if r.width_measured else '种子'}"
+          f"{'  ' + r.note if r.note else ''}")
+    print(f"[REF] 镜头朝向体检：{det.visible_range(img)['text']}")
+    return 0
+
+
+def replay(directory: str, params: LaneParams, args, steer_sign: float,
+           gains: Tuple[float, float, float]) -> int:
+    """拿落盘的帧在本地重跑检测 + 控制律 —— 不用再去一趟操场就能调参。"""
+    setup = sorted(glob.glob(os.path.join(directory, "setup", "frame_*.jpg")))
+    files = sorted(glob.glob(os.path.join(directory, "frame_*.jpg")))
+    paths = setup or files
+    if not paths:
+        print(f"[REF] {directory} 里没有 frame_*.jpg（给会话目录，不是给它下面的 setup/）")
+        return 1
+    frames = [im for im in (cv2.imread(p) for p in paths) if im is not None]
+    if not frames:
+        print(f"[REF] {directory} 里的图都读不出来（文件坏了？）")
+        return 1
+    print(f"[REF] 复盘 {len(frames)} 帧（{'起步前自检帧' if setup else '实跑帧'}）："
+          f"{os.path.basename(os.path.normpath(directory))}")
+    if args.roi_sweep:
+        print("[REF] 候选带扫描（用这些真实帧重算）：")
+        print("[REF]    ROI上  ROI下   y范围      有中心  连续支持  支持行占比  中心跨距  质量")
+        for row in sweep_bands(frames, params):
+            print(f"[REF]    {row['roi_top_ratio']:.2f}  {row['roi_bottom_ratio']:.2f}   "
+                  f"{row['y_range'][0]:>3}~{row['y_range'][1]:<3}   "
+                  f"{row['paired_frames']:>2}/{row['n_frames']:<2}   "
+                  f"{row['run_max']:>5.0f}行  "
+                  f"{row['support_frac'] * 100:>7.0f}%   "
+                  f"{row['spread_px']:>5.0f}px   {row['q_med']:.2f}")
+    det = LaneRefDetector(params)
+    err_filter = None if args.no_filter else ErrorFilter(args.filter_window, args.filter_outlier)
+    kp, ki, kd = gains
+    pid = PidRef(kp, ki, kd, args.limit_deg, args.smooth, sign=steer_sign)
+    rows = []
+    for f in frames:
+        r = det.detect(f)
+        ef = err_filter.update(r.error) if (err_filter is not None and r.error is not None) \
+            else r.error
+        angle = pid.step(ef) if (ef is not None and abs(ef) < args.err_stop_px) else 90.0
+        rows.append((r, ef, angle))
+    both = sum(1 for r, _, _ in rows if r.both_sides)
+    single = sum(1 for r, _, _ in rows if r.center_x is not None and not r.both_sides)
+    print(f"[REF] 检测：{both + single}/{len(rows)} 帧有中心（双侧 {both}、单侧兜底 {single}）")
+    errs = [r.error for r, _, _ in rows if r.error is not None]
+    if errs:
+        a = np.asarray(errs)
+        print(f"[REF] 原始误差：中位 {np.median(a):+.1f}px  p05~p95 {np.percentile(a, 5):+.0f}~"
+              f"{np.percentile(a, 95):+.0f}  极值 {a.min():+.0f}~{a.max():+.0f}")
+    angles = np.asarray([ang for _, _, ang in rows], dtype=float)
+    if angles.size:
+        sat = float(np.mean(np.abs(angles - 90.0) >= args.limit_deg - 1e-6)) * 100
+        step = np.abs(np.diff(angles)) if angles.size > 1 else np.zeros(1)
+        flips = int(np.sum(np.diff(np.sign(angles - 90.0)) != 0))
+        print(f"[REF] 控制律（kp={kp} ki={ki} kd={kd} 限幅±{args.limit_deg}°）："
+              f"平均|舵角−90|={np.mean(np.abs(angles - 90.0)):.1f}°  打满限幅 {sat:.0f}%  "
+              f"单帧最大变化 {step.max():.1f}°  方向翻转 {flips} 次")
+        print("[REF]   （翻转多=抖动 → 加 kd 或降 kp；一直打满/越修越偏 → 目标点或转向方向不对）")
+    return 0
+
+
+# ================================================================ 实跑
 def main() -> int:
-    ap = argparse.ArgumentParser(description="循迹测试（参考实现版，独立自包含）")
+    ap = argparse.ArgumentParser(
+        description="循迹实跑（参考实现版；起步前自动自检 + 全程落盘）")
     ap.add_argument("--image", default="", help="只分析一张图（本地可跑，不碰硬件）")
-    ap.add_argument("--camera", type=int, default=2, help="摄像头（默认 2=下摄）")
-    ap.add_argument("--speed-us", type=float, default=1560.0,
-                    help="循迹脉宽（默认 1560；死区 1545，调试上限 1600）")
+    ap.add_argument("--replay", default="", help="复盘一个会话目录里的帧（本地可跑，不碰硬件）")
+    ap.add_argument("--roi-sweep", action="store_true", help="复盘时顺带重算候选带表")
+    ap.add_argument("--camera", type=int, default=2, help="摄像头（默认 2=下摄，巡线固定这一路）")
+    ap.add_argument("--speed-us", type=float, default=float(settings.ESC_CREEP_US),
+                    help=f"循迹脉宽（默认 {settings.ESC_CREEP_US}；死区 "
+                         f"{settings.ESC_DEADBAND_US}，调试上限 {settings.ESC_DEBUG_MAX_US}）")
     ap.add_argument("--speed-fast", type=float, default=SPEED_FAST_US,
                     help=f"误差小(<5px)时的脉宽增量（默认 {SPEED_FAST_US:+.0f}，0=不提速）")
     ap.add_argument("--speed-slow", type=float, default=SPEED_SLOW_US,
                     help=f"误差大(≥15px)时的脉宽增量（默认 {SPEED_SLOW_US:+.0f}，"
                          f"下限=死区+{SPEED_FLOOR_MARGIN_US:.0f}us）")
-    ap.add_argument("--start-us", type=float, default=1560.0, help="起步/探路脉宽")
-    ap.add_argument("--max-seconds", type=float, default=120.0)
-    ap.add_argument("--kp", type=float, default=KP0)
-    ap.add_argument("--ki", type=float, default=KI0)
-    ap.add_argument("--kd", type=float, default=KD0)
-    ap.add_argument("--limit-deg", type=float, default=LIMIT_DEG0, help="舵角限幅（默认 15）")
-    ap.add_argument("--smooth", type=float, default=SMOOTH0)
-    ap.add_argument("--target-ratio", type=float, default=TARGET_RATIO0)
-    ap.add_argument("--auto-target", dest="auto_target", action="store_true", default=True,
-                    help="起步前自动标定目标点（默认开：用板未出现时那几帧的中位数）")
-    ap.add_argument("--no-auto-target", dest="auto_target", action="store_false",
-                    help="不做自动标定，严格用 --target-ratio / site.yaml 的值")
-    ap.add_argument("--auto-frames", type=int, default=6,
-                    help="自动标定用几帧（默认 6）")
-    # ★ ROI 用操场实测的"两条白线同时可见"的那条带（参考实现是 0.50~0.85，
-    #   但那个区间里我们下摄的右线已经跑出画面 → 只会找到单侧）
-    ap.add_argument("--roi-top", type=float, default=0.35)
-    ap.add_argument("--roi-bottom-ratio", type=float, default=0.58)
-    ap.add_argument("--band", type=float, default=0.6, help="前瞻带占 ROI 比例")
+    ap.add_argument("--start-us", type=float, default=float(settings.ESC_CREEP_US),
+                    help="起步/探路脉宽")
+    ap.add_argument("--max-seconds", type=float, default=120.0, help="整段硬上限")
+    ap.add_argument("--kp", type=float, default=None,
+                    help="PID 比例项（不给我就按 --gains 从参考实现推，见该参数说明）")
+    ap.add_argument("--ki", type=float, default=None)
+    ap.add_argument("--kd", type=float, default=None, help="抖动/画龙 → 加大到 0.3")
+    ap.add_argument("--gains", choices=("literal", "width"), default=None,
+                    help="参考实现的增益是**按 320 宽画面**（oldCode 是 320×240）整定的："
+                         "literal=直接抄它的数字 0.15/0.01/0.12（默认，现场调参表按这套写）；"
+                         "width=按画面宽度换算成 640 口径 0.075/0.005/0.06"
+                         "（'同一个物理横偏 → 同一个舵角'）。")
+    ap.add_argument("--limit-deg", type=float, default=LIMIT_DEG0, help="舵角限幅（默认 15°）")
+    ap.add_argument("--smooth", type=float, default=0.7, help="输出平滑：0.7*新+0.3*旧")
+    ap.add_argument("--target-ratio", type=float, default=None,
+                    help=f"目标点比例（只在 --no-auto-target 时生效；默认 {DEFAULT_TARGET_RATIO:.3f}）")
+    ap.add_argument("--auto-target", dest="auto_target", action="store_true", default=None,
+                    help="起步前自动标定目标点（默认开）")
+    ap.add_argument("--no-auto-target", dest="auto_target", action="store_false")
+    ap.add_argument("--roi-top", type=float, default=None,
+                    help="ROI 上沿比例（默认取 settings ← site.yaml；一般不用手给，自检会选）")
+    ap.add_argument("--roi-bottom-ratio", type=float, default=None,
+                    help="ROI 下沿比例（默认 1 − LANE_ROI_BOTTOM_MARGIN/480）")
+    ap.add_argument("--look-top", type=float, default=None, help="前瞻带上沿比例（算中心的行）")
+    ap.add_argument("--look-bottom", type=float, default=None, help="前瞻带下沿比例")
+    ap.add_argument("--auto-roi", dest="auto_roi", action="store_true", default=None,
+                    help="起步前扫候选带并采用最好的一档（默认开）")
+    ap.add_argument("--no-auto-roi", dest="auto_roi", action="store_false")
+    ap.add_argument("--auto-look", dest="auto_look", action="store_true", default=None,
+                    help="用实测【有边缘支持的行】定前瞻带（默认开）")
+    ap.add_argument("--no-auto-look", dest="auto_look", action="store_false")
+    ap.add_argument("--ref-behavior", action="store_true",
+                    help="★对照实验：按参考实现 oldCode 的原样跑（它 320×240：ROI 0.50~0.85、"
+                         "算中心的行 130~230、目标点=画面中心、单侧代画面边界、增益按画面换算），"
+                         "并把自检（自动选带/前瞻带/目标点）关掉。用来回答'到底是我们的改动、"
+                         "还是镜头视角不行'")
+    ap.add_argument("--save-site", dest="save_site", action="store_true", default=True,
+                    help="把自检结果写回 config/site.yaml（默认开：下次跑车直接用）")
+    ap.add_argument("--no-save-site", dest="save_site", action="store_false")
     ap.add_argument("--pick", choices=("steepest", "longest"), default="steepest",
                     help="每侧选哪条线段：steepest=参考实现；longest=更稳（备选）")
-    ap.add_argument("--acquire-s", type=float, default=3.0, help="发车后低速探路找线窗口")
-    ap.add_argument("--err-stop-px", type=float, default=60.0,
-                    help="跑偏保护：误差绝对值 ≥ 此值（像素）")
+    ap.add_argument("--single-mode", choices=("width", "border", "off"), default="width",
+                    help="单侧丢线怎么办：width=用车道半宽先验推中心（默认，本车方案）；"
+                         "border=**参考实现原样**（缺的一侧代画面边界）；off=不给中心")
+    ap.add_argument("--no-single", dest="single_mode", action="store_const", const="off",
+                    help="等价于 --single-mode off（最保守：单侧就不跟线）")
+    ap.add_argument("--half-w", type=float, default=None,
+                    help=f"车道半宽种子（像素，默认 settings.LANE_HOUGH_HALF_W_DEFAULT_PX="
+                         f"{settings.LANE_HOUGH_HALF_W_DEFAULT_PX}）；两侧都在时会自动更新为实测值")
+    ap.add_argument("--min-quality", type=float, default=MIN_QUALITY0,
+                    help=f"质量低于它按丢线处理（默认 {MIN_QUALITY0}）")
+    ap.add_argument("--acquire-s", type=float, default=3.0,
+                    help="发车后【还没见过一次线】的低速探路窗口（秒）")
+    ap.add_argument("--hold-s", type=float, default=HOLD_S0,
+                    help=f"丢线维持窗口（默认 {HOLD_S0}s：沿用上次中心、误差衰减回中位）")
+    ap.add_argument("--err-stop-px", type=float, default=60.0, help="跑偏保护：误差阈值（像素）")
     ap.add_argument("--err-stop-s", type=float, default=1.5,
-                    help="跑偏保护：连续这么多秒都大误差 → 停车（0 表示关闭）")
+                    help="跑偏保护：连续这么多秒大误差就停车（0=关闭）")
     ap.add_argument("--steer-sign", type=float, default=None,
-                    help="转向符号：+1=角度增大是右转（与 settings.STEER_SIGN 同口径）；"
-                         "默认取 settings.STEER_SIGN（当前 site.yaml 里是 "
-                         f"{settings.STEER_SIGN:+.0f}）——方向不对就改这里或 site.yaml")
-    ap.add_argument("--no-filter", action="store_true",
-                    help="关掉误差滤波（默认开：中位数剔离群 + 越新权重越大，"
-                         "实测能压掉 345/367 来回跳）")
-    ap.add_argument("--filter-window", type=int, default=None,
-                    help=f"滤波窗口（默认 settings.ERROR_FILTER_WINDOW={settings.ERROR_FILTER_WINDOW}）")
+                    help=f"转向符号：+1=角度增大是右转；默认取 settings（当前 "
+                         f"{settings.STEER_SIGN:+.0f}）。先跑 bench_test --steer-test 实测方向")
+    ap.add_argument("--no-filter", action="store_true", help="关掉误差滤波")
+    ap.add_argument("--filter-window", type=int, default=None)
     ap.add_argument("--filter-outlier", type=float, default=None,
-                    help=f"离群阈值（默认 settings.ERROR_FILTER_OUTLIER={settings.ERROR_FILTER_OUTLIER}）")
-    ap.add_argument("--no-motor", action="store_true", help="只跑视觉与决策")
+                    help=f"离群阈值（**像素**，默认 "
+                         f"{settings.ERROR_FILTER_OUTLIER * settings.LANE_ERROR_SCALE:.0f}px）")
+    ap.add_argument("--no-motor", action="store_true", help="只跑视觉与决策，不碰电机")
     ap.add_argument("--allow-motion", "--i-know-wheels-are-up", dest="allow_motion",
                     action="store_true", help="确认车可以移动")
-    ap.add_argument("--log-csv", default="")
+    ap.add_argument("--log-csv", default="", help="CSV 路径（默认写进会话目录）")
+    ap.add_argument("--save-dir", default="",
+                    help="会话目录（默认 /root/dev/logs/lane_<时间戳>；存图用 --save-every-s 0 关）")
+    ap.add_argument("--save-every-s", type=float, default=1.0,
+                    help="每隔多少秒存一帧原图+叠加图（0=不存图；写盘是阻塞 I/O，别调太小）")
+    ap.add_argument("--save-max", type=int, default=400, help="一次最多存多少帧（防塞满卡）")
+    ap.add_argument("--setup-frames", type=int, default=SETUP_FRAMES,
+                    help=f"起步前自检采几帧（默认 {SETUP_FRAMES}）")
+    ap.add_argument("--setup-timeout-s", type=float, default=15.0,
+                    help="等自检画面的上限（秒）；没凑够就先用手上的帧")
+    ap.add_argument("--read-fail-s", type=float, default=8.0,
+                    help="摄像头连续读失败超过这么久就报错退出（默认 8s）——"
+                         "相机掉线/被抢走时不要傻等到 --max-seconds")
     ap.add_argument("--print-every", type=int, default=3)
     args = ap.parse_args()
 
-    det = LaneRefDetector(roi_top_ratio=args.roi_top, roi_bottom_ratio=args.roi_bottom_ratio,
-                          band_ratio=args.band, target_ratio=args.target_ratio, pick=args.pick)
+    # ---- 参数来源：命令行 > --ref-behavior 预设 > settings/site.yaml（ROI/前瞻带只有一处定义）
+    def opt(name: str, default):
+        """命令行优先；没给就看 --ref-behavior 预设；再没有才用默认。"""
+        value = getattr(args, name)
+        if value is not None:
+            return value
+        return REF_BEHAVIOR.get(name, default) if args.ref_behavior else default
 
-    # ---------------------------------------------------------------- 单图模式（本地可跑）
+    for name in ("auto_roi", "auto_look", "auto_target"):
+        setattr(args, name, bool(opt(name, True)))     # 后面的自检读 args.* 判断
+    single_mode = str(opt("single_mode", "width"))
+    gains_mode = str(opt("gains", "literal"))
+    target_ratio = float(opt("target_ratio", DEFAULT_TARGET_RATIO))
+    half_w = (args.half_w if args.half_w is not None
+              else float(settings.LANE_HOUGH_HALF_W_DEFAULT_PX))
+    params = LaneParams.from_settings(
+        roi_top_ratio=opt("roi_top", None), roi_bottom_ratio=opt("roi_bottom_ratio", None),
+        look_top_ratio=opt("look_top", None), look_bottom_ratio=opt("look_bottom", None),
+        target_ratio=target_ratio, pick=args.pick, single_mode=single_mode,
+        half_w_seed=half_w)
+    args.target_ratio = target_ratio
+    steer_sign = float(settings.STEER_SIGN if args.steer_sign is None else args.steer_sign)
+    # PID 增益：参考实现是按 320 宽画面整定的（oldCode 是 320×240）→ 口径要说清楚
+    g_kp, g_ki, g_kd = gains_for(settings.IMG_W, gains_mode)
+    kp = g_kp if args.kp is None else float(args.kp)
+    ki = g_ki if args.ki is None else float(args.ki)
+    kd = g_kd if args.kd is None else float(args.kd)
+    if args.ref_behavior:
+        print("[REF] ★ --ref-behavior：按参考实现原样跑（它的拍摄比例照搬到我们 640×480）")
+        print(f"[REF]   ROI {params.roi_top_ratio:.2f}~{params.roi_bottom_ratio:.2f}、"
+              f"算中心的行 {params.look_top_ratio * 480:.0f}~{params.look_bottom_ratio * 480:.0f}"
+              f"（≈y 260~460）、目标点 {target_ratio * 640:.0f}px（画面中心）、"
+              f"单侧代画面边界、PID {kp:.3f}/{ki:.3f}/{kd:.3f}")
+        print("[REF]   这是**对照实验**：我们的下摄太平，近处是画外，这条 look band 多半扫不到线。"
+              "跑完看自检/CSV 就能分清是'我们的改动'还是'视角'的问题")
+
+    if args.replay:
+        return replay(args.replay, params, args, steer_sign, (kp, ki, kd))
     if args.image:
-        img = cv2.imread(args.image)
-        if img is None:
-            print(f"[REF] 读不到图片 {args.image}")
-            return 1
-        r = det.detect(img)
-        print(f"[REF] 边缘占比={r.mask_pct * 100:.1f}%  Canny=({r.canny[0]:.0f},{r.canny[1]:.0f})  "
-              f"线段 左{r.n_left}/右{r.n_right}")
-        print(f"[REF] 左={r.left_x if r.left_x is None else round(r.left_x, 1)} "
-              f"右={r.right_x if r.right_x is None else round(r.right_x, 1)} "
-              f"中心={r.center_x if r.center_x is None else round(r.center_x, 1)} "
-              f"目标={img.shape[1] * args.target_ratio:.0f} "
-              f"误差={r.error if r.error is None else round(r.error, 1)}")
-        return 0
+        return analyze_image(args.image, params)
 
     use_motor = not args.no_motor
     if use_motor and not args.allow_motion:
@@ -367,52 +711,62 @@ def main() -> int:
               "再加 --allow-motion；只想看读数就加 --no-motor")
         return 2
     if use_motor and min(args.start_us, args.speed_us) < settings.ESC_DEADBAND_US:
-        print(f"[REF] 拒绝运行：脉宽低于电调死区 {settings.ESC_DEADBAND_US}us（实测 1540 不转、1545 起转）")
+        print(f"[REF] 拒绝运行：脉宽低于电调死区 {settings.ESC_DEADBAND_US}us"
+              f"（实测 1540 不转、{settings.ESC_DEADBAND_US} 起转）")
         return 2
+
+    save_dir = args.save_dir
+    if not save_dir:
+        base = ("/root/dev/logs" if os.path.isdir("/root/dev/logs")
+                else os.path.join(os.getcwd(), "logs"))
+        save_dir = os.path.join(base, "lane_" + time.strftime("%Y%m%d_%H%M%S"))
+    save_dir = os.path.abspath(save_dir)
+    csv_path = args.log_csv or os.path.join(save_dir, "run.csv")
 
     from scripts.bench_common import MotorSession, install_signal_guard, restore_remote_stage
     state = {"stopped": False, "driver": None, "restored": False, "used_motor": use_motor}
     install_signal_guard(state)
 
     gate = StartGate()
-    steer_sign = float(settings.STEER_SIGN if args.steer_sign is None else args.steer_sign)
-    pid = PidRef(args.kp, args.ki, args.kd, args.limit_deg, args.smooth, sign=steer_sign)
-    err_filter = None if args.no_filter else ErrorFilter(args.filter_window, args.filter_outlier)
-    print(f"[REF] 参考实现循迹：kp={args.kp} ki={args.ki} kd={args.kd} 限幅±{args.limit_deg}° "
-          f"平滑={args.smooth} 目标比={args.target_ratio:.3f} ROI={args.roi_top}~{args.roi_bottom_ratio} "
-          f"选线={args.pick}")
+    pid = PidRef(kp, ki, kd, args.limit_deg, args.smooth, sign=steer_sign)
+    # ★ 滤波的离群阈值单位是**误差单位（1 单位 = 4px）**，而本脚本的误差是**像素**。
+    #   上一版把 settings 的 15 直接当像素用 → 任何 >15px 的变化都被当离群点丢掉 →
+    #   滤波后误差长期卡在旧值上，车对真实偏差不响应（实测读数在 345/367 间跳时尤其致命）。
+    outlier_px = (args.filter_outlier if args.filter_outlier is not None
+                  else float(settings.ERROR_FILTER_OUTLIER) * float(settings.LANE_ERROR_SCALE))
+    err_filter = None if args.no_filter else ErrorFilter(args.filter_window, outlier_px)
+    loss = LossGuard(args.hold_s)
+    big_err = BigErrorGuard(args.err_stop_px, args.err_stop_s)
+
+    print("[REF] 参考实现版循迹（起步前自检 → 板发车 → 循迹 → 再见板停车）")
+    print(f"[REF] PID kp={kp:.3f} ki={ki:.3f} kd={kd:.3f} 限幅±{args.limit_deg}° "
+          f"平滑={args.smooth} 目标比={params.target_ratio:.3f} 选线={args.pick} "
+          f"转向符号={steer_sign:+.0f}"
+          f"（{'+1 角度增大=右转' if steer_sign > 0 else '−1 角度增大=左转'}）")
     print(f"[REF] 脉宽 起步={args.start_us:.0f} → 循迹={args.speed_us:.0f}us"
-          f"（直道 {args.speed_us + args.speed_fast:.0f} / 大误差 {max(args.speed_us + args.speed_slow, settings.ESC_DEADBAND_US + SPEED_FLOOR_MARGIN_US):.0f}）"
-          f"；规则：板在→停；移开→循迹；再见板→停")
-    print(f"[REF] 跑偏保护：误差 ≥{args.err_stop_px:.0f}px 持续 {args.err_stop_s:.1f}s 就停车"
+          f"（直道 {args.speed_us + args.speed_fast:.0f} / 大误差 "
+          f"{max(args.speed_us + args.speed_slow, float(settings.ESC_DEADBAND_US) + SPEED_FLOOR_MARGIN_US):.0f}"
+          f" / 丢线维持 {floor_pulse(args.speed_us, args.speed_slow):.0f}）；"
+          f"死区 {settings.ESC_DEADBAND_US}")
+    print(f"[REF] 丢线阶梯：质量<{args.min_quality:.2f} 或没有读数 → 维持 {args.hold_s:.1f}s"
+          f"（沿用上次中心、误差衰减回中位）→ 还没回来就停车；"
+          f"发车后 {args.acquire_s:.1f}s 内一次没见过线按【低速探路】处理")
+    print("[REF] 跑偏保护：滤波后误差 ≥%.0fpx 持续 %.1fs 就停车" % (args.err_stop_px, args.err_stop_s)
           if args.err_stop_s > 0 else "[REF] 跑偏保护：已关闭（--err-stop-s 0）")
-    print("[REF] 误差滤波："
-          + ("关（--no-filter）" if err_filter is None else
-             f"窗口 {err_filter.window} / 离群阈值 {err_filter.outlier:.0f}px（中位数剔除 + 越新权重越大）"))
-    print(f"[REF] 目标点：{'自动标定（板未出现时用前 ' + str(args.auto_frames) + ' 帧中位数）' if args.auto_target else f'固定 {args.target_ratio * settings.IMG_W:.0f}px'}"
-          f"；命令行给的 {args.target_ratio * settings.IMG_W:.0f}px 只在关掉自动标定时生效")
-    if args.auto_target:
-        print("[REF] ⚠️ 用法：先让镜头对着赛道（板拿在手上别挡）→ 出现 "
-              "'✅ 自动标定目标点' → 再把板挡到镜头前 → 移开板发车")
-    print(f"[REF] 转向符号 steer_sign={steer_sign:+.0f}"
-          f"（{'+1：角度增大=右转' if steer_sign > 0 else '-1：角度增大=左转'}，"
-          f"来自 {'命令行' if args.steer_sign is not None else 'settings/site.yaml'}）"
-          f" —— 先用 bench_test.py --steer-test 验方向")
+    print("[REF] 误差滤波：" + ("关（--no-filter）" if err_filter is None else
+          f"窗口 {err_filter.window} / 离群阈值 {outlier_px:.0f}px"))
+    print(f"[REF] 落盘：{csv_path}"
+          + (f"；每 {args.save_every_s:.1f}s 存一帧到 {save_dir}（上限 {args.save_max} 张）"
+             if args.save_every_s > 0 else "；不存图"))
+    print("[REF] ⚠️ 用法：① 车摆正在车道里、先别挡板（自检要看你前方的赛道）→ "
+          "② 看到“✅ 起步前自检完成”→ ③ 把蓝板挡到下摄正前方 → ④ 移开板发车 → "
+          "⑤ 再挡回板立刻停")
 
-    csv_fh = open(args.log_csv, "w", encoding="utf-8") if args.log_csv else None
-    if csv_fh:
-        csv_fh.write("t,phase,center_x,error_px,angle_deg,esc_us,left_x,right_x,n_left,n_right,edge_pct\n")
-
-    seen_board = False
-    big_err_since = None      # 跑偏保护的计时起点（误差小/无读数时清空）
-    target_px = None          # 自动标定出的目标点（None = 还没标定完）
-    auto_target = bool(args.auto_target)
-    warned_late_board = False
-    auto_samples: List[float] = []
-    n_center_frames = 0       # 有有效中心的帧数（收尾时报告）
-    steer = 90.0
+    rec = Recorder(csv_path, save_dir, args.save_every_s, args.save_max)
     rc = 0
     t0 = time.time()
+    frames = 0
+    n_track = 0
     try:
         with MotorSession(state, enabled=use_motor,
                           speed_us_max=max(args.start_us, args.speed_us)) as pca:
@@ -421,143 +775,210 @@ def main() -> int:
                 if cap is None:
                     rc = 1
                 else:
-                    acquire_since = None
-                    frames = 0
+                    det = LaneRefDetector(params)
+                    seen_board = False
+                    preflight_done = False
+                    launch_t: Optional[float] = None
+                    target_px: Optional[float] = None
+                    setup_frames: List[np.ndarray] = []
+                    setup_deadline = time.time() + args.setup_timeout_s
+                    warned_early_board = False
+                    steer = 90.0
+                    last_center: Optional[float] = None
+                    n_center_frames = 0
+                    target_w = float(settings.IMG_W)
+                    read_fail_since: Optional[float] = None
+                    read_fail_warned = False
+
                     while not state["stopped"] and (time.time() - t0) < args.max_seconds:
                         ok, frame = cap.read()
                         if not ok or frame is None:
+                            # 摄像头掉线/被别的进程抢走时**别傻等**：读失败到上限就报错收尾
+                            # （安全层照常执行，只是不再空转）
+                            if read_fail_since is None:
+                                read_fail_since = time.time()
+                            elif not read_fail_warned and (time.time() - read_fail_since) >= 2.0:
+                                read_fail_warned = True
+                                print("[REF] ⚠️ 摄像头连续读失败（画面丢了）…若持续到 "
+                                      f"{args.read_fail_s:.0f}s 就报错退出")
+                            if (time.time() - read_fail_since) >= args.read_fail_s:
+                                print(f"[REF] ❌ 摄像头 {args.read_fail_s:.0f}s 没有给出画面 → 退出"
+                                      f"（检查 /dev/video{args.camera} 是否被推流/别的进程占用）")
+                                rc = 1
+                                break
                             time.sleep(0.02)
                             continue
+                        read_fail_since = None
+                        read_fail_warned = False
                         now = time.time()
+                        target_w = float(frame.shape[1])
                         gs = gate.update(frame)
-                        if gs.blocked:
-                            seen_board = True
-                            acquire_since = None
-                            if auto_target and target_px is None and not warned_late_board:
-                                warned_late_board = True
-                                print("[REF] ⚠️ 板来得太快：自动标定没成（镜头被挡住时扫不到线）。"
-                                      "想让目标点自动标定，下次先让镜头看赛道约 1 秒再挡板。")
-                        elif seen_board and acquire_since is None:
-                            acquire_since = now
 
-                        r = det.detect(frame)
-                        if r.center_x is not None:
-                            n_center_frames += 1
-                        # ★ 起步前自动标定目标点：板还没出现 = 车静止、镜头对着赛道，
-                        #   用这几帧的中位数当"车在车道正中时中心该在的像素值"。
-                        #   （2026-09-21 实验室：target_x 还是操场标定的 375，而实验室这个
-                        #    视角下居中时中心只有 ~346 → 恒 -30px 误差 → 车一直往左跑。）
-                        if target_px is None and auto_target and not seen_board \
-                                and not gs.blocked and r.center_x is not None:
-                            auto_samples.append(r.center_x)
-                            if len(auto_samples) >= args.auto_frames:
-                                target_px = float(np.median(auto_samples))
-                                det.target_ratio = target_px / float(frame.shape[1])
-                                spread = max(auto_samples) - min(auto_samples)
-                                print(f"[REF] ✅ 自动标定目标点：{target_px:.1f}px"
-                                      f"（{len(auto_samples)} 帧中位，跨距 {spread:.0f}px；"
-                                      f"命令行/site.yaml 的 {args.target_ratio * frame.shape[1]:.0f}px 本次不用）")
-                        driving = seen_board and not gs.blocked
-                        exploring = driving and acquire_since is not None and \
-                            (now - acquire_since) < args.acquire_s
-                        phase = "stop"
-                        out_us = NEUTRAL_US
-                        angle = 90.0
-                        err_c = None                      # 送进控制器的误差（已滤波）
-                        if r.error is not None:
-                            err_c = r.error if err_filter is None else err_filter.update(r.error)
-                        # ★ 跑偏保护：一直大误差说明"锁到的不是本车道"或"转向方向不对"，
-                        #   参考实现没有这一层（2026-09-21 实验室：误差恒在 -33px、舵机一直
-                        #   往左打到冲出跑道，226 帧里误差从没回到 0 附近）。
-                        guard_trip = False
-                        if args.err_stop_s > 0 and driving and err_c is not None \
-                                and abs(err_c) >= args.err_stop_px:
-                            if big_err_since is None:
-                                big_err_since = now
-                            elif now - big_err_since >= args.err_stop_s:
-                                print(f"[REF] ⚠️ 连续 {args.err_stop_s:.1f}s 误差 ≥{args.err_stop_px:.0f}px"
-                                      f"（当前 {err_c:+.1f}）→ 判定跑偏/锁错线，停车")
-                                state["stopped"] = True
-                                guard_trip = True
-                        else:
-                            big_err_since = None
-                        if driving:
-                            if err_c is not None and abs(err_c) < args.err_stop_px:
-                                pid_out = pid.step(err_c)
-                                steer = pid_out
-                                out_us = adaptive_pulse(err_c, args.speed_us,
-                                                        args.speed_fast, args.speed_slow)
-                                phase = "track"
-                            elif err_c is not None:
-                                # 大误差读数不可信（锁错线/跑到别处）：**先回正、低速慢慢走**，
-                                # 不能照它打满舵 —— 2026-09-21 实验室就是"一帧垃圾读数打出 105°，
-                                # 探路那几秒一直保持满左舵"把车带到赛道外。持续大误差由上面的
-                                # 跑偏保护停车。
-                                steer = 90.0
-                                out_us = args.start_us
-                                phase = "hold"
-                            elif exploring:
-                                # 探路：没有线也低速往前拱，**舵角回中位**（原来的注释这么写、
-                                # 代码却沿用了上次的 steer，是 bug），窗口结束仍无线就停
+                        if gs.blocked:
+                            if not seen_board:
+                                seen_board = True
+                                if not preflight_done and len(setup_frames) < 3 \
+                                        and not warned_early_board:
+                                    warned_early_board = True
+                                    print("[REF] ⚠️ 板来得太快：**自检被跳过**，本次用系统里的"
+                                          "旧带/旧目标点（很可能不准）→ 车开出去的话跑偏保护"
+                                          "会在第一时间兜住。真要测就 Ctrl-C 重跑一次："
+                                          "启动后**先别挡板**，等自检四步打印完再挡板")
+                            elif launch_t is not None:
+                                # ★ 车正在跟线时"再见板" = 立即停车；把本次行程的计时/状态清掉，
+                                #   否则移开板重新发车时会拿旧的"最后有效读数时间"判丢线 → 一发车就停
+                                launch_t = None
                                 pid.reset()
                                 if err_filter is not None:
                                     err_filter.reset()
-                                steer = 90.0
-                                out_us = args.start_us
-                                phase = "explore"
+                                loss.reset()
+                                big_err.reset()
+                                print("[REF] 🛑 再见板 → 停车（本次行程结束；移开板可重新发车）")
+                        elif not seen_board and not preflight_done \
+                                and len(setup_frames) < args.setup_frames \
+                                and now < setup_deadline:
+                            setup_frames.append(frame.copy())     # 起步前自检窗口
+                            continue
+
+                        if not seen_board and not preflight_done:
+                            preflight_done = True
+                            if len(setup_frames) >= 3:
+                                params, target_px = _preflight(setup_frames, args, params)
+                                det = LaneRefDetector(params)
+                                if target_px is None:
+                                    target_px = params.target_ratio * target_w
+                                det.width_prior.reset()
+                                for f in setup_frames:      # 暖机：半宽先验 + Canny 自适应
+                                    det.detect(f)
+                                print(f"[REF]   目标点本次用 {target_px:.1f}px；半宽先验 "
+                                      f"{det.width_prior.value:.0f}px"
+                                      f"{'实测' if det.width_prior.measured else '种子'}")
+                                rec.save_setup(setup_frames, det, params)
+                                _write_site(args, params, target_px)
+                            else:
+                                print(f"[REF] ⚠️ 自检只有 {len(setup_frames)} 帧（板挡得太早）→ "
+                                      f"用配置：带 {params.roi_top_ratio:.2f}~"
+                                      f"{params.roi_bottom_ratio:.2f}，目标点 "
+                                      f"{params.target_ratio * target_w:.0f}px")
+                            print("[REF] ✅ 起步前自检完成 —— 现在把蓝板挡到下摄正前方"
+                                  "（板在=不动；移开=发车）")
+
+                        r = det.detect(frame)
+                        if r.center_x is not None and r.quality >= args.min_quality:
+                            n_center_frames += 1
+
+                        driving = seen_board and not gs.blocked
+                        if driving and launch_t is None:
+                            launch_t = now
+                            pid.reset()
+                            if err_filter is not None:
+                                err_filter.reset()
+                            loss.reset()
+                            big_err.reset()
+                            print(f"[REF] 🚗 发车（目标点 {params.target_ratio * target_w:.0f}px，"
+                                  f"带 {params.roi_top_ratio:.2f}~{params.roi_bottom_ratio:.2f}）")
+
+                        # 原始误差（这一帧检测器给的）与送进控制器的滤波后误差都留着：
+                        # 跑偏保护要同时看（只盯滤波值会被"滤波冻结"骗过去，见 filters.py 说明）
+                        err_raw = r.error if r.center_x is not None else None
+                        err_c = None
+                        if r.error is not None and r.quality >= args.min_quality:
+                            err_c = r.error if err_filter is None else err_filter.update(r.error)
+
+                        ls = loss.update(now, err_c is not None) if driving \
+                            else LossState("idle", 0.0, 1.0)
+                        trip = bool(driving and args.err_stop_s > 0
+                                    and big_err.update(now, err_c, raw_error=err_raw))
+                        if trip:
+                            # ⚠️ err_c 可能为 None（读数质量不够时不进控制器），
+                            #   而原始误差照样能触发保护 → 这里**不能**直接格式化成 float
+                            #   （2026-09-22 落地实测崩过：TypeError: NoneType.__format__）
+                            print(guard_trip_text(args.err_stop_px, args.err_stop_s,
+                                                  err_c, err_raw))
+                            state["stopped"] = True
+
+                        phase, out_us, angle = "stop", NEUTRAL_US, 90.0
+                        if trip:
+                            phase = "guard"
+                        elif driving:
+                            if ls.phase == "fresh":
+                                steer = pid.step(err_c)
+                                angle = steer
+                                out_us = adaptive_pulse(err_c, args.speed_us,
+                                                        args.speed_fast, args.speed_slow)
+                                phase = "track"
+                                last_center = r.center_x
+                                n_track += 1
+                            elif ls.phase == "hold" and ls.since_s == INF:
+                                # 发车后还没见过一次线：低速探路（舵角回中位，往前拱找线）
+                                pid.reset()
+                                if err_filter is not None:
+                                    err_filter.reset()
+                                if (now - (launch_t or now)) < args.acquire_s:
+                                    steer, angle, out_us, phase = 90.0, 90.0, args.start_us, "acquire"
+                                else:
+                                    phase = "lost"
+                                    state["stopped"] = True
+                                    print(f"[REF] ⚠️ 探路 {args.acquire_s:.1f}s 也没找到线 → 停车"
+                                          f"（看 setup 目录的原图 / 跑 lane_probe）")
+                            elif ls.phase == "hold":
+                                # 丢线维持：沿用上次中心，误差按时间衰减回中位（越久越回正）
+                                held = (last_center - params.target_ratio * target_w) \
+                                    if last_center is not None else 0.0
+                                angle = pid.step(held * ls.decay) if abs(held) > 1e-6 else 90.0
+                                steer = angle
+                                out_us = floor_pulse(args.speed_us, args.speed_slow)
+                                phase = "hold"
                             else:
                                 pid.reset()
                                 if err_filter is not None:
                                     err_filter.reset()
-                                steer = 90.0
-                            angle = steer
-                        else:
-                            pid.reset()
-                            if err_filter is not None:
-                                err_filter.reset()
-                            steer = 90.0
-                            angle = 90.0
-                        if guard_trip:                    # 触发的这一帧就不再输出动力
-                            out_us = NEUTRAL_US
-                            angle = 90.0
+                                phase = "lost"
+                                state["stopped"] = True
+                                print(f"[REF] ⚠️ 丢线 {ls.since_s:.1f}s 没恢复 → 停车"
+                                      f"（保守：不带垃圾读数继续跑）")
 
                         if use_motor and pca is not None:
                             pca.set_steering_angle(angle)
                             pca.write_us(pca.CH_ESC, out_us)
 
                         frames += 1
+                        t_rel = now - t0
+                        rec.row(t_rel, phase, r, err_c, params.target_ratio * target_w,
+                                angle, out_us, ls.since_s)
+                        if rec.wants_save(t_rel):          # 画叠加图只在真要存的时候做
+                            rec.maybe_save(t_rel, frame,
+                                           annotate(frame, r, params, phase,
+                                                    f"esc={out_us:.0f} t={t_rel:.0f}s"),
+                                           phase)
                         if frames % max(1, args.print_every) == 0:
-                            cx = "-" if r.center_x is None else f"{r.center_x:5.1f}"
-                            er = "-" if r.error is None else f"{r.error:+6.1f}"
-                            print(f"[REF] {now - t0:6.1f}s 中心={cx} 误差={er} "
+                            print(f"[REF] {t_rel:6.1f}s 中心={_fmt(r.center_x, '%5.1f')} "
+                                  f"误差={_fmt(r.error, '%+6.1f')} 滤波后={_fmt(err_c, '%+6.1f')} "
                                   f"舵机={angle:5.1f}° 电调={out_us:4.0f}us "
-                                  f"线段{ r.n_left:2d}/{r.n_right:2d} 边缘={r.mask_pct * 100:4.1f}% ({phase})")
-                        if csv_fh is not None:
-                            csv_fh.write("%.3f,%s,%s,%s,%.1f,%.0f,%s,%s,%d,%d,%.1f\n" % (
-                                now - t0, phase,
-                                "" if r.center_x is None else "%.1f" % r.center_x,
-                                "" if r.error is None else "%.1f" % r.error,
-                                angle, out_us,
-                                "" if r.left_x is None else "%.1f" % r.left_x,
-                                "" if r.right_x is None else "%.1f" % r.right_x,
-                                r.n_left, r.n_right, r.mask_pct * 100))
+                                  f"质量={r.quality:.2f} {_sided_text(r)} "
+                                  f"线段{r.n_left:2d}/{r.n_right:2d} "
+                                  f"边缘={r.edge_pct * 100:4.1f}% ({phase})")
                     cap.release()
 
                     if not seen_board:
                         print("[REF] ⚠️ 全程没见过蓝板：车不会动（这是安全设计）")
+                        print("[REF]    板要摆在下摄正前方、够大够近；先跑 lane_probe 看蓝色占比")
                     elif n_center_frames == 0:
-                        print("[REF] ⚠️ 结束时没有有效车道：检查 ROI/斜率范围，或跑 lane_probe 看画面")
-                    elif target_px is not None:
-                        print(f"[REF] 本次用的目标点 = {target_px:.1f}px（自动标定），"
-                              f"有效读数 {n_center_frames} 帧")
-                    elif auto_target:
-                        print(f"[REF] ⚠️ 自动标定没成（起步前那几帧没有有效中心）："
-                              f"本次用的是 site.yaml/命令行的 {args.target_ratio * 640:.0f}px")
+                        print("[REF] ⚠️ 全程没有质量达标的读数 → 看 setup 目录的图 + "
+                              "lane_probe 的镜头朝向体检")
+                    else:
+                        print(f"[REF] 本次有效读数 {n_center_frames} 帧，其中跟线 {n_track} 帧")
     finally:
-        if csv_fh is not None:
-            csv_fh.close()
-            print(f"[REF] 数据已写入 {args.log_csv}")
-        restore_remote_stage(state, "循迹测试结束")
+        rec.close()
+        summary = rec.summary()
+        _print_summary(summary, driven=state.get("used_motor", False))
+        try:
+            with open(os.path.join(rec.save_dir or save_dir, "summary.json"),
+                      "w", encoding="utf-8") as fh:
+                json.dump(summary, fh, ensure_ascii=False, indent=1)
+        except Exception as exc:
+            print(f"[REF] ⚠️ 写 summary.json 失败：{exc}")
+        restore_remote_stage(state, "循迹结束")
     return rc
 
 

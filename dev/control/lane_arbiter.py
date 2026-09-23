@@ -80,7 +80,10 @@ class LaneArbiter:
                                  throttle_scale=0.0, degraded=True, should_stop=True)
 
         held_s = 0.0 if self._last_valid_t is None else max(0.0, now - self._last_valid_t)
-        degraded = self._low_frames >= self.low_conf_frames
+        # 帧数防抖 + 时间兜底：低帧率时帧数涨得慢，ARBITER_HOLD_S 也要能触发降级
+        # （2026-09-23 代码审查 B7：原来 hold_s 只赋值不参与判定，现场调了没效果）
+        degraded = (self._low_frames >= self.low_conf_frames
+                    or (held_s > 0 and held_s >= self.hold_s))
         should_stop = held_s > self.stop_s
 
         scale = self.hold_throttle_scale if degraded else 1.0

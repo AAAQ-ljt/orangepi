@@ -51,7 +51,10 @@ done
 v4l2-ctl --list-devices 2>/dev/null | grep -qi 'camera\|icspring' && ok "v4l2 枚举识别" || warn "v4l2 枚举异常"
 
 echo '########## T6 I2C / PCA9685 ##########'
-i2cdetect -y 5 2>/dev/null | grep -q '40' && ok "PCA9685 @0x40 (I2C5)" || bad "PCA9685 未探测到 (I2C5)"
+# 精确匹配"地址列=40"，不能 grep '40'——行标签本身含 "40:"，总线上没设备也永远 PASS
+# （car-mode.sh:186 同样写法；2026-09-23 代码审查 B9）
+i2cdetect -y 5 2>/dev/null | awk '$1=="40:" && $2=="40"{f=1} END{exit !f}' \
+  && ok "PCA9685 @0x40 (I2C5)" || bad "PCA9685 未探测到 (I2C5)"
 
 echo '########## T7 传感器与串口节点 ##########'
 ls /dev/ttyS* >/dev/null 2>&1 && ok "串口组存在: $(ls /dev/ttyS* | tr '\n' ' ')" || warn "无 ttyS*"

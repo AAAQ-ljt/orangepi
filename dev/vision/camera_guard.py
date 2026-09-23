@@ -33,6 +33,13 @@ FFMPEG_SERVICES: List[str] = [
     "ffmpeg-stream-sub.service",
 ]
 
+# 每路推流服务对应的摄像头设备 index（主摄 video0 / 副摄 video2）
+# （2026-09-23 代码审查 B6：stop_ffmpeg 承诺"确认设备已释放"，但从不真的查设备占用）
+SERVICE_DEVICE_INDEX = {
+    "ffmpeg-stream.service": 0,
+    "ffmpeg-stream-sub.service": 2,
+}
+
 # 停止/恢复推流后等待服务让出/拿回设备的秒数
 DEFAULT_SETTLE_S = 1.0
 STOP_TIMEOUT_S = 6.0        # 停服务后等设备释放的上限（超时上 SIGKILL）
@@ -102,6 +109,14 @@ def stop_ffmpeg(services: Iterable[str] = FFMPEG_SERVICES,
             _systemctl("kill", "--signal=SIGKILL", svc)
             time.sleep(0.5)
         _systemctl("reset-failed", svc)     # 别让看门狗把"我们停的"当成"它崩了"
+        # 服务停了 ≠ 设备已释放（ffmpeg 可能还在退），按 /proc 确认占用者清空再返回
+        # （2026-09-23 代码审查 B6：原来只轮询 is-active + 固定 sleep，docstring 承诺没兑现）
+        dev_index = SERVICE_DEVICE_INDEX.get(svc)
+        if dev_index is not None:
+            remain = max(0.5, deadline - time.time())
+            if not wait_device_free(dev_index, timeout_s=remain):
+                print(f"[CAM] ⚠️ 停掉 {svc} 后 /dev/video{dev_index} 仍被占用："
+                      f"{device_holders(dev_index)}（继续执行，打开摄像头时会重试）")
     if settle_s > 0:
         time.sleep(settle_s)
 

@@ -23,7 +23,7 @@ import cv2
 
 from config import settings
 from common.protocol import PerceptionMessage
-from vision.camera_guard import camera_exclusive
+from vision.camera_guard import camera_exclusive, open_camera
 from vision.elements import load_profile
 try:  # 扫线两个通道已归档（dev/attic/lane-old-*.tar.gz），循迹统一走 scripts/lane_ref_test.py
     from vision.lane_hough import HoughLaneScanner
@@ -59,12 +59,11 @@ class CameraSwitcher:
         if self.index == index and self.cap is not None and self.cap.isOpened():
             return True
         self.release()
-        cap = cv2.VideoCapture(index, cv2.CAP_V4L)
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
-        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        if not cap.isOpened():
-            cap.release()
+        # 用 open_camera 的重试：推流刚停时设备可能还没真正释放（systemctl stop 返回
+        # ≠ 设备已让出，camera_guard.py 文件头记录了 2026-09-19 的实测坑）。
+        # 2026-09-23 代码审查 B6：原来这里裸 cv2.VideoCapture，碰上未释放直接失败。
+        cap = open_camera(index, self.width, self.height)
+        if cap is None:
             print(f"[VISION] ⚠️ 摄像头 index={index} 打不开")
             return False
         self.cap, self.index = cap, index

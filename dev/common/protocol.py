@@ -122,4 +122,5 @@ class PerceptionMessage:
             "board_blocked": self.board_blocked,
             "start_released": self.start_released,
             "traffic_light_state": self.traffic_light_state,
+            "elements": self.elements,      # 2026-09-23 代码审查 B1：漏了这个字段元素列表永远不过 UDP
         }

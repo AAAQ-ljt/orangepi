@@ -182,12 +182,24 @@ def main() -> int:
                 skipped_newer.append(rel)                  # 远端更新 → 疑似在车上直接改的
                 continue
             to_upload.append(rel)
-        stale = [rel for rel in sorted(remote) if rel not in local]
+        # stale 必须同时套用 is_excluded：remote 是全量、local 是过滤后的，
+        # 否则 --delete 会把「有意不同步的车端资源」当多余文件删掉
+        # （models/*.rknn、config/site.yaml 标定值、wifi-ledger.conf —— 2026-09-23 代码审查 A2）。
+        stale_all = [rel for rel in sorted(remote) if rel not in local]
+        stale = [rel for rel in stale_all
+                 if not is_excluded(f"dev/{rel}", args.include_models)]
+        protected = [rel for rel in stale_all
+                     if is_excluded(f"dev/{rel}", args.include_models)]
 
         if skipped_newer:
             print(f"[SYNC] ⚠️ 跳过 {len(skipped_newer)} 个「远端更新」的文件（不覆盖车上直接改的内容）：")
             for rel in skipped_newer:
                 print(f"  [skip] {rel}   ← 要覆盖请加 --force；要保留请先 ssh_get 拉回仓库")
+
+        if args.delete and protected:
+            print(f"[SYNC] 远端 {len(protected)} 个文件受排除规则保护，--delete 不会动它们：")
+            for rel in protected:
+                print(f"  [keep] {rel}")
 
         if args.delete and stale:
             print(f"[SYNC] 将删除远端多余文件 {len(stale)} 个：")

@@ -61,9 +61,9 @@ ensure_wwan0_name() {
   info "网卡当前叫 $WWAN_IF，改名回 wwan0（厂商拨号器只认这个名）"
   ip link set "$WWAN_IF" down 2>/dev/null
   if ip link set "$WWAN_IF" name wwan0 2>/dev/null; then
+    log "renamed $WWAN_IF -> wwan0"      # 先记原名（$1 未传参，set -u 下展开会杀脚本；2026-09-23 审查 B4）
     WWAN_IF="wwan0"
     ip link set wwan0 up 2>/dev/null
-    log "renamed $1 -> wwan0"
     return 0
   fi
   warn "改名失败（接口可能被占用），继续使用 $WWAN_IF"
@@ -105,9 +105,6 @@ net_ok() {
 default_iface() { ip route show default 2>/dev/null | awk '{print $5}' | head -1; }
 
 cellular_ip()  { iface_ip "$WWAN_IF"; }
-# 注意用 wifi_iface() 而不是直接用 $WIFI_IF：后者留空时会把 grep 模式拼成 "^:connected"，
-# 永远判为"未连接"（2026-09-20 修）。wifi_iface() 在 WIFI_IF 为空时会自动探测网卡。
-wifi_active()  { local i; i=$(wifi_iface); [[ -n "$i" ]] && nmcli -t -f DEVICE,STATE 2>/dev/null | grep -q "^${i}:connected"; }
 
 # ------------------------------------------------------------------ 蜂窝
 VENDOR_DIALER="/root/SIM8200_for_RPI/Goonline/simcom-cm"   # 厂商拨号器（对本模组已验证可用）

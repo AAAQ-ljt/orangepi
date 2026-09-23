@@ -35,7 +35,7 @@ restart_service() {
   last=$(cat "$stamp" 2>/dev/null || echo 0)
   if (( now - last < BACKOFF_S )); then
     echo "[watch] $svc 需要重启（$reason），但距上次仅 $((now-last))s，退避中"
-    exit 0
+    return 0    # 用 return 而不是 exit：exit 会让后面的服务（sub 流）整轮不被检查（2026-09-23 审查 B8）
   fi
   echo "[watch] 重启 $svc：$reason"
   echo "$now" > "$stamp"

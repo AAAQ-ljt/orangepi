@@ -21,6 +21,11 @@ import sys
 import time
 from datetime import datetime
 
+# 本脚本可能以裸 `python3 /root/dev/scripts/capture_dataset.py` 方式运行（run_capture.sh /
+# camera0.sh / camera2.sh 都这么调），sys.path[0] 是脚本目录而非 dev/ —— 必须自己引导
+# （2026-09-23 代码审查 A5：缺这一行时 `from vision.camera_guard import ...` 直接 ModuleNotFoundError）。
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import cv2
 
 from vision.camera_guard import open_camera, start_ffmpeg, stop_ffmpeg
@@ -68,8 +73,11 @@ def main() -> int:
     )
     parser.add_argument("--interval", type=float, default=0.5, help="拍摄间隔秒数")
     parser.add_argument("--count", type=int, default=0,
-                        help="最多拍摄多少张后自动停止（0=不限，靠 Ctrl+C 停）。"
+                        help="最多拍摄多少张后自动停止（0=不限，靠 Ctrl+C 或 --max-seconds 停）。"
                              "非交互/被脚本调用时**务必设上限**，否则进程可能被 orphan 后一直写盘")
+    parser.add_argument("--max-seconds", type=float, default=1800.0,
+                        help="最长拍摄时长（秒）兜底：SSH 断开 / 忘按 Ctrl+C 也不会无限写盘"
+                             "（AGENTS.md §1.4.1 不写无退出条件的循环）")
     parser.add_argument("--device", type=int, default=0)
     parser.add_argument("--width", type=int, default=640)
     parser.add_argument("--height", type=int, default=480)
@@ -100,14 +108,19 @@ def main() -> int:
             return 1
 
         print("[CAPTURE] capturing... Ctrl+C to stop"
-              + (f"（本次最多 {args.count} 张）" if args.count > 0 else ""))
+              + (f"（本次最多 {args.count} 张）" if args.count > 0 else "")
+              + f"（最长 {args.max_seconds:.0f}s，到点自动停）")
         counter = 0
+        started = time.time()
 
         if args.show:
             cv2.namedWindow("capture", cv2.WINDOW_NORMAL)
             cv2.startWindowThread()
             print("[CAPTURE] preview window enabled")
         while True:
+            if time.time() - started >= args.max_seconds:
+                print(f"[CAPTURE] 达到最长拍摄时长 {args.max_seconds:.0f}s，停止")
+                break
             ret, frame = cap.read()
             if not ret or frame is None:
                 time.sleep(0.05)

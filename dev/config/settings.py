@@ -82,7 +82,34 @@ START_TIMEOUT_S = 90.0                      # 超时仅告警（不自动发车�
 START_USE_EDGE_DENSITY = False              # 是否同时要求边缘密度判据（备选，默认关）
 START_EDGE_DENSITY_THRESH = 0.02            # 边缘密度阈值（START_USE_EDGE_DENSITY=True 时生效）
 
+# ---------------------------------------------------------------- 锥桶检测与避让（P1-3 雏形）
+# 与挡板共用"蓝色"判定，但锥桶的蓝色更浅（2026-09-07 采集图实测：
+#   H 中位 90~96、S 中位 63~72、V 中位 160+；挡板阈值 S≥80 会大面积漏锥桶），故单独一套阈值。
+# ROI 按下摄画面取中下部——锥桶摆跑道中间，近处大片地面与反光不属于目标。
+CONE_GATE_ROI = (0.10, 0.90, 0.35, 1.00)    # (x0, x1, y0, y1) 比例：中下部
+CONE_BLUE_HSV_LOW = (70, 30, 50)            # 蓝色锥桶 HSV 下限【现场可调】（挡板是 (95,80,60)）
+CONE_BLUE_HSV_HIGH = (145, 255, 255)        # 蓝色锥桶 HSV 上限【现场可调】
+CONE_MIN_W = 25                             # 锥桶框最小宽（px，滤噪点；覆盖远端小锥桶 ~26px）
+CONE_MIN_H = 40                             # 锥桶框最小高（px）
+CONE_MAX_W = 360                            # 锥桶框最大宽（px，挡板/大蓝物比锥桶宽得多）
+CONE_MAX_H = 420                            # 锥桶框最大高（px，防把近处挡板当锥桶）
+CONE_MAX_AREA_RATIO = 0.15                  # 连通域面积 / ROI 面积上限（挡板贴脸时远超此值）
+CONE_MIN_AREA_RATIO = 0.002                 # 连通域面积 / ROI 面积下限（滤零散蓝点）
+CONE_HYSTERESIS_FRAMES = 3                  # 连续 N 帧检测到才进避让（防抖，与 ZEBRA 一致）
+CONE_AVOID_S = 1.2                          # 单次绕行动作时长（秒，开环，现场标定）
+CONE_AVOID_DEG = 20.0                       # 绕行舵角偏离中位的幅度（度，参考实现≈±20°）
+CONE_AVOID_US = 1548                        # 绕行期间油门脉宽（>死区 1545 即可，低速绕行）
+CONE_SEGUE_S = 0.8                          # 两段绕行之间的回正直行时长（秒）
+CONE_COOLDOWN_S = 3.0                       # 一轮绕行结束后，多久内不再触发新绕行（防同一个锥桶二进宫）
+
 # ---------------------------------------------------------------- 扫线
+# ⚠️ 2026-09-23 代码审查 B11：本区段是**两份已归档实现**（lane_scan / lane_hough，见
+# dev/attic/lane-old-20260919.tar.gz）的配置。当前生效的循迹实现在 `vision/lane_ref.py`
+# （入口 scripts/lane_ref_test.py），只消费 LANE_ROI_* / LANE_PAIR_W_* / LANE_LINE_MIN_* /
+# LANE_MASK_OPEN_PX / LANE_WHITE_* 等少量项；其余（LANE_CANNY_*、LANE_HOUGH_*、LANE_SLOPE_*、
+# LANE_FIT_*、LANE_TRACK_*、LANE_LOOKAHEAD_RATIO、LANE_WEIGHT_PEAK、LANE_MIN_VALID_ROWS、
+# LANE_MAX_LINE_W_PX、LANE_ROW_STEP、LANE_MIN_SEG_LEN_SUM、LANE_EDGE_MARGIN）**当前零引用**，
+# 保留仅为将来恢复旧实现时参考——**现场调它们不会产生任何效果**，别浪费时间。
 LANE_ROI_TOP_RATIO = 0.35   # ROI 上沿（0.35 → y=168）【现场可调】
 LANE_ROI_BOTTOM_MARGIN = 200   # ROI 下沿（200 → y=280）【现场可调】
 LANE_ROW_STEP = 2               # 每隔多少行扫一次

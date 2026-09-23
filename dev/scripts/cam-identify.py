@@ -33,39 +33,43 @@ def main() -> None:
         subprocess.run(["systemctl", "stop", svc], check=False)
     time.sleep(2.5)
 
-    from adafruit_extended_bus import ExtendedI2C as I2C
-    from adafruit_pca9685 import PCA9685
-
-    pca = PCA9685(I2C(5), address=0x40)
-    pca.frequency = 50
-
-    def gimbal(tilt_deg: float) -> None:
-        pca.channels[2].duty_cycle = int(pwm_us(PAN) / 20000.0 * 65535)
-        pca.channels[3].duty_cycle = int(pwm_us(tilt_deg) / 20000.0 * 65535)
-        time.sleep(1.5)
-
-    def grab(idx: int):
-        cap = cv2.VideoCapture(idx, cv2.CAP_V4L)
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        if not cap.isOpened():
-            print(f"  video{idx} 打不开")
-            return None
-        frame = None
-        for _ in range(8):                 # 丢掉前几帧，等曝光稳定
-            ok, frame = cap.read()
-            if not ok:
-                frame = None
-        cap.release()
-        return frame
-
-    def change(a, b) -> float:
-        if a is None or b is None:
-            return -1.0
-        return float(np.mean(cv2.absdiff(a, b)))
-
+    # 服务停止后的一切（import/初始化/抓帧）都放 try 里：中途任何一步失败也必须恢复
+    # 推流与 opi-control，否则车留在"既不能遥控也不能看图传"的状态
+    # （2026-09-23 代码审查 D4：原实现 stop 在 try 外，import 失败会跳过 finally）
+    pca = None
     try:
+        from adafruit_extended_bus import ExtendedI2C as I2C
+        from adafruit_pca9685 import PCA9685
+
+        pca = PCA9685(I2C(5), address=0x40)
+        pca.frequency = 50
+
+        def gimbal(tilt_deg: float) -> None:
+            pca.channels[2].duty_cycle = int(pwm_us(PAN) / 20000.0 * 65535)
+            pca.channels[3].duty_cycle = int(pwm_us(tilt_deg) / 20000.0 * 65535)
+            time.sleep(1.5)
+
+        def grab(idx: int):
+            cap = cv2.VideoCapture(idx, cv2.CAP_V4L)
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            if not cap.isOpened():
+                print(f"  video{idx} 打不开")
+                return None
+            frame = None
+            for _ in range(8):                 # 丢掉前几帧，等曝光稳定
+                ok, frame = cap.read()
+                if not ok:
+                    frame = None
+            cap.release()
+            return frame
+
+        def change(a, b) -> float:
+            if a is None or b is None:
+                return -1.0
+            return float(np.mean(cv2.absdiff(a, b)))
+
         gimbal(TILT_A)
         a0, a2 = grab(0), grab(2)
         gimbal(TILT_B)
@@ -91,13 +95,14 @@ def main() -> None:
                 cv2.imwrite(f"{OUT_DIR}/{name}.jpg", img)
         print(f"  对比图已写入 {OUT_DIR}/tilt*_video*.jpg")
     finally:
-        for ch in (2, 3):
-            pca.channels[ch].duty_cycle = int(pwm_us(90) / 20000.0 * 65535)
-        pca.deinit()
+        if pca is not None:
+            for ch in (2, 3):
+                pca.channels[ch].duty_cycle = int(pwm_us(90) / 20000.0 * 65535)
+            pca.deinit()
         for svc in STREAMS:
             subprocess.run(["systemctl", "start", svc], check=False)
         subprocess.run(["systemctl", "start", "opi-control.service"], check=False)
-        print("推流与 opi-control 已恢复")
+        print("推流与 opi-control 已恢复（无论成功或失败）")
 
 
 if __name__ == "__main__":

@@ -256,7 +256,7 @@ cmd_status() {
     else printf '  %-8s 未运行\n' "$name"; fi
   done
   echo "--- 摄像头占用 ---"
-  for dev in "$DEV_MAIN" "$DEV_SUB"; do
+  for dev in "$DEV_GIMBAL" "$DEV_DOWN"; do
     local holder; holder=$(fuser "$dev" 2>/dev/null || true)
     printf '  %-14s %s\n' "$dev" "${holder:-空闲}"
   done

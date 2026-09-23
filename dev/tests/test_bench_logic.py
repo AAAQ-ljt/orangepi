@@ -174,10 +174,23 @@ def test_scaled_pulse_slows_down_instead_of_stopping():
     """仲裁层降级时**降速**（往中位靠），而不是急停——过弯道时短时丢线就靠这个撑过去。"""
     from scripts.bench_test import NEUTRAL_US, scaled_pulse
     assert scaled_pulse(1575.0, 1.0) == 1575.0
-    assert scaled_pulse(1575.0, 0.5) == 1537.5
     assert scaled_pulse(1575.0, 0.0) == NEUTRAL_US      # 完全降级 = 回中位（停）
     assert scaled_pulse(1560.0, 2.0) == 1560.0          # 上限钳到 1.0，不会超速
     assert scaled_pulse(1560.0, -1.0) == NEUTRAL_US
+
+
+def test_scaled_pulse_clamped_above_esc_deadband():
+    """降速后的脉宽不得低于电调死区上沿，否则"降速维持"实为停车。
+    2026-09-23 代码审查 A7：1560×0.5=1530us < 死区 1545us → 一降速车就停死。"""
+    from scripts.bench_test import scaled_pulse
+    from config import settings
+    floor = settings.ESC_DEADBAND_US + 1
+    assert scaled_pulse(1560.0, 0.5) == floor
+    assert scaled_pulse(1575.0, 0.5) == floor
+    assert scaled_pulse(settings.ESC_CREEP_US, settings.ARBITER_HOLD_THROTTLE_SCALE) == floor
+    # 任意 >0 的缩放比例都不能掉进死区（0 是显式的"回中位停车"，例外）
+    for scale in (0.05, 0.25, 0.5, 0.75, 0.99):
+        assert scaled_pulse(1560.0, scale) >= floor, scale
 
 
 if __name__ == "__main__":
@@ -195,7 +208,9 @@ if __name__ == "__main__":
     test_driving_off_course()
     test_acquire_creep_without_lane()
     test_acquire_does_not_override_force_run()
+    test_creep_stage_ignores_throttle_scale()
     test_scaled_pulse_slows_down_instead_of_stopping()
+    test_scaled_pulse_clamped_above_esc_deadband()
     test_bench_common_exposes_safety_api()
     test_restore_is_idempotent()
     print("test_bench_logic: all passed")

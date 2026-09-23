@@ -116,7 +116,13 @@ def scaled_pulse(out_us: float, scale: float, neutral_us: float = NEUTRAL_US) ->
     这里把它的 throttle_scale 真正接到电调上（纯函数，便于单测）。
     """
     k = max(0.0, min(1.0, float(scale)))
-    return float(neutral_us) + (float(out_us) - float(neutral_us)) * k
+    if k <= 0.0:
+        return float(neutral_us)                        # 完全降级 = 回中位（停）
+    result = float(neutral_us) + (float(out_us) - float(neutral_us)) * k
+    # 死区钳制：降速也必须高于起转脉宽，否则"降速维持"实为停车。
+    # 2026-09-16 架空实测：1545us 才起转；1560×0.5=1530us 落在死区里，丢线一降速车就停死
+    # （planner.py 的百分比域有同样防护；2026-09-23 代码审查 A7）。
+    return max(result, settings.ESC_DEADBAND_US + 1)
 
 
 def auto_target(samples) -> Optional[float]:
@@ -250,7 +256,7 @@ def main() -> int:
 
     # 只有"真的要用扫线"的档才需要扫线模块：转向自检/标定/直行/蓝板档都不需要
     # （2026-09-21 实验室实测：--steer-test 被这一条挡掉，白跑一次）
-    need_lane = not (args.no_lane or args.steer_test or args.calibrate)
+    need_lane = not (args.no_lane or args.steer_test or args.calibrate or args.no_motor)
     if not _HAS_LANE_SCAN and need_lane:
         print("[BENCH] 扫线模块已移除：循迹档不可用。请用 scripts/lane_ref_test.py 做循迹测试，"
               "或加 --no-lane 只测蓝板/直行。")
@@ -296,6 +302,11 @@ def main() -> int:
                 if not ok or frame is None:
                     time.sleep(0.03)
                     continue
+                if scanner is None:
+                    print("[BENCH] 标定需要扫线模块，但它已归档（lane_scan 不在 vision/ 下）。")
+                    print("[BENCH] 请改用 scripts/lane_ref_test.py 的起步前自检标定目标点，")
+                    print("[BENCH] 或先恢复 vision/lane_scan.py 再跑 --calibrate。")
+                    return 2
                 obs = scanner.scan(frame)
                 if obs.confidence >= 0.4:
                     samples.append(obs.center_x)
@@ -393,7 +404,7 @@ def main() -> int:
                             gs = gate.update(frame)
                             if gs.blocked:
                                 seen_board = True
-                            obs = scanner.scan(frame) if not args.no_lane else None
+                            obs = scanner.scan(frame) if (not args.no_lane and scanner is not None) else None
                             if obs is not None:
                                 arb = arbiter.update(obs.center_x, obs.confidence, now)
                                 # **用仲裁层的结论**：短时丢线 → 降速维持（coast），只有超时才停。

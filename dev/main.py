@@ -52,8 +52,14 @@ def main() -> int:
         print("\n[MAIN] signal received, stopping safely")
         controller.stop()
 
-    signal.signal(signal.SIGINT, _signal_handler)
-    signal.signal(signal.SIGTERM, _signal_handler)
+    # AGENTS.md §1.1.4：所有退出路径都必须安全停车 —— 统一收敛到 _signal_handler
+    # （2026-09-23 代码审查 B5：原来只捕 INT/TERM，ABRT（Python 内部致命错误）与
+    # QUIT（某些 kill 组合）不经过它，controller.shutdown() 就不会执行）
+    # 注：Windows 开发机的 Python 没有 SIGQUIT（AttributeError），用 getattr 兼容。
+    for _sig in (signal.SIGINT, signal.SIGTERM, signal.SIGABRT,
+                 getattr(signal, "SIGQUIT", None)):
+        if _sig is not None:
+            signal.signal(_sig, _signal_handler)
 
     try:
         controller.run_forever()

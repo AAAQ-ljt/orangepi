@@ -58,7 +58,7 @@ class RKNNYoloDet:
     # ------------------------------------------------------------------ 预处理
     @property
     def is_native(self) -> bool:
-        """上一帧是否走了「原图直喂」（无缩放）路径。"""
+        """**本帧**是否走了「原图直喂」（无缩放）路径。"""
         return self._transform is None
 
     def preprocess(self, frame_bgr: np.ndarray) -> np.ndarray:

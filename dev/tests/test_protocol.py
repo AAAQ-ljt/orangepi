@@ -41,7 +41,8 @@ def test_lane_confidence_default_when_absent():
 def test_roundtrip_new_fields():
     original = PerceptionMessage(timestamp=1.5, center_x=333.0, lane_confidence=0.75,
                                  board_blocked=True, start_released=False,
-                                 traffic_light_state="red", blue_cone_count=2)
+                                 traffic_light_state="red", blue_cone_count=2,
+                                 elements=[{"name": "zebra", "conf": 0.9}])
     data = original.to_dict()
     restored = PerceptionMessage.from_dict(data)
     assert restored.center_x == 333.0
@@ -49,6 +50,24 @@ def test_roundtrip_new_fields():
     assert restored.board_blocked is True
     assert restored.traffic_light_state == "red"
     assert restored.blue_cone_count == 2
+    # 2026-09-23 代码审查 B1：to_dict 曾漏掉 elements → 元素列表永远不过 UDP
+    assert restored.elements == [{"name": "zebra", "conf": 0.9}]
+
+
+def test_elements_survive_udp_roundtrip():
+    """元素列表是 vision→control 的唯一通道，必须随 to_dict/from_dict 完整往返。"""
+    elems = [{"name": "cone", "color": "blue", "conf": 0.81, "x": 100, "y": 200},
+             {"name": "parking_area", "conf": 0.55}]
+    msg = PerceptionMessage(elements=elems)
+    assert msg.to_dict()["elements"] == elems
+    assert PerceptionMessage.from_dict(msg.to_dict()).elements == elems
+
+
+def test_elements_tolerate_missing_or_junk():
+    assert PerceptionMessage.from_dict({}).elements == []
+    assert PerceptionMessage.from_dict({"elements": None}).elements == []
+    assert PerceptionMessage.from_dict({"elements": [{"name": 1}, "junk", None]}).elements \
+        == [{"name": 1}]
 
 
 def test_traffic_light_alias_and_case():
@@ -62,5 +81,7 @@ if __name__ == "__main__":
     test_missing_and_null_fields_are_tolerated()
     test_lane_confidence_default_when_absent()
     test_roundtrip_new_fields()
+    test_elements_survive_udp_roundtrip()
+    test_elements_tolerate_missing_or_junk()
     test_traffic_light_alias_and_case()
     print("test_protocol: all passed")

@@ -1,0 +1,47 @@
+"""看单张锥桶图的掩膜与连通域（诊断 cone_check 检出率 0.7% 用）。"""
+import os, sys
+import numpy as np, cv2
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
+from vision.cone_detect import blue_mask, detect_cones_hsv
+from config import settings
+
+def imread_unicode(path):
+    return cv2.imdecode(np.fromfile(path, dtype=np.uint8), cv2.IMREAD_COLOR)
+
+base = r"D:/5g/orangepi/train/project/蓝色锥桶2"
+names = sorted(os.listdir(base))
+out = r"D:/5g/orangepi/logs_pull/cone_check"
+os.makedirs(out, exist_ok=True)
+
+for n in names[:6]:
+    img = imread_unicode(os.path.join(base, n))
+    if img is None:
+        continue
+    mask = blue_mask(img)
+    roi = settings.CONE_GATE_ROI
+    h, w = img.shape[:2]
+    x0, x1 = int(w * roi[0]), int(w * roi[1])
+    y0, y1 = int(h * roi[2]), int(h * roi[3])
+    # 整图蓝 vs ROI 内蓝
+    full = cv2.inRange(cv2.cvtColor(img, cv2.COLOR_BGR2HSV),
+                       np.array(settings.CONE_BLUE_HSV_LOW), np.array(settings.CONE_BLUE_HSV_HIGH))
+    print(f"--- {n[:40]}")
+    print(f"  整图蓝色占比={full.mean()/255:.3f}  ROI内(mask)占比={mask[y0:y1,x0:x1].mean()/255:.3f}")
+    n_cc, labels, stats, cent = cv2.connectedComponentsWithStats(mask, connectivity=8)
+    roi_area = (x1 - x0) * (y1 - y0)
+    print(f"  连通域数={n_cc-1}")
+    for i in range(1, n_cc):
+        x, y, bw, bh, area = stats[i]
+        print(f"    cc{i}: x={x} y={y} {bw}x{bh} area={area} ratio={area/roi_area:.3f}")
+    cones = detect_cones_hsv(img)
+    print(f"  检测结果: {cones}")
+    # 叠加：ROI 框 + 掩膜
+    vis = img.copy()
+    cv2.rectangle(vis, (x0, y0), (x1, y1), (0, 255, 255), 1)
+    bluem = np.zeros_like(img)
+    bluem[:,:,0] = 255
+    vis[mask > 0] = bluem[mask > 0]
+    cv2.imencode("_diag_.jpg", vis)[1].tofile(os.path.join(out, "diag_" + n.replace(".jpg", ".png")))
+print("叠加图已存", out)

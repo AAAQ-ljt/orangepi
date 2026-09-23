@@ -101,9 +101,15 @@ REF_BEHAVIOR = {
 
 # ================================================================ 叠加图
 def annotate(frame: np.ndarray, r: Optional[LaneReading], params: LaneParams,
-             phase: str, extra: str = "") -> np.ndarray:
+             phase: str, extra: str = "", cones=None) -> np.ndarray:
     """把"算法到底看到了什么"画在图上（存盘用；本车没有 X 服务器，只能事后看）。"""
     vis = frame.copy()
+    if cones:
+        for c in cones:
+            x0, y0, x1, y1 = (int(v) for v in c.xyxy)
+            cv2.rectangle(vis, (x0, y0), (x1, y1), (255, 0, 0), 2)
+            cv2.putText(vis, f"cone {c.conf:.2f}", (x0, max(0, y0 - 4)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 0, 0), 1, cv2.LINE_AA)
     h, w = vis.shape[:2]
     y0, y1 = roi_bounds(h, params)
     ya, yb = look_bounds(h, params)
@@ -506,6 +512,9 @@ def _write_site(args, params: LaneParams, target_px: Optional[float]) -> None:
 def analyze_image(path: str, params: LaneParams) -> int:
     img = cv2.imread(path)
     if img is None:
+        # Windows 本地验证时中文路径 cv2.imread 读不了 → 用 fromfile 兜底
+        img = cv2.imdecode(np.fromfile(path, dtype=np.uint8), cv2.IMREAD_COLOR)
+    if img is None:
         print(f"[REF] 读不到图片 {path}")
         return 1
     det = LaneRefDetector(params)
@@ -523,6 +532,15 @@ def analyze_image(path: str, params: LaneParams) -> int:
           f"半宽={_fmt(r.half_width, '%.0f')}px{'实测' if r.width_measured else '种子'}"
           f"{'  ' + r.note if r.note else ''}")
     print(f"[REF] 镜头朝向体检：{det.visible_range(img)['text']}")
+    # 锥桶检测（本地单图验证：hsv 通道不依赖权重）
+    from vision.cone_detect import detect_cones_hsv
+    cones = detect_cones_hsv(img)
+    if cones:
+        for c in cones:
+            print(f"[REF] 锥桶: x={c.center_x:.0f} y底={c.bottom_y:.0f} "
+                  f"{c.width:.0f}x{c.height:.0f} conf={c.conf:.2f}")
+    else:
+        print("[REF] 锥桶: 无（hsv 通道，ROI 在中下部）")
     return 0
 
 
@@ -687,6 +705,26 @@ def main() -> int:
                     help="摄像头连续读失败超过这么久就报错退出（默认 8s）——"
                          "相机掉线/被抢走时不要傻等到 --max-seconds")
     ap.add_argument("--print-every", type=int, default=3)
+    # ---- 锥桶检测与 S 型避让（P1-3 雏形；默认关，不影响纯循迹复测）----
+    ap.add_argument("--cone-method", choices=("hsv", "off"), default="off",
+                    help="锥桶检测通道：hsv=蓝色连通域（参考实现同源，本地可验、不依赖权重）；"
+                         "off=关闭（默认）。模型通道（RKNN car4cls）在视觉进程/双进程架构里，"
+                         "单脚本模式暂用 hsv")
+    ap.add_argument("--cone-avoid", action="store_true",
+                    help="开启锥桶 S 型避让（检测到锥桶 → 左绕→回正→右绕→回 track）")
+    ap.add_argument("--cone-stop", action="store_true",
+                    help="实验室模式：检测到锥桶就停车（锥桶移开可继续前进），不做绕行")
+    ap.add_argument("--cone-avoid-deg", type=float, default=None,
+                    help=f"绕行舵角偏离中位的幅度（默认 settings.CONE_AVOID_DEG="
+                         f"{settings.CONE_AVOID_DEG:.0f}°）")
+    ap.add_argument("--cone-avoid-s", type=float, default=None,
+                    help=f"单段绕行时长秒（默认 settings.CONE_AVOID_S={settings.CONE_AVOID_S:.1f}）")
+    ap.add_argument("--cone-resume-s", type=float, default=None,
+                    help=f"两段绕行间的回正直行秒（默认 settings.CONE_SEGUE_S="
+                         f"{settings.CONE_SEGUE_S:.1f}）")
+    ap.add_argument("--cone-first-dir", choices=("left", "right"), default="left",
+                    help="S 型第一段往哪边绕（默认 left：左绕→回正→右绕；"
+                         "第二个锥桶在另一边时不用改，两段方向相反即成 S）")
     args = ap.parse_args()
 
     # ---- 参数来源：命令行 > --ref-behavior 预设 > settings/site.yaml（ROI/前瞻带只有一处定义）
@@ -805,6 +843,25 @@ def main() -> int:
                     rc = 1
                 else:
                     det = LaneRefDetector(params)
+                    # ---- 锥桶检测（P1-3；hsv 通道本地可跑，模型通道在双进程架构）----
+                    cone_det = None
+                    cone_tracker = None
+                    if args.cone_method != "off":
+                        from vision.cone_detect import ConeDetector, ConeTracker
+                        cone_det = ConeDetector(method="hsv")
+                        cone_tracker = ConeTracker()
+                        print(f"[REF] 锥桶检测：{args.cone_method} 通道"
+                              + (" + S 型避让开" if args.cone_avoid else
+                                 (" + 停车模式开" if args.cone_stop else "（--cone-avoid/--cone-stop 开启后才会响应）")))
+                    cone_phase = None            # None/"avoid1"/"resume"/"avoid2"
+                    cone_phase_t0: Optional[float] = None
+                    cone_stopped = False         # --cone-stop：检测到锥桶后停车（实验室模式）
+                    avoid_deg = (settings.CONE_AVOID_DEG if args.cone_avoid_deg is None
+                                 else float(args.cone_avoid_deg))
+                    avoid_s = (settings.CONE_AVOID_S if args.cone_avoid_s is None
+                               else float(args.cone_avoid_s))
+                    resume_s = (settings.CONE_SEGUE_S if args.cone_resume_s is None
+                                else float(args.cone_resume_s))
                     seen_board = False
                     preflight_done = False
                     station_ok = True          # 自检通过才能发车（2026-09-23 操场实测加）
@@ -901,7 +958,37 @@ def main() -> int:
                         if r.center_x is not None and r.quality >= args.min_quality:
                             n_center_frames += 1
 
-                        driving = seen_board and not gs.blocked and station_ok
+                        # ---- 锥桶检测：每帧更新防抖状态（只有检测器在才跑）----
+                        cone_present = False
+                        if cone_tracker is not None:
+                            cones = cone_det.detect(frame) if cone_det is not None else []
+                            cone_present = cone_tracker.update(cones)
+                            if cones:
+                                c0 = cones[0]
+                                if frames % max(1, args.print_every) == 0:
+                                    print(f"[REF] 锥桶 {len(cones)} 个：x={c0.center_x:.0f} "
+                                          f"yb={c0.bottom_y:.0f} {c0.width:.0f}x{c0.height:.0f} "
+                                          f"conf={c0.conf:.2f} 防抖={'有' if cone_present else '积累中'}")
+
+                        # ---- 锥桶停车模式（实验室先验检测；锥桶移开可继续前进）----
+                        # 与"再见板停车"同款设计：不置 stopped（那样会退出整个循环），
+                        # 而是让 driving=False 停车；锥桶移开（防抖消失）后自动恢复前进。
+                        if args.cone_stop and cone_tracker is not None:
+                            if cone_present and not cone_stopped:
+                                cone_stopped = True
+                                launch_t = None
+                                pid.reset()
+                                if err_filter is not None:
+                                    err_filter.reset()
+                                loss.reset()
+                                big_err.reset()
+                                print("[REF] 🛑 检测到锥桶 → 停车（锥桶移开可继续前进）")
+                            elif not cone_present and cone_stopped:
+                                cone_stopped = False
+                                print("[REF] ▶️ 锥桶已移开 → 继续前进")
+
+                        driving = seen_board and not gs.blocked and station_ok \
+                            and not cone_stopped
                         if not station_ok and seen_board and not gs.blocked                                 and (frames % 30 == 0):
                             print("[REF] 🚫 自检未通过（证据不足），保持停车不动。"
                                   "重新摆车后 Ctrl-C 重跑")
@@ -934,9 +1021,53 @@ def main() -> int:
                                                   err_c, err_raw))
                             state["stopped"] = True
 
+                        # ---- S 型避让状态机（driving 且开启时才推进；放在 trip 之后）----
+                        if cone_tracker is not None and args.cone_avoid and driving \
+                                and not trip and not state["stopped"]:
+                            now_c = time.time()
+                            if cone_phase is None:
+                                if cone_present:
+                                    cone_phase = "avoid1"
+                                    cone_phase_t0 = now_c
+                                    print(f"[REF] 🚩 检测到锥桶 → S 型避让开始"
+                                          f"（{args.cone_first_dir}绕 {avoid_s:.1f}s）")
+                            elif cone_phase == "avoid1":
+                                if now_c - cone_phase_t0 >= avoid_s:
+                                    cone_phase = "resume"
+                                    cone_phase_t0 = now_c
+                                    print(f"[REF] → 回正直行 {resume_s:.1f}s")
+                            elif cone_phase == "resume":
+                                if now_c - cone_phase_t0 >= resume_s:
+                                    cone_phase = "avoid2"
+                                    cone_phase_t0 = now_c
+                                    print(f"[REF] → 反向绕 {avoid_s:.1f}s")
+                            elif cone_phase == "avoid2":
+                                if now_c - cone_phase_t0 >= avoid_s:
+                                    cone_phase = None
+                                    cone_phase_t0 = None
+                                    cone_tracker.reset()
+                                    print("[REF] → 避让结束，回到循迹")
+
                         phase, out_us, angle = "stop", NEUTRAL_US, 90.0
                         if trip:
                             phase = "guard"
+                        elif cone_phase is not None and args.cone_avoid and driving \
+                                and not state["stopped"]:
+                            # ---- S 型绕行：开环动作（参考实现 avoidFromLeft/Right 的参数化版）----
+                            # 绕行是**故意**的大幅转向：跑偏保护/画龙检测对它豁免（否则一绕就误触发停车）。
+                            # 安全兜底：绕行时油门降到 CONE_AVOID_US 低速；任何时刻再见板 → driving=False
+                            # 直接进上面的停车分支；--max-seconds 总上限仍然生效。
+                            sign = steer_sign                          # +1=角度大右转 / -1=角度大左转
+                            first = -1.0 if args.cone_first_dir == "left" else 1.0
+                            if cone_phase == "avoid1":
+                                angle = center_deg + first * sign * avoid_deg    # 先向 first 侧
+                            elif cone_phase == "avoid2":
+                                angle = center_deg - first * sign * avoid_deg    # 再向另一侧
+                            else:                                          # resume：回中直行找下一个
+                                angle = center_deg
+                            steer = angle
+                            out_us = settings.CONE_AVOID_US
+                            phase = cone_phase
                         elif driving:
                             if ls.phase == "fresh":
                                 steer = pid.step(err_c)
@@ -1005,7 +1136,8 @@ def main() -> int:
                         if rec.wants_save(t_rel):          # 画叠加图只在真要存的时候做
                             rec.maybe_save(t_rel, frame,
                                            annotate(frame, r, params, phase,
-                                                    f"esc={out_us:.0f} t={t_rel:.0f}s"),
+                                                    f"esc={out_us:.0f} t={t_rel:.0f}s",
+                                                    cones=(cones if cone_tracker is not None else None)),
                                            phase)
                         if frames % max(1, args.print_every) == 0:
                             print(f"[REF] {t_rel:6.1f}s 中心={_fmt(r.center_x, '%5.1f')} "

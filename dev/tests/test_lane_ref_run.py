@@ -57,6 +57,14 @@ def _blank_frame() -> np.ndarray:
     return frame
 
 
+def _cone_frame(shift: int = 0, size: int = 90) -> np.ndarray:
+    """红棕底 + 双斜白线 + 一个蓝色锥桶块（下摄视角：锥桶在画面中下部，ROI 内）。"""
+    frame = _lane_frame(shift=shift)
+    cx, bottom = 340 + shift, 420
+    frame[bottom - size:bottom, cx - size // 2:cx + size // 2] = (255, 140, 60)  # BGR 偏蓝
+    return frame
+
+
 class _FakeCap:
     """假摄像头：按顺序吐帧，每帧等一小会儿（模拟 15FPS 的时间流逝）。"""
 
@@ -122,6 +130,67 @@ def test_full_state_machine_walks_all_phases():
     assert os.path.exists(os.path.join(tmp, "summary.json")), "应当落盘 summary.json"
     setup_dir = os.path.join(tmp, "setup")
     assert os.path.isdir(setup_dir), "起步前自检的帧要存下来（复盘证据）"
+
+
+def test_cones_trigger_s_avoid_then_resume():
+    """锥桶出现 → S 型避让（avoid1/resume/avoid2）→ 回 track；绕行是低速、有兜底。"""
+    frames = ([_lane_frame()] * 6          # 自检窗口
+              + [_board_frame()] * 4       # 蓝板武装
+              + [_blank_frame()] * 2       # 探路
+              + [_lane_frame()] * 8        # 跟线
+              + [_cone_frame()] * 20       # 锥桶出现（防抖 3 帧 → avoid1）
+              + [_lane_frame()] * 20       # 锥桶移开 → 回 track
+              + [_blank_frame()] * 40)     # 丢线收尾
+    rc, tmp, csv = _run(frames, ["--cone-method", "hsv", "--cone-avoid",
+                                 "--cone-avoid-s", "0.15", "--cone-resume-s", "0.1",
+                                 "--acquire-s", "0.15", "--hold-s", "0.2"])
+    assert rc == 0, f"带锥桶的实跑应当正常返回 0，实际 {rc}"
+    phases = set(line.split(",")[1] for line in csv.splitlines()[1:] if line.count(",") > 2)
+    for need in ("avoid1", "resume", "avoid2"):
+        assert need in phases, f"绕行阶段 {need} 没走到（实际 {sorted(phases)}）"
+    assert "track" in phases, "绕行结束后应回到循迹"
+
+
+def test_cone_avoid_off_never_enters_avoid():
+    """没开 --cone-avoid 时，即使检测到锥桶也不绕行（默认行为不变）。"""
+    frames = ([_lane_frame()] * 6
+              + [_board_frame()] * 4
+              + [_blank_frame()] * 2
+              + [_lane_frame()] * 4
+              + [_cone_frame()] * 30
+              + [_lane_frame()] * 10
+              + [_blank_frame()] * 40)
+    rc, tmp, csv = _run(frames, ["--cone-method", "hsv",
+                                 "--acquire-s", "0.15", "--hold-s", "0.2"])
+    assert rc == 0
+    phases = set(line.split(",")[1] for line in csv.splitlines()[1:] if line.count(",") > 2)
+    assert not ({"avoid1", "avoid2"} & phases), (
+        f"未开 --cone-avoid 不应绕行，实际出现了 {sorted(phases & {'avoid1', 'resume', 'avoid2'})}")
+
+
+def test_cone_stop_blocks_then_resumes():
+    """--cone-stop：检测到锥桶 → 停车；锥桶移开 → 继续前进（实验室先验检测用）。"""
+    frames = ([_lane_frame()] * 6          # 自检窗口
+              + [_board_frame()] * 4       # 蓝板武装
+              + [_blank_frame()] * 2       # 探路
+              + [_lane_frame()] * 6        # 跟线
+              + [_cone_frame()] * 15       # 锥桶出现 → 停车（防抖 3 帧后 cone_stopped）
+              + [_lane_frame()] * 10       # 锥桶移开 → 恢复前进（回 track）
+              + [_blank_frame()] * 40)     # 丢线收尾
+    rc, tmp, csv = _run(frames, ["--cone-method", "hsv", "--cone-stop",
+                                 "--acquire-s", "0.15", "--hold-s", "0.2"])
+    assert rc == 0, f"实验室停锥桶模式应当正常返回 0，实际 {rc}"
+    phases = [line.split(",")[1] for line in csv.splitlines()[1:] if line.count(",") > 2]
+    if "track" in phases:
+        first_track = phases.index("track")
+        # 锥桶段停住：track 之后出现 stop
+        stop_after = next((i for i in range(first_track + 1, len(phases))
+                           if phases[i] == "stop"), -1)
+        assert stop_after > first_track, "锥桶出现后应有停车（stop 相位）"
+        # 锥桶移开后恢复：stop 之后再次出现 track
+        track_after = next((i for i in range(stop_after + 1, len(phases))
+                            if phases[i] == "track"), -1)
+        assert track_after > stop_after, "锥桶移开后应恢复前进（track 相位）"
 
 
 def test_never_blocks_means_never_drives():
@@ -216,6 +285,9 @@ def test_session_dir_is_created_before_csv():
 
 if __name__ == "__main__":
     for name in ("test_full_state_machine_walks_all_phases",
+                 "test_cones_trigger_s_avoid_then_resume",
+                 "test_cone_avoid_off_never_enters_avoid",
+                 "test_cone_stop_blocks_then_resumes",
                  "test_never_blocks_means_never_drives",
                  "test_board_too_early_is_handled",
                  "test_single_side_lane_keeps_running",
@@ -224,4 +296,4 @@ if __name__ == "__main__":
                  "test_session_dir_is_created_before_csv"):
         globals()[name]()
         print(f"  ✅ {name}")
-    print("test_lane_ref_run: all 7 passed")
+    print("test_lane_ref_run: all 10 passed")

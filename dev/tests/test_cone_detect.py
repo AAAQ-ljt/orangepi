@@ -73,6 +73,24 @@ def test_tracker_debounce():
     assert tr.present is False
 
 
+def test_model_channel_falls_back_on_local():
+    """本地没有 rknnlite/NPU：model 通道应回退 hsv 而不是崩（权重路径随便给）。"""
+    det = ConeDetector(method="model", model_path="/nonexistent/best4cls.rknn")
+    assert det.method == "hsv", "无 NPU 环境应回退 hsv"
+    img = _canvas()
+    _draw_cone(img, 300, 430, 90, 130)
+    cones = det.detect(img)
+    assert len(cones) >= 1, "回退到 hsv 后应仍能检出合成锥桶"
+
+
+def test_model_channel_requires_path():
+    try:
+        ConeDetector(method="model", model_path=None)
+        assert False, "model 通道不带路径应报错"
+    except ValueError:
+        pass
+
+
 if __name__ == "__main__":
     test_empty_scene_no_cones()
     test_single_cone_detected()
@@ -80,4 +98,6 @@ if __name__ == "__main__":
     test_small_noise_filtered()
     test_board_sized_blue_filtered()
     test_tracker_debounce()
+    test_model_channel_falls_back_on_local()
+    test_model_channel_requires_path()
     print("test_cone_detect: all passed")

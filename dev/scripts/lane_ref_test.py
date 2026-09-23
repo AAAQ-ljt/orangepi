@@ -509,7 +509,7 @@ def _write_site(args, params: LaneParams, target_px: Optional[float]) -> None:
 
 
 # ================================================================ 离线模式
-def analyze_image(path: str, params: LaneParams) -> int:
+def analyze_image(path: str, params: LaneParams, args=None) -> int:
     img = cv2.imread(path)
     if img is None:
         # Windows 本地验证时中文路径 cv2.imread 读不了 → 用 fromfile 兜底
@@ -532,15 +532,28 @@ def analyze_image(path: str, params: LaneParams) -> int:
           f"半宽={_fmt(r.half_width, '%.0f')}px{'实测' if r.width_measured else '种子'}"
           f"{'  ' + r.note if r.note else ''}")
     print(f"[REF] 镜头朝向体检：{det.visible_range(img)['text']}")
-    # 锥桶检测（本地单图验证：hsv 通道不依赖权重）
-    from vision.cone_detect import detect_cones_hsv
-    cones = detect_cones_hsv(img)
-    if cones:
-        for c in cones:
-            print(f"[REF] 锥桶: x={c.center_x:.0f} y底={c.bottom_y:.0f} "
-                  f"{c.width:.0f}x{c.height:.0f} conf={c.conf:.2f}")
-    else:
-        print("[REF] 锥桶: 无（hsv 通道，ROI 在中下部）")
+    # 锥桶检测（单图验证；hsv 不依赖权重，model 需要车上有 rknn 权重）
+    if args is not None and getattr(args, "cone_method", "off") != "off":
+        from vision.cone_detect import ConeDetector
+        cone_det = ConeDetector(method=args.cone_method, model_path=args.cone_model or None)
+        cones = cone_det.detect(img)
+        if cones:
+            for c in cones:
+                print(f"[REF] 锥桶({args.cone_method}): x={c.center_x:.0f} y底={c.bottom_y:.0f} "
+                      f"{c.width:.0f}x{c.height:.0f} conf={c.conf:.2f}")
+        elif cone_det.method == "hsv":
+            # 部署 ROI 没检出，但全图可能检出（比如训练图是手持朝前拍、锥桶在上半画面）：
+            # 提示“锥桶在 ROI 外”，区分“检测器不行”和“锥桶没进部署区域”
+            from vision.cone_detect import detect_cones_hsv
+            all_cones = detect_cones_hsv(img, roi=(0.0, 1.0, 0.0, 1.0))
+            if all_cones:
+                print(f"[REF] 锥桶: 部署 ROI 内无；全图检出 "
+                      f"{[f'x={c.center_x:.0f} y={c.xyxy[1]:.0f}~{c.xyxy[3]:.0f}' for c in all_cones[:3]]}"
+                      f" —— 锥桶在 ROI 外（现场把锥桶放进画面中下部再测）")
+            else:
+                print("[REF] 锥桶: 无（hsv 通道全图也没检出）")
+        else:
+            print("[REF] 锥桶: 无（model 通道）")
     return 0
 
 
@@ -706,10 +719,13 @@ def main() -> int:
                          "相机掉线/被抢走时不要傻等到 --max-seconds")
     ap.add_argument("--print-every", type=int, default=3)
     # ---- 锥桶检测与 S 型避让（P1-3 雏形；默认关，不影响纯循迹复测）----
-    ap.add_argument("--cone-method", choices=("hsv", "off"), default="off",
+    ap.add_argument("--cone-method", choices=("hsv", "model", "off"), default="off",
                     help="锥桶检测通道：hsv=蓝色连通域（参考实现同源，本地可验、不依赖权重）；"
-                         "off=关闭（默认）。模型通道（RKNN car4cls）在视觉进程/双进程架构里，"
-                         "单脚本模式暂用 hsv")
+                         "model=RKNN car4cls 检测（车上有权重时更抗环境误检，权重路径用 "
+                         "--cone-model 给）；off=关闭（默认）")
+    ap.add_argument("--cone-model", default="",
+                    help="--cone-method model 时的 RKNN 权重路径（默认取 "
+                         "/root/dev/models/ 下的 car4cls 权重）")
     ap.add_argument("--cone-avoid", action="store_true",
                     help="开启锥桶 S 型避让（检测到锥桶 → 左绕→回正→右绕→回 track）")
     ap.add_argument("--cone-stop", action="store_true",
@@ -766,7 +782,7 @@ def main() -> int:
     if args.replay:
         return replay(args.replay, params, args, steer_sign, (kp, ki, kd))
     if args.image:
-        return analyze_image(args.image, params)
+        return analyze_image(args.image, params, args)
 
     use_motor = not args.no_motor
     if use_motor and not args.allow_motion:
@@ -843,14 +859,27 @@ def main() -> int:
                     rc = 1
                 else:
                     det = LaneRefDetector(params)
-                    # ---- 锥桶检测（P1-3；hsv 通道本地可跑，模型通道在双进程架构）----
+                    # ---- 锥桶检测（P1-3；hsv 本地可跑，model 用车端 RKNN car4cls）----
                     cone_det = None
                     cone_tracker = None
                     if args.cone_method != "off":
                         from vision.cone_detect import ConeDetector, ConeTracker
-                        cone_det = ConeDetector(method="hsv")
+                        method = args.cone_method
+                        model_path = args.cone_model
+                        if method == "model" and not model_path:
+                            import glob as _glob
+                            cands = sorted(_glob.glob("/root/dev/models/*car4cls*.rknn")
+                                           + _glob.glob("/root/dev/models/*4cls*.rknn"))
+                            model_path = cands[0] if cands else ""
+                            if not model_path:
+                                print("[REF] ⚠️ --cone-method model 但没找到 /root/dev/models/"
+                                      " 下的 car4cls 权重（--cone-model 可显式指定）→ 回退 hsv")
+                                method = "hsv"
+                        cone_det = ConeDetector(method=method,
+                                                model_path=(model_path or None))
                         cone_tracker = ConeTracker()
-                        print(f"[REF] 锥桶检测：{args.cone_method} 通道"
+                        print(f"[REF] 锥桶检测：{method} 通道"
+                              + (f"（{model_path}）" if model_path else "")
                               + (" + S 型避让开" if args.cone_avoid else
                                  (" + 停车模式开" if args.cone_stop else "（--cone-avoid/--cone-stop 开启后才会响应）")))
                     cone_phase = None            # None/"avoid1"/"resume"/"avoid2"

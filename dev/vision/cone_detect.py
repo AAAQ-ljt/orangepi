@@ -162,14 +162,17 @@ class ConeDetector:
             self._load_model(profile_name, conf_threshold)
 
     def _load_model(self, profile_name: str, conf_threshold: Optional[float]) -> None:
-        from vision.elements import load_profile
-        from vision.postprocess import postprocess
-        from vision.rknn_detector import RKNNYoloDet
-        self._profile = load_profile(profile_name)
-        self._postprocess = postprocess
-        self._model = RKNNYoloDet(self.model_path, self._profile.imgsz)
-        if not self._model.load():
-            print(f"[CONE] ⚠️ RKNN 加载失败（{self.model_path}），回退 HSV 通道")
+        try:
+            from vision.elements import load_profile
+            from vision.postprocess import postprocess
+            from vision.rknn_detector import RKNNYoloDet
+            self._profile = load_profile(profile_name)
+            self._postprocess = postprocess
+            self._model = RKNNYoloDet(self.model_path, self._profile.imgsz)
+            if not self._model.load():              # load 内部延迟 import rknnlite
+                raise RuntimeError("RKNNLite load 失败")
+        except Exception as exc:                    # 权重缺失/本机无 NPU/加载失败 → 一律回退 hsv
+            print(f"[CONE] ⚠️ RKNN 加载失败（{self.model_path}：{exc}）→ 回退 HSV 通道")
             self._model = None
             self.method = "hsv"
             return

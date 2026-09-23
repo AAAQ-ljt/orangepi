@@ -58,7 +58,7 @@ import numpy as np
 from config import settings
 from control.filters import ErrorFilter
 from control.lane_control import (BigErrorGuard, LIMIT_DEG0, LossGuard, LossState,
-                                  NEUTRAL_US, PidRef, SPEED_FAST_US, SPEED_SLOW_US,
+                                  NEUTRAL_US, OscillationGuard, PidRef, SPEED_FAST_US, SPEED_SLOW_US,
                                   SPEED_FLOOR_MARGIN_US, adaptive_pulse, floor_pulse,
                                   gains_for)
 from vision.camera_guard import camera_exclusive, open_camera
@@ -436,7 +436,26 @@ def _preflight(frames: List[np.ndarray], args, params: LaneParams) -> Tuple[Lane
     if not aim["ok"]:
         print("[REF]    （体检不通过也还能跑：带扫描如果锁到了线，说明线在画面里，"
               "只是没进下半部。要根治就是机械压角度/换广角）")
-    return params, target
+    return params, target, not weak
+
+
+def apply_steer_cap(center: float, steer: float, both_sides: bool,
+                     n_left: int, n_right: int,
+                     single_limit_deg: float = 5.0, weak_limit_deg: float = 10.0) -> float:
+    """对不可靠读数的舵角输出做额外限幅：
+
+      · 单侧兜底帧（中心是"可见线+半宽"推的）→ ±single_limit_deg（±5°）
+      · 双侧但在的一侧线段 ≤2 的"弱对"帧 → ±weak_limit_deg（±10°）
+        2026-09-23 操场实测：弱对帧的误差一帧可跳 50~140px（占大跳变的 60%），
+        不限幅的话 kp+kd 会把这种假误差放大成满舵，车被自己的读数甩动。
+      双侧且两侧都有 ≥3 段的帧 → 不额外限幅（正常跟线）。
+    返回限幅后的舵角。"""
+    if both_sides and min(n_left, n_right) >= 3:
+        return steer
+    cap = single_limit_deg if not both_sides else weak_limit_deg
+    if abs(steer - center) > cap:
+        return center + np.sign(steer - center) * cap
+    return steer
 
 
 def guard_trip_text(err_px: float, hold_s: float,
@@ -634,6 +653,12 @@ def main() -> int:
                     help="发车后【还没见过一次线】的低速探路窗口（秒）")
     ap.add_argument("--hold-s", type=float, default=HOLD_S0,
                     help=f"丢线维持窗口（默认 {HOLD_S0}s：沿用上次中心、误差衰减回中位）")
+    ap.add_argument("--single-limit-deg", type=float, default=5.0,
+                    help="**单侧兜底帧**的舵角限幅（默认 ±5°）：运动时只靠一侧线推出来的中心"
+                         "经常是错的，限幅小它就没法把车甩起来（2026-09-23 操场 S 弯主振荡源）")
+    ap.add_argument("--weak-limit-deg", type=float, default=10.0,
+                    help="**弱对帧**（双侧但在的一侧 ≤2 段）的舵角限幅（默认 ±10°）：这类帧的"
+                         "中心一跳 50~140px（占大跳变的 60%），限小一点就不至于被自己的读数甩动")
     ap.add_argument("--err-stop-px", type=float, default=60.0, help="跑偏保护：误差阈值（像素）")
     ap.add_argument("--err-stop-s", type=float, default=1.5,
                     help="跑偏保护：连续这么多秒大误差就停车（0=关闭）")
@@ -727,8 +752,10 @@ def main() -> int:
     state = {"stopped": False, "driver": None, "restored": False, "used_motor": use_motor}
     install_signal_guard(state)
 
+    center_deg = float(settings.SERVO_CENTER_ANGLE)   # ★ 舵机中位（=机械直行角，现场标定）
     gate = StartGate()
-    pid = PidRef(kp, ki, kd, args.limit_deg, args.smooth, sign=steer_sign)
+    pid = PidRef(kp, ki, kd, args.limit_deg, args.smooth, sign=steer_sign,
+                 center=center_deg)
     # ★ 滤波的离群阈值单位是**误差单位（1 单位 = 4px）**，而本脚本的误差是**像素**。
     #   上一版把 settings 的 15 直接当像素用 → 任何 >15px 的变化都被当离群点丢掉 →
     #   滤波后误差长期卡在旧值上，车对真实偏差不响应（实测读数在 345/367 间跳时尤其致命）。
@@ -737,10 +764,12 @@ def main() -> int:
     err_filter = None if args.no_filter else ErrorFilter(args.filter_window, outlier_px)
     loss = LossGuard(args.hold_s)
     big_err = BigErrorGuard(args.err_stop_px, args.err_stop_s)
+    osc = OscillationGuard()          # 画龙（S 弯）检测：舵角来回打满幅 → 停车
 
     print("[REF] 参考实现版循迹（起步前自检 → 板发车 → 循迹 → 再见板停车）")
     print(f"[REF] PID kp={kp:.3f} ki={ki:.3f} kd={kd:.3f} 限幅±{args.limit_deg}° "
-          f"平滑={args.smooth} 目标比={params.target_ratio:.3f} 选线={args.pick} "
+          f"舵机中位={center_deg:.1f}°(servo_center_angle) 平滑={args.smooth} "
+          f"目标比={params.target_ratio:.3f} 选线={args.pick} "
           f"转向符号={steer_sign:+.0f}"
           f"（{'+1 角度增大=右转' if steer_sign > 0 else '−1 角度增大=左转'}）")
     print(f"[REF] 脉宽 起步={args.start_us:.0f} → 循迹={args.speed_us:.0f}us"
@@ -778,12 +807,13 @@ def main() -> int:
                     det = LaneRefDetector(params)
                     seen_board = False
                     preflight_done = False
+                    station_ok = True          # 自检通过才能发车（2026-09-23 操场实测加）
                     launch_t: Optional[float] = None
                     target_px: Optional[float] = None
                     setup_frames: List[np.ndarray] = []
                     setup_deadline = time.time() + args.setup_timeout_s
                     warned_early_board = False
-                    steer = 90.0
+                    steer = center_deg
                     last_center: Optional[float] = None
                     n_center_frames = 0
                     target_w = float(settings.IMG_W)
@@ -843,7 +873,11 @@ def main() -> int:
                         if not seen_board and not preflight_done:
                             preflight_done = True
                             if len(setup_frames) >= 3:
-                                params, target_px = _preflight(setup_frames, args, params)
+                                params, target_px, station_ok = _preflight(setup_frames, args, params)
+                                if not station_ok:
+                                    print("[REF] 🚫 自检证据不足 → **本次不会发车**；"
+                                          "请重新摆正车（车头朝赛道、尽量居中）后 Ctrl-C 重跑。"
+                                          "强行发车只会立刻触发保护，没有意义")
                                 det = LaneRefDetector(params)
                                 if target_px is None:
                                     target_px = params.target_ratio * target_w
@@ -867,7 +901,10 @@ def main() -> int:
                         if r.center_x is not None and r.quality >= args.min_quality:
                             n_center_frames += 1
 
-                        driving = seen_board and not gs.blocked
+                        driving = seen_board and not gs.blocked and station_ok
+                        if not station_ok and seen_board and not gs.blocked                                 and (frames % 30 == 0):
+                            print("[REF] 🚫 自检未通过（证据不足），保持停车不动。"
+                                  "重新摆车后 Ctrl-C 重跑")
                         if driving and launch_t is None:
                             launch_t = now
                             pid.reset()
@@ -903,9 +940,17 @@ def main() -> int:
                         elif driving:
                             if ls.phase == "fresh":
                                 steer = pid.step(err_c)
+                                # ★ 单侧/弱对帧的中心不可靠（实测一跳 50~140px），
+                                #   单独收窄它们的舵角：还能走，但甩不动
+                                steer = apply_steer_cap(center_deg, steer, r.both_sides,
+                                                        r.n_left, r.n_right,
+                                                        args.single_limit_deg,
+                                                        args.weak_limit_deg)
                                 angle = steer
                                 out_us = adaptive_pulse(err_c, args.speed_us,
                                                         args.speed_fast, args.speed_slow)
+                                if not r.both_sides:
+                                    out_us = floor_pulse(args.speed_us, args.speed_slow)
                                 phase = "track"
                                 last_center = r.center_x
                                 n_track += 1
@@ -915,7 +960,7 @@ def main() -> int:
                                 if err_filter is not None:
                                     err_filter.reset()
                                 if (now - (launch_t or now)) < args.acquire_s:
-                                    steer, angle, out_us, phase = 90.0, 90.0, args.start_us, "acquire"
+                                    steer, angle, out_us, phase = center_deg, center_deg, args.start_us, "acquire"
                                 else:
                                     phase = "lost"
                                     state["stopped"] = True
@@ -937,6 +982,17 @@ def main() -> int:
                                 state["stopped"] = True
                                 print(f"[REF] ⚠️ 丢线 {ls.since_s:.1f}s 没恢复 → 停车"
                                       f"（保守：不带垃圾读数继续跑）")
+
+                        # ★ 画龙（S 弯）检测：这一帧的舵角已经算完，统计它是否在窗口内来回打满幅
+                        #   （2026-09-23 操场实测：舵机 75°↔105° 来回甩、误差 ±100~300 翻符号，
+                        #    连续计时型跑偏保护永远凑不满 → 用拐角次数直接抓）
+                        if driving and not trip and not state["stopped"]:
+                            if osc.update(now, angle, center_deg):
+                                trip = True
+                                print("[REF] ❌ 检测到画龙（S 弯）：舵机 2s 内大幅来回摆多次"
+                                      " → 控制失稳，停车（先查单侧兜底 / kp 太高 / 平滑太小）")
+                        if trip:
+                            state["stopped"] = True
 
                         if use_motor and pca is not None:
                             pca.set_steering_angle(angle)

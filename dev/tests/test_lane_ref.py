@@ -284,7 +284,7 @@ def test_preflight_refuses_jittery_target():
         lr2.LaneRefDetector.detect = fake_detect
         lt.sweep_bands = lambda fr, p, **kw: [dict(strength)]
         base = LaneParams.from_settings()
-        p_out, t_out = lt._preflight(frames, args, LaneParams.from_settings())
+        p_out, t_out, _ok = lt._preflight(frames, args, LaneParams.from_settings())
         assert t_out is None, f"跨距大时不采纳目标点，实际 {t_out}"
         assert abs(p_out.target_ratio - base.target_ratio) < 1e-9,             "params.target_ratio 必须还原（否则调用方会拿自检值当配置值）"
     finally:
@@ -336,13 +336,15 @@ def test_preflight_refuses_weak_evidence():
     orig = lt.sweep_bands
     try:
         lt.sweep_bands = lambda fr, p, **kw: [dict(row)]
-        p_weak, t_weak = lt._preflight(frames, args, LaneParams.from_settings())
+        p_weak, t_weak, ok_weak = lt._preflight(frames, args, LaneParams.from_settings())
         assert t_weak is None, f"证据弱时不该采纳自检目标点，实际 {t_weak}"
+        assert not ok_weak, "证据弱时 station_ok 必须为 False（否则车会发车）"
         assert abs(p_weak.roi_top_ratio - base.roi_top_ratio) < 1e-9,             "证据弱时不该采纳自检的 ROI"
         lt.sweep_bands = lambda fr, p, **kw: [dict(row, run_max=60.0, support_frac=0.3,
                                                    q_med=1.0)]
-        _p_ok, t_ok = lt._preflight(frames, args, LaneParams.from_settings())
+        _p_ok, t_ok, ok_good = lt._preflight(frames, args, LaneParams.from_settings())
         assert t_ok is not None, "证据够时必须给出目标点"
+        assert ok_good, "证据够时 station_ok 必须为 True"
     finally:
         lt.sweep_bands = orig
 
@@ -368,6 +370,33 @@ def test_pid_reset_clears_state():
         pid.step(100.0)
     pid.reset()
     assert pid.integral == 0.0 and pid.last_error == 0.0 and pid.last_angle is None
+
+
+def test_kd_derivative_is_clamped():
+    """微分项输入必须限幅：弱对帧误差一帧跳 50~140px，不钳位 kd 会放大成满舵。
+
+    用大 kd 放大差异：无钳位时 step(100) 的 D 项 = 1.0*100，钳位后 = 1.0*20。
+    """
+    from control.lane_control import DERIV_CLAMP_PX
+    pid = PidRef(kp=0.0, ki=0.0, kd=1.0, limit_deg=90, smooth=1.0, center=90.0)
+    pid.step(0.0)
+    out = pid.step(100.0)
+    expect = 90.0 + DERIV_CLAMP_PX
+    assert abs(out - expect) < 1e-6, f"D 项应被钳到 ±{DERIV_CLAMP_PX}px，实际 {out - 90.0}"
+
+
+def test_weak_pair_steer_cap():
+    """单侧/弱对帧的舵角要额外限幅（否则读数一跳 100px，kp+kd 就把舵打满）。"""
+    from scripts.lane_ref_test import apply_steer_cap
+    # 正常双侧（两侧都 ≥3 段）→ 不限幅
+    assert apply_steer_cap(86.5, 100.0, True, 5, 4) == 100.0
+    # 弱对（一侧 2 段）→ 掐到 ±10°
+    assert abs(apply_steer_cap(86.5, 100.0, True, 2, 5) - 86.5) <= 10.0 + 1e-9
+    assert abs(apply_steer_cap(86.5, 60.0, True, 5, 1) - 86.5) <= 10.0 + 1e-9
+    # 单侧 → 掐到 ±5°
+    assert abs(apply_steer_cap(86.5, 100.0, False, 3, 0) - 86.5) <= 5.0 + 1e-9
+    # 本来就小 → 不动
+    assert apply_steer_cap(86.5, 88.0, False, 3, 0) == 88.0
 
 
 def test_angle_limited_and_smoothed():
@@ -407,6 +436,57 @@ def test_loss_guard_ladder():
     assert st.phase == "lost" and st.decay == 0.0 and not st.driving
     # 恢复读数 → 立刻回到 fresh
     assert g.update(0.7, True).phase == "fresh"
+
+
+def test_oscillation_guard_detects_s_wave():
+    """画龙（S 弯）检测：舵角 2s 内大幅来回摆多次 → 判失控。
+
+    2026-09-23 操场实测：S 弯时舵机 75°↔105°（限幅）来回甩，误差 ±100~300 翻符号，
+    连续计时型跑偏保护永远凑不满 → 必须用"摆幅次数"直接抓。
+    """
+    from control.lane_control import OscillationGuard
+    # 实测 S 弯的幅度就是 ±15°（限幅值），所以 amp 必须 < 15 才能抓到它
+    g = OscillationGuard(window_s=2.0, flips=3, amp_deg=12.0)
+    # 真画龙：75/105/75/105 来回
+    t = 0.0
+    seq = [75.0, 105.0, 75.0, 105.0, 75.0]
+    fired = False
+    for a in seq:
+        t += 0.1
+        if g.update(t, a):
+            fired = True
+            break
+    assert fired, "大幅来回摆必须触发"
+    # 正常跟线：89~91 小幅摆动 → 不触发
+    g2 = OscillationGuard(window_s=2.0, flips=3, amp_deg=18.0)
+    for i in range(50):
+        assert not g2.update(i * 0.1, 90.0 + (3.0 if i % 2 else -3.0))
+    # 单次大摆不触发：85 一下就不算
+    g3 = OscillationGuard(window_s=2.0, flips=3, amp_deg=18.0)
+    for a in (80.0, 100.0, 90.0, 90.0, 90.0):
+        assert not g3.update(t, a)
+
+
+def test_big_error_guard_fires_on_oscillation_burst():
+    """跑偏保护的**振荡判据**：窗口内大误差占比高也要触发（S 弯时连续计时永远凑不满）。"""
+    g = BigErrorGuard(err_px=60.0, hold_s=1.5, frac_window_s=1.5, frac=0.6)
+    # 模拟 S 弯：误差大但翻符号（+100/-100 交替），从不连续 1.5s
+    t = 0.0
+    fired = False
+    for i in range(20):
+        t += 0.1
+        e = 100.0 if i % 2 else -100.0
+        if g.update(t, e, e):
+            fired = True
+            break
+    assert fired, "高占比大误差也必须触发（否则 S 弯永远不停）"
+    # 正常：单帧毛刺 + 小误差混合 → 不触发
+    g2 = BigErrorGuard(err_px=60.0, hold_s=1.5, frac_window_s=1.5, frac=0.8)
+    t = 0.0
+    for i in range(30):
+        t += 0.1
+        e = 150.0 if (i % 7 == 0) else 10.0
+        assert not g2.update(t, e, e), "毛刺不该触发"
 
 
 def test_loss_guard_never_valid():

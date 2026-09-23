@@ -68,19 +68,23 @@ def _planner_steers_toward_lane_center_body():
     # （site.yaml 可标定 steer_sign: -1——实车"角度增大=左转"，见 config/site.py），
     # 所以这里断言"偏移方向与符号一致"，不写死 >90/<90。
     sign = float(settings.STEER_SIGN)
+    center = float(settings.SERVO_CENTER_ANGLE)
     right = planner.plan(PerceptionMessage(center_x=400.0), dt=0.05)
-    assert (right.steering - 90.0) * sign > 0, \
+    assert (right.steering - center) * sign > 0, \
         f"center_x>target 应沿 STEER_SIGN({sign:+g}) 方向修正，实际 {right.steering}"
     planner.reset()
     left = planner.plan(PerceptionMessage(center_x=240.0), dt=0.05)
-    assert (left.steering - 90.0) * sign < 0, \
+    assert (left.steering - center) * sign < 0, \
         f"center_x<target 应反向修正，实际 {left.steering}"
 
 
 def test_planner_center_x_no_error():
     planner = Planner(target_x=320.0)
     target = planner.plan(PerceptionMessage(center_x=320.0), dt=0.05)
-    assert abs(target.steering - 90.0) < 1e-6
+    # ★ 中位 = settings.SERVO_CENTER_ANGLE（site.yaml 可标定 servo_center_angle: 86.5）——
+    #   断言必须跟配置走，否则车端标定后这里就红
+    center = float(settings.SERVO_CENTER_ANGLE)
+    assert abs(target.steering - center) < 1e-6,         f"无误差时舵机应停在标定中位 {center}，实际 {target.steering}"
 
 
 def test_planner_respects_stop_and_scale():
@@ -140,7 +144,7 @@ def test_driver_not_armed_stays_safe():
     driver = Driver(pca=mock, real=False)     # 未 arm
     driver.execute(Planner().plan(PerceptionMessage(center_x=400.0)))
     assert mock.channels[1] == 0.0, "未解锁时不允许输出动力"
-    assert mock.channels[0] == 90.0, "未解锁时舵机应回中"
+    assert abs(mock.channels[0] - float(settings.SERVO_CENTER_ANGLE)) < 1e-6,         "未解锁时舵机应回标定中位（site.yaml 的 servo_center_angle）"
 
 
 if __name__ == "__main__":

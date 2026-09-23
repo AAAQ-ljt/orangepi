@@ -157,9 +157,12 @@ def _annotate(frame: np.ndarray, name: str | None = None, out_dir: str | None = 
         y_mid = (roi_y0 + roi_y1) // 2
         cv2.line(vis, (int(obs.left_x), y_mid), (int(obs.left_x), roi_y1), (255, 80, 0), 2)
         cv2.line(vis, (int(obs.right_x), y_mid), (int(obs.right_x), roi_y1), (0, 0, 255), 2)
-        cv2.circle(vis, (int(obs.center_x), y_mid), 4, (0, 255, 255), -1)
-        cv2.putText(vis, f"center={obs.center_x:.0f}", (int(obs.center_x) - 40, y_mid - 8),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1, cv2.LINE_AA)
+        # ⚠️ 两侧都有线 ≠ 一定有中心：配对宽度闸门会把"假对"否掉（center=None）
+        #   —— 2026-09-23 现场实拍第一帧就崩在 int(None)。这里必须再查一次。
+        if obs.center_x is not None:
+            cv2.circle(vis, (int(obs.center_x), y_mid), 4, (0, 255, 255), -1)
+            cv2.putText(vis, f"center={obs.center_x:.0f}", (int(obs.center_x) - 40, y_mid - 8),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1, cv2.LINE_AA)
 
     cv2.line(vis, (0, roi_y0), (frame.shape[1], roi_y0), (255, 128, 0), 1)
     cv2.line(vis, (0, roi_y1), (frame.shape[1], roi_y1), (255, 128, 0), 1)
@@ -259,7 +262,13 @@ def _print_roi_sweep(frame: np.ndarray) -> None:
 
 
 def verdict_of(frame: np.ndarray) -> tuple:
-    """(是否可用, 结论文本, 支持线段数) —— 终端与叠加图共用同一套判据。"""
+    """(是否可用, 结论文本, 支持线段数) —— 终端与叠加图共用同一套判据。
+
+    ★ 2026-09-23 现场修正：**用候选带扫描的最好一档判定**，不再只用配置带。
+    现场实测：配置带（0.35~0.58）是 0 行支持 → 按旧逻辑判 ❌；但 0.25~0.75 档有
+    70 行连续支持、质量 1.00 —— 探针的结论必须和 lane_ref_test 的自检一致，
+    否则明明能锁到却告诉人"不可用"。
+    """
     obs = _scan(frame)
     quality_ok = float(getattr(settings, "ARBITER_CONF_THRESH", 0.28))
     if obs.center_x is not None and obs.quality >= quality_ok:
@@ -270,11 +279,27 @@ def verdict_of(frame: np.ndarray) -> tuple:
                 f"R={'-' if obs.right_x is None else f'{obs.right_x:.0f}'}，"
                 f"支持线段 {obs.valid_rows} 条）",
                 (obs.valid_rows, obs.valid_rows))
-    why = "没配到成对车道线" if obs.center_x is None else \
-        f"读数质量偏低（{obs.quality:.2f} < {quality_ok:.2f}）"
+    table = sweep_bands([frame], LaneParams.from_settings(), max_frames=1)
+    best = next((r for r in table if r["paired_frames"] > 0), None)
+    if best is not None and best["q_med"] >= quality_ok and best["run_max"] >= 20:
+        cfg = LaneParams.from_settings()
+        band_ok = (abs(best["roi_top_ratio"] - cfg.roi_top_ratio) < 1e-6
+                   and abs(best["roi_bottom_ratio"] - cfg.roi_bottom_ratio) < 1e-6)
+        note = "" if band_ok else \
+            f"（是候选带 {best['roi_top_ratio']:.2f}~{best['roi_bottom_ratio']:.2f}，" \
+            f"当前配置带 {cfg.roi_top_ratio:.2f}~{cfg.roi_bottom_ratio:.2f} 锁不到）"
+        return (True,
+                f"✅ 可用：带 {best['roi_top_ratio']:.2f}~{best['roi_bottom_ratio']:.2f}，"
+                f"连续支持 {best['run_max']:.0f} 行、质量 {best['q_med']:.2f}{note}"
+                f"；自检会自动采用这一档",
+                (int(best["run_max"]), int(best["run_max"])))
+    if best is None:
+        why = "所有候选带都锁不到两条线"
+    else:
+        why = f"最好的一档也只有 {best['run_max']:.0f} 行连续支持 / 质量 {best['q_med']:.2f}"
     return (False,
             f"❌ {why}（支持线段 {obs.valid_rows} 条）→ 看上面的『逐行白点图』确认白线在哪、"
-            f"斜率对不对；候选带表里若有『有中心』的一档，就用 --roi-top/--roi-bottom-ratio 指定它",
+            f"斜率对不对；连续支持 < 20 行基本是反光/碎边被拟合出来的",
             (obs.valid_rows, obs.valid_rows))
 
 

@@ -38,6 +38,10 @@ REF_GAIN_WIDTH = 320
 KP_REF, KI_REF, KD_REF = 0.15, 0.01, 0.12   # oldCode/src/config/config.cpp（320 宽口径）
 KP0, KI0, KD0 = KP_REF, KI_REF, KD_REF      # 默认仍按参考原数字给（见 gains_for 的 mode）
 INTEGRAL_LIMIT = 50.0                # 参考实现：max_integral = 50
+# ★ 微分项输入（Δerror/帧）钳位：参考实现没有，但 2026-09-23 操场实测必须加 ——
+#   检测器弱对帧能把误差一帧跳 50~140px（p90=53px），kd=0.12 会把 100px 跳变放大成 12° 满舵，
+#   车被自己的读数甩动。正常跟线 Δe p50=9px，所以 ±20px 的钳位不影响真运动。
+DERIV_CLAMP_PX = 20.0
 LIMIT_DEG0 = 15.0                    # 参考实现：angle_limit = 15
 SMOOTH0 = 0.7                        # 参考实现：smooth_factor = 0.7
 SPEED_FAST_US, SPEED_SLOW_US = 0.0, -10.0   # 参考是 +200/-300（它自己的 PWM 量纲）
@@ -71,11 +75,14 @@ class PidRef:
 
     def __init__(self, kp: float = KP0, ki: float = KI0, kd: float = KD0,
                  limit_deg: float = LIMIT_DEG0, smooth: float = SMOOTH0,
-                 sign: float = 1.0) -> None:
+                 sign: float = 1.0, center: float = 90.0) -> None:
         self.kp, self.ki, self.kd = float(kp), float(ki), float(kd)
         self.limit_deg = float(limit_deg)
         self.smooth = float(smooth)
         self.sign = float(sign)      # +1：角度增大=右转（与 settings.STEER_SIGN 同口径）
+        # ★ 中位不再写死 90：本项目舵机 90°≠机械直行（2026-09-23 操场实测：固定 90°
+        #   车自己绕大弯）。循迹必须以 settings.SERVO_CENTER_ANGLE 为中位。
+        self.center = float(center)
         self.integral = 0.0
         self.last_error = 0.0
         self.last_angle: Optional[float] = None
@@ -88,12 +95,13 @@ class PidRef:
     def step(self, error: float) -> float:
         self.integral += float(error)
         self.integral = max(-INTEGRAL_LIMIT, min(INTEGRAL_LIMIT, self.integral))
-        pid = self.kp * error + self.ki * self.integral + self.kd * (error - self.last_error)
+        delta = max(-DERIV_CLAMP_PX, min(DERIV_CLAMP_PX, error - self.last_error))
+        pid = self.kp * error + self.ki * self.integral + self.kd * delta
         self.last_error = float(error)
         # 参考实现是 `90 - pid`；这里接上 settings.STEER_SIGN 让它和 planner 同口径：
         #   sign=+1（角度增大=右转）→ 90 + pid；sign=-1 → 90 - pid（= 参考实现原式）
-        angle = 90.0 + self.sign * pid
-        angle = max(90.0 - self.limit_deg, min(90.0 + self.limit_deg, angle))
+        angle = self.center + self.sign * pid
+        angle = max(self.center - self.limit_deg, min(self.center + self.limit_deg, angle))
         if self.last_angle is None:
             self.last_angle = angle
         else:                                                # 输出平滑，抑制舵机抖动
@@ -173,35 +181,90 @@ class LossGuard:
         return LossState("lost", since, 0.0)
 
 
+class OscillationGuard:
+    """画龙（S 弯）检测：舵角在窗口内来回打满幅的次数太多 = 控制失稳。
+
+    2026-09-23 操场实测：误差 ±100~300 疯狂翻转，舵机 75°↔105°（限幅）来回甩，
+    跑偏保护（连续计时）凑不满 → 车 S 弯直到冲出去。用"舵角大翻转次数"直接抓画龙：
+    每次从"大角度一侧"翻到"另一侧"记一次，窗口内 ≥ flips 次就判失控停车。
+    """
+
+    def __init__(self, window_s: float = 2.0, flips: int = 3, amp_deg: float = 12.0) -> None:
+        self.window_s = float(window_s)
+        self.flips = int(flips)
+        self.amp_deg = float(amp_deg)     # |angle-90| 超过它才算"大幅"
+        self._recent: list = []           # [(t, angle)]
+
+    def reset(self) -> None:
+        self._recent.clear()
+
+    def update(self, now: float, angle: float, center: float = 90.0) -> bool:
+        """返回 True = 判定画龙失控，要求停车（幅度相对舵机中位）。"""
+        cutoff = float(now) - self.window_s
+        self._recent = [(t, a) for t, a in self._recent if t >= cutoff]
+        self._recent.append((float(now), float(angle)))
+        if len(self._recent) < 4:
+            return False
+        # 数"完整来回"：符号翻转且幅度 ≥ amp → 每次翻符号记一次翻转
+        signs = []
+        for _t, a in self._recent:
+            d = a - float(center)
+            if abs(d) >= self.amp_deg:
+                signs.append(1 if d > 0 else -1)
+        flips_n = sum(1 for i in range(1, len(signs)) if signs[i] != signs[i - 1])
+        return flips_n >= self.flips
+
+
 class BigErrorGuard:
-    """跑偏保护：滤波后误差**持续**很大 → 判定"锁错线/方向反了"，要求停车。
+    """跑偏保护：误差**持续或高占比**很大 → 判定"锁错线/失控"，要求停车。
 
     参考实现没有这一层。2026-09-21 实验室实测：误差恒在 −33px、舵机一直往左打到
     冲出跑道，226 帧里误差从没回到 0 附近 —— 没有兜底就会一直跑下去。
     """
 
-    def __init__(self, err_px: float = 60.0, hold_s: float = 1.5) -> None:
+    def __init__(self, err_px: float = 60.0, hold_s: float = 1.5,
+                 frac_window_s: float = 1.5, frac: float = 0.6) -> None:
         self.err_px = float(err_px)
         self.hold_s = float(hold_s)
+        self.frac_window_s = float(frac_window_s)   # 振荡判据的统计窗口
+        self.frac = float(frac)                     # 窗口内大误差帧占比超过它 → 触发
         self._since: Optional[float] = None
+        self._recent: list = []                     # [(t, big?)] 滚动
 
     def reset(self) -> None:
         self._since = None
+        self._recent.clear()
 
     def update(self, now: float, error: Optional[float],
                raw_error: Optional[float] = None) -> bool:
         """返回 True = 本次触发（调用方应立刻停车）。
 
         `error` 是送进控制器的（滤波后）值，`raw_error` 是**原始**误差。
-        ★ 两个都要看：2026-09-22 落地实测发现只盯滤波值会被"滤波冻结"骗过去 ——
+        ★ 两个都要看：2026-09-22 落地实测发现只盯滤波值会被"滤波冻结"骗过去——
         原始误差连续 4s 在 ≥40px，而滤波后一直卡在 30px 以下，跑偏保护形同虚设。
-        持续时间足够长（hold_s）本身就能排除单帧毛刺，所以取两者里的大者。
+        持续时间足够长（hold_s)本身就能排除单帧毛刺，所以取两者里的大者。
+
+        ★ 2026-09-23 操场实测补"振荡判据"：S 弯时误差 ±100~300 疯狂翻符号，
+        连续 1.5s ≥阈值永远凑不满 → 保护从不触发。窗口内大误差帧**占比**超阈值
+        也触发（0.6 = 约每秒 9 帧里有 6 帧都大，必是失控不是转弯）。
         """
+        if self.hold_s <= 0:
+            return False
         vals = [abs(float(v)) for v in (error, raw_error) if v is not None]
-        if self.hold_s <= 0 or not vals or max(vals) < self.err_px:
+        big = bool(vals) and max(vals) >= self.err_px
+        if not big:
             self._since = None
-            return False
-        if self._since is None:
-            self._since = float(now)
-            return False
-        return (float(now) - self._since) >= self.hold_s
+        else:
+            if self._since is None:
+                self._since = float(now)
+            if (float(now) - self._since) >= self.hold_s:
+                return True
+        # 振荡判据：滚动窗口
+        cutoff = float(now) - self.frac_window_s
+        self._recent = [(t, b) for t, b in self._recent if t >= cutoff]
+        self._recent.append((float(now), big))
+        if self.frac_window_s > 0 and len(self._recent) >= 6:
+            frac_big = sum(1 for _, b in self._recent if b) / float(len(self._recent))
+            if frac_big >= self.frac:
+                return True
+        return False

@@ -12,12 +12,13 @@ echo "[HW] stopping opi-control to release PCA9685"
 systemctl stop opi-control.service || true
 sleep 1
 
+# 任何退出路径——Ctrl+C/断线(SSH 关会话 SIGHUP)/报错——都要把 opi-control 交还
 cleanup() {
   echo "[HW] restoring opi-control"
   systemctl start opi-control.service || true
   sleep 1
 }
-trap cleanup EXIT
+trap cleanup EXIT INT TERM HUP
 
 echo "[HW] running: $*"
 "$@"

@@ -105,6 +105,49 @@ CONE_AVOID_US = 1548                        # 绕行期间油门脉宽（>死区
 CONE_SEGUE_S = 0.8                          # 两段绕行之间的回正直行时长（秒）
 CONE_COOLDOWN_S = 3.0                       # 一轮绕行结束后，多久内不再触发新绕行（防同一个锥桶二进宫）
 
+# ---------------------------------------------------------------- 元素检测（颜色通道，官方 2026 配方，2026-10-09 T4）
+# 全部见 vision/color_elements.py；数值以官方 14 号 demo / 穿越火线 demo 为标定起点，现场可调。
+# ⚠️ 2026-10-09 离线实测：锥桶 CONE_GATE_ROI 上沿 0.35 会把数据集里的锥桶（蓝像素 98% 在
+# y<168）整个切掉；待操场实拍帧复验后可能整体下修（候选 (85,55,55)~(125,255,255) + ROI 0.05）。
+
+# 斑马线（demo detectZebra：灰度二值化 + 连通域计数）
+ZEBRA_ROI = (0.00, 1.00, 0.35, 1.00)        # (x0,x1,y0,y1) 比例，下摄下半
+ZEBRA_THRESH = 180                          # 灰度阈值（>180 算白条纹）
+ZEBRA_MIN_AREA = 200                        # 单个白连通域最小面积
+ZEBRA_MIN_COUNT = 4                         # ≥4 条白条纹判斑马线（车道线只有 1~2 条细边）
+# ⚠️ 2026-10-09 离线实测：官方数字对远距斑马线偏严（我们的图集要 ROI0.10/area60/cnt3 才 100%）；
+# 但放太松会把操场白线数成条纹（logs_pull 误检 58~95%，该集无斑马线真值，仅警示）。
+# 默认保持官方纯计数；现场用叠加图标定再决定是否开形状闸门与放宽面积。
+ZEBRA_USE_SHAPE_GATE = False                # True=开形状闸门（条纹须扁矩形+顶边同排）
+
+# 红绿灯（demo detectTrafficLight：HSV 红绿互比 + 分区校验）
+TRAFFIC_ROI = (0.0, 1.0, 0.0, 1.0)          # 全屏（灯在画面上方，云台摄）
+TRAFFIC_RED_LOW1 = (0, 100, 100)            # 红 H 低区间
+TRAFFIC_RED_HIGH1 = (10, 255, 255)
+TRAFFIC_RED_LOW2 = (170, 100, 100)          # 红 H 高区间（色相环绕）
+TRAFFIC_RED_HIGH2 = (180, 255, 255)
+TRAFFIC_GREEN_LOW = (35, 100, 100)
+TRAFFIC_GREEN_HIGH = (85, 255, 255)
+TRAFFIC_MIN_AREA = 500                      # 红/绿面积 ≥ 该值才参与互比
+TRAFFIC_USE_ZONE = True                     # 分区校验：红在左 1/3、绿在右 1/3（横向三灯珠）
+
+# 停车区黄色胶布（demo detectYellowZone）
+PARK_ZONE_ROI = (0.0, 1.0, 0.35, 1.00)
+PARK_YELLOW_LOW = (20, 100, 100)
+PARK_YELLOW_HIGH = (35, 255, 255)
+PARK_YELLOW_MIN_AREA = 2500
+
+# 锥桶间隙决策树（穿越火线 demo.cpp:928-1019）
+CONE_FOREGROUND_MAX_DELTA = 145   # 只保留 bottom_y ≥ 最近锥 − 该值的锥（滤远处杂锥）
+CONE_ROW_TOLERANCE = 35           # 行分组：bottom_y 与组均值距离 ≤ 它
+CONE_MIN_GAP_WIDTH = 45           # 有效间隙最小宽度（px）
+CONE_RED_BLOCK_ABOVE = 12         # 红色阻挡判定：dy ≥ −12
+CONE_RED_BLOCK_BELOW = 40         # 红色阻挡判定：dy ≤ +40
+
+# A/B 标志牌（2025 newCode doc:2163-2178 凸包面积比）
+AB_MIN_AREA = 250                 # 轮廓面积下限
+AB_HULL_RATIO = 0.88              # < 0.88 → A（有三角缺口）；≥ 0.88 → B（近凸）
+
 # ---------------------------------------------------------------- 扫线
 # ⚠️ 2026-09-23 代码审查 B11：本区段是**两份已归档实现**（lane_scan / lane_hough，见
 # dev/attic/lane-old-20260919.tar.gz）的配置。当前生效的循迹实现在 `vision/lane_ref.py`
@@ -197,6 +240,14 @@ LANE_KD = 0.20
 LANE_INTEGRAL_LIMIT = 20.0      # 积分限幅（误差单位·秒）
 LANE_DERIV_ALPHA = 0.5          # 微分低通系数（0~1，越小越平滑）
 LANE_STEER_LIMIT_DEG = 30.0     # 转向角度增量限幅
+
+# ---------------------------------------------------------------- 护栏（A 路径，与 lane_ref_test 对齐）
+# 单侧/弱对帧收紧转向限幅（2026-09-23 操场实测：单侧半宽兜底在运动时经常错，
+# 43% 单侧帧把中心推到 150~600、舵机 ±15° 来回 → S 弯振荡冲出；B 路径用了
+# --single-limit-deg 5 / --weak-limit-deg 10 后待复测，A 路径用同一口径）。
+LANE_SINGLE_LIMIT_DEG = 5.0     # 只看到一侧线时，转向角增量限幅（度）
+LANE_WEAK_LIMIT_DEG = 10.0      # 双侧但一侧支持线段 ≤ LANE_WEAK_MIN_SEGS（"弱对"）时限幅（度）
+LANE_WEAK_MIN_SEGS = 2          # 一侧线段数不超过它就算"弱对"
 
 # ---------------------------------------------------------------- 仲裁层
 ARBITER_CONF_THRESH = 0.35          # 扫线置信度阈值

@@ -1,17 +1,144 @@
-# 代码/配置统一 LF（部署到 Linux 服务器/小车不因 CRLF 出错）
+# ============================================================================
+# git 属性：换行符统一 + 二进制判定
+# 最后更新：2026-10-08（工作区整理：官方资料统一收进 `比赛资料/`）
+# ============================================================================
+# 跟踪范围由 `.gitignore` 的**白名单**决定：只有 `code/` `dev/` `doc/` `scripts/`
+# （+ `AGENTS.md` / `.gitignore` / `.gitattributes`）入库。
+# `比赛资料/`（官方 2026 学习资料 + 上届 2025 代码包，约 18GB：77 个 mp4、106 个
+# docx、系统镜像 orangepi.img）、`train/`、`logs_pull*/`、`dev/logs`、`dev/models`
+# 等**一律不入库**，只在本机作为参考资料保留。
 #
-# 为什么连 .py/.yaml 也要管：Windows 工作区里 core.autocrlf 会把它们换成 CRLF，
-# 于是"按大小比差异"的同步工具会以为**每个文件都变了**，一次性全量上传——
-# 2026-09-19 就是这样把车端更新过的实现覆盖掉的（见 AGENTS.md §1.3）。
+# 本文件管两件事，都有明确的历史教训，改之前先读：
+#
+# 1) 换行符统一 LF
+#    Windows 工作区里 core.autocrlf 会把文本文件换成 CRLF，而
+#    `scripts/ssh_sync.py` 是按 **(大小, mtime)** 判断文件要不要重传的
+#    （scripts/ssh_sync.py:71 / :94）。一换行符，"所有"文件的大小都变了 →
+#    同步工具以为整个 dev/ 都改了 → 一次性全量上传 → **把车端更新过的实现覆盖掉**。
+#    2026-09-19 就是因为这个丢过车端改动（见 AGENTS.md §1.3、§6）。
+#    ⇒ 不要去掉任何 `eol=lf`，也不要新增会绕过它的规则。
+#
+# 2) 二进制文件禁止任何转换
+#    二进制一旦被当文本代入换行转换，内容就被永久写坏，而且往往到下次
+#    checkout / 上车运行时才暴露。下面按类别**显式**列出，不依赖 git 的自动嗅探：
+#    自动嗅探只看开头有没有 NUL 字节，JPEG / MP4 / docx(zip) 这类"前段恰好没有
+#    NUL"的格式是有可能被误判成文本的。
+#
+# ---------------------------------------------------------------------------
+# 改完本文件后执行一次（让索引里的换行符**立即**按新规则重算，
+# 否则新规则只对"下次改动的文件"生效）：
+#
+#     git add --renormalize .
+#
+# 想核对"某个文件现在被当成文本还是二进制"：
+#
+#     git check-attr text eol binary -- <路径>
+# ============================================================================
+
+# ---------------------------------------------------------------- 默认
+# 文本按内容自动判定、检出时统一 LF；二进制由下面的显式规则覆盖。
 * text=auto eol=lf
 
-# 二进制：不要做任何换行转换
-*.png binary
-*.jpg binary
-*.jpeg binary
-*.pdf binary
-*.drawio binary
-*.rknn binary
-*.pt binary
-*.onnx binary
-*.tar.gz binary
+# ---------------------------------------------------------------- 文本：部署关键，强制 LF
+# 这些文件会被 Linux 小车直接执行或解析，CRLF 会让 shebang 失效
+# （`bad interpreter: No such file or directory`）或 systemd 解析出错。
+*.py       text eol=lf
+*.sh       text eol=lf
+*.bash     text eol=lf
+*.service  text eol=lf
+*.timer    text eol=lf
+*.link     text eol=lf
+*.conf     text eol=lf
+*.ini      text eol=lf
+*.env      text eol=lf
+*.yml      text eol=lf
+*.yaml     text eol=lf
+*.json     text eol=lf
+*.toml     text eol=lf
+*.md       text eol=lf
+*.txt      text eol=lf
+*.csv      text eol=lf
+*.ps1      text eol=lf
+Makefile   text eol=lf
+.gitignore    text eol=lf
+.gitattributes text eol=lf
+
+# ---------------------------------------------------------------- 二进制：图像
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.bmp   binary
+*.gif   binary
+*.webp  binary
+*.tif   binary
+*.tiff  binary
+*.ico   binary
+*.heic  binary
+*.psd   binary
+
+# ---------------------------------------------------------------- 二进制：文档与压缩包
+# doc/ 下会放规则 pdf 与参考 docx；`比赛资料/` 有 106 个 docx，
+# 将来若要挑几份放进 doc/ 存档，靠的就是下面这几条。
+*.pdf   binary
+*.doc   binary
+*.docx  binary
+*.xls   binary
+*.xlsx  binary
+*.ppt   binary
+*.pptx  binary
+*.odt   binary
+*.zip   binary
+*.7z    binary
+*.rar   binary
+*.gz    binary
+*.tgz   binary
+*.bz2   binary
+*.xz    binary
+*.tar   binary
+# 系统镜像（如 无人车硬件配置/orangepi.img，仅本机保留）
+*.img   binary
+
+# ---------------------------------------------------------------- 二进制：音视频
+# ⚠️ 2026-10-08 补：dev/voice/aa.mp3 已在库内，但之前没有这条 —— 一直被当文本嗅探
+*.mp3   binary
+*.wav   binary
+*.m4a   binary
+*.flac  binary
+*.mp4   binary
+*.avi   binary
+*.mov   binary
+*.mkv   binary
+
+# ---------------------------------------------------------------- 二进制：模型与张量
+*.pt         binary
+*.pth        binary
+*.onnx       binary
+*.rknn       binary
+*.tflite     binary
+*.weights    binary
+*.caffemodel binary
+*.engine     binary
+*.npy        binary
+*.npz        binary
+*.pkl        binary
+*.h5         binary
+
+# ---------------------------------------------------------------- 二进制：可执行 / 库 / 目标文件
+*.so     binary
+*.dylib  binary
+*.dll    binary
+*.exe    binary
+*.bin    binary
+*.o      binary
+*.a      binary
+
+# ---------------------------------------------------------------- 二进制：其它
+*.drawio   binary
+*.db       binary
+*.sqlite   binary
+*.sqlite3  binary
+*.pcap     binary
+*.ttf      binary
+*.otf      binary
+*.woff     binary
+*.woff2    binary

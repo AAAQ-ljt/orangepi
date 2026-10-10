@@ -70,6 +70,12 @@ N=$(pgrep -fc 'ffmpeg.*rtsp' 2>/dev/null)
 pgrep -f 'cam_car0003' >/dev/null && ok "推流目标 cam_car0003" || warn "推流目标缺失/非 car0003"
 
 echo '########## T10 摄像头抓帧 (自动停/恢复推流) ##########'
+# 抓帧必须停推流（抢摄像头）；任何中断路径（Ctrl+C/断线/报错）都要恢复推流
+_restore_streams() {
+  systemctl restart ffmpeg-stream.service 2>/dev/null
+  systemctl restart ffmpeg-stream-sub.service 2>/dev/null
+}
+trap _restore_streams EXIT INT TERM HUP
 systemctl stop ffmpeg-stream.service 2>/dev/null
 systemctl stop ffmpeg-stream-sub.service 2>/dev/null
 sleep 1
@@ -82,8 +88,8 @@ for v in 0 2; do
     bad "video$v 抓帧失败"
   fi
 done
-systemctl restart ffmpeg-stream.service 2>/dev/null
-systemctl restart ffmpeg-stream-sub.service 2>/dev/null
+_restore_streams
+trap - EXIT INT TERM HUP
 [ "$FRAMES" -ge 1 ] && ok "摄像头可用路数: $FRAMES/2" || bad "两路摄像头均不可用"
 
 echo '########## 汇总 ##########'

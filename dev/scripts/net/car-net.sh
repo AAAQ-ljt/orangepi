@@ -474,12 +474,14 @@ EOF
 
   cat > /root/frp/frpc-ssh.ini <<EOF
 # 由 car-net.sh apply 生成（$(date '+%F %T')）—— 改配置请改 $CONF
+# ★ 代理名 [car-ssh]：frps 代理名全局唯一，[ssh] 被团队虚拟机（0.71）占用过，
+#   撞名会导致公网 2222 起不来（2026-10-08）。新增代理名都要加 car- 前缀。
 [common]
 server_addr = $FRP_SERVER_ADDR
 server_port = $FRP_SERVER_PORT
 token = $FRP_TOKEN
 
-[ssh]
+[car-ssh]
 type = tcp
 local_ip = 127.0.0.1
 local_port = 22

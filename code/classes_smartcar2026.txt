@@ -1,0 +1,9 @@
+# LabelImg 类别文件（灯 3 类契约，2026-10-10 v11；原 8 类列表已随 8 类契约废弃）
+# 用法：LabelImg → 打开目录 → 点"Change Save Dir" → 此文件与本说明放同一处；
+#       LabelImg 的 classes.txt 放在"当前图片目录"下同级即可被自动加载（或手动 打开类别列表）。
+# 顺序即 YOLO 类别 id，与 config/model_profile.yaml 的 light3cls 一致，勿改序。
+# 标注口径（见 doc/开发文档.md §3）：框整个灯箱（不是灯珠）；灭灯态必须标；
+# 同箱所有帧边界一致；模糊/遮挡帧不标但存 hard_cases。
+traffic_light_off
+traffic_light_red
+traffic_light_green

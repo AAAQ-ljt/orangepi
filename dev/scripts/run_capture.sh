@@ -5,17 +5,17 @@ set -euo pipefail
 # 1. 确保手动安全模式（opi-control 保持 PCA9685 安全）
 bash "$(dirname "$0")/safe_pwm_init.sh"
 
-# 2. 停止推流，释放摄像头
-echo "[CAPTURE] stopping ffmpeg"
-systemctl stop ffmpeg-stream.service || true
-systemctl stop ffmpeg-stream-sub.service || true
-
+# 2. 停止推流，释放摄像头（任何退出路径——Ctrl+C/断线/报错——都恢复）
 cleanup() {
   echo "[CAPTURE] restoring ffmpeg"
   systemctl start ffmpeg-stream.service || true
   systemctl start ffmpeg-stream-sub.service || true
 }
-trap cleanup EXIT
+trap cleanup EXIT INT TERM HUP
+
+echo "[CAPTURE] stopping ffmpeg"
+systemctl stop ffmpeg-stream.service || true
+systemctl stop ffmpeg-stream-sub.service || true
 
 # 3. 运行拍照脚本
 echo "[CAPTURE] running capture_dataset.py"

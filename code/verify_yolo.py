@@ -23,14 +23,13 @@ import time
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent  # D:\5g\orangepi
+# 2026-10-08：官方资料整理后统一收进 `比赛资料/`（原 `2025年比赛资料/` 已不存在）。
+# 该目录整个都在 .gitignore 白名单之外（约 18GB，含 77 个 mp4），只在本机保留。
+REF_DIR = REPO_ROOT / "比赛资料" / "2025年智能车代码包+软件操作手册"
 DEFAULT_MODEL = (
-    REPO_ROOT / "2025年比赛资料" / "智能车代码包+软件操作手册"
-    / "yolo版本视觉+控制代码" / "yolo版本视觉识别" / "model" / "best11nseg.pt"
+    REF_DIR / "yolo版本视觉+控制代码" / "yolo版本视觉识别" / "model" / "best11nseg.pt"
 )
-DEFAULT_IMAGE = (
-    REPO_ROOT / "2025年比赛资料" / "智能车代码包+软件操作手册"
-    / "opencv版本视觉+控制代码" / "A.png"
-)
+DEFAULT_IMAGE = REF_DIR / "opencv版本视觉+控制代码" / "A.png"
 
 
 def main() -> int:

@@ -104,6 +104,61 @@ def _controller(**kwargs) -> Controller:
     return Controller(driver, port=0, audio_path="nonexistent.mp3", **kwargs)
 
 
+# --------------------------------------------------------------------- 护栏（2026-10-09 从 lane_ref_test 迁入 A 路径）
+def test_planner_single_side_cap():
+    """单侧丢线帧：转向角增量限 ±LANE_SINGLE_LIMIT_DEG（半宽兜底运动时不可靠，
+    2026-09-23 操场 43% 单侧帧把中心推飞 → S 弯振荡的根因之一）。"""
+    planner = Planner(target_x=320.0)
+    center = float(settings.SERVO_CENTER_ANGLE)
+    cap = float(settings.LANE_SINGLE_LIMIT_DEG)
+    msg = PerceptionMessage(center_x=620.0, left_x=None, right_x=500.0,
+                            lane_n_left=0, lane_n_right=6)
+    t = planner.plan(msg, dt=0.05)
+    assert abs(t.steering - center) <= cap + 1e-6, \
+        f"单侧帧应限幅 ±{cap}°，实际偏移 {t.steering - center:.2f}°"
+
+
+def test_planner_weak_pair_cap():
+    """弱对帧（双侧但一侧支持线段 ≤ LANE_WEAK_MIN_SEGS）：限 ±LANE_WEAK_LIMIT_DEG；
+    正常双侧帧不受此限幅。"""
+    planner = Planner(target_x=320.0)
+    center = float(settings.SERVO_CENTER_ANGLE)
+    cap = float(settings.LANE_WEAK_LIMIT_DEG)
+    weak = planner.plan(PerceptionMessage(center_x=620.0, left_x=100.0, right_x=500.0,
+                                          lane_n_left=1, lane_n_right=6), dt=0.05)
+    assert abs(weak.steering - center) <= cap + 1e-6
+    strong = planner.plan(PerceptionMessage(center_x=620.0, left_x=100.0, right_x=500.0,
+                                            lane_n_left=6, lane_n_right=6), dt=0.05)
+    assert abs(strong.steering - center) > cap + 1e-6, "正常双侧帧应走全局限幅"
+
+
+def test_planner_oscillation_guard_stops():
+    """画龙：舵角大幅来回翻转 ≥3 次（2s 窗口）→ 护栏停车（油门 0、回中位）。"""
+    planner = Planner(target_x=320.0)
+    center = float(settings.SERVO_CENTER_ANGLE)
+    tripped = None
+    for i in range(40):
+        x = 620.0 if i % 2 == 0 else 20.0      # 每帧翻转大误差方向 → 满舵来回
+        tripped = planner.plan(PerceptionMessage(center_x=x), dt=0.05)
+        if tripped.throttle == 0.0:
+            break
+    assert tripped is not None and tripped.throttle == 0.0, "画龙应在窗口内停车"
+    assert abs(tripped.steering - center) < 1e-6
+
+
+def test_planner_big_error_guard_stops():
+    """跑偏：误差持续 ≥60px 超过 1.5s → 护栏停车（回中位）。"""
+    planner = Planner(target_x=320.0)
+    center = float(settings.SERVO_CENTER_ANGLE)
+    tripped = None
+    for _ in range(60):                          # 60 帧 × 0.05s = 3s > 1.5s
+        tripped = planner.plan(PerceptionMessage(center_x=620.0), dt=0.05)
+        if tripped.throttle == 0.0:
+            break
+    assert tripped is not None and tripped.throttle == 0.0, "持续大误差应停车"
+    assert abs(tripped.steering - center) < 1e-6
+
+
 def test_controller_drives_only_in_driving_states():
     ctrl = _controller()
     try:
@@ -154,6 +209,10 @@ if __name__ == "__main__":
     test_planner_steers_toward_lane_center()
     test_planner_center_x_no_error()
     test_planner_respects_stop_and_scale()
+    test_planner_single_side_cap()
+    test_planner_weak_pair_cap()
+    test_planner_oscillation_guard_stops()
+    test_planner_big_error_guard_stops()
     test_controller_drives_only_in_driving_states()
     test_controller_failsafe_when_no_message()
     test_driver_not_armed_stays_safe()

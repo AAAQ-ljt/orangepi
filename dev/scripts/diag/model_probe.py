@@ -153,17 +153,25 @@ def main() -> int:
         print("[MODEL] 需要 --image 或 --camera")
         return 2
 
+    from scripts.bench_common import install_signal_guard
+    state = {"stopped": False, "driver": None, "restored": False, "used_motor": False}
+    install_signal_guard(state)          # Ctrl+C/TERM/HUP(SSH 断线) → 置位 → 循环收尾
     from vision.camera_guard import camera_exclusive, open_camera
     with camera_exclusive():
         cap = open_camera(args.camera, settings.IMG_W, settings.IMG_H)
         if cap is None:
             return 1
-        for i in range(args.frames):
-            ok, frame = cap.read()
-            if not ok or frame is None:
-                continue
-            handle(frame, f"{i:02d}")
-        cap.release()
+        try:
+            for i in range(args.frames):
+                if state["stopped"]:
+                    print("[MODEL] 收到停止信号，提前结束")
+                    break
+                ok, frame = cap.read()
+                if not ok or frame is None:
+                    continue
+                handle(frame, f"{i:02d}")
+        finally:
+            cap.release()
     model.release()
     print(f"[MODEL] 完成，图在 {args.out}")
     return 0

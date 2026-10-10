@@ -127,8 +127,12 @@ def start_ffmpeg(services: Iterable[str] = FFMPEG_SERVICES) -> None:
         _systemctl("start", svc)
 
 
-def open_camera(index: int, width: int = 640, height: int = 480, timeout_s: float = 8.0):
+def open_camera(index: int, width: int = 640, height: int = 480,
+                timeout_s: float = 8.0, fourcc: str = None):
     """打开摄像头（带重试）：推流刚停时设备可能还没释放，等它空出来再开。
+
+    `fourcc`（如 "MJPG"）可选：部分 USB 摄像头 MJPG 模式帧率明显高于默认
+    YUYV（2026-10-09 T6，明天现场前后对比 FPS 再定默认值）。
 
     返回 cv2.VideoCapture；打不开返回 None（并打印占用者，便于定位是谁拿着设备）。
     """
@@ -138,6 +142,8 @@ def open_camera(index: int, width: int = 640, height: int = 480, timeout_s: floa
     while True:
         cap = cv2.VideoCapture(index, cv2.CAP_V4L)
         if cap.isOpened():
+            if fourcc:
+                cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*fourcc))
             cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
             cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)

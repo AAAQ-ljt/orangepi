@@ -3,9 +3,11 @@
 # 控制端只认统一元素名（zebra / cone / parking_area / blue_board / parking_sign / light），
 # 换模型（上一届的 → 我们自己训练的）只需要改这里的 profile，控制代码零改动。
 #
-# 用法：vision_main.py --profile legacy|smartcar2026
-#   legacy       ：上一届 YOLO11-seg（9 类）——**当前用于联调**
-#   smartcar2026 ：我们自己训练的 8 类检测（训练好之后切过来）
+# ⚠️ v11（2026-10-09）模型轨现状：**产品路径只用 light3cls（红绿灯 3 态）**；
+#    legacy（上届分割，仅联调）保留；smartcar2026（8 类契约）与 car4cls **已废弃/退役**，
+#    仅作 10-10 操场"退役实证"对照用，勿在生产链路引用。
+#
+# 用法：vision_main.py --profile light3cls|legacy|smartcar2026|car4cls
 #
 # map 里值为 none 的类：模型会输出，但控制端不使用（例如上一届的车道线类，
 # 我们的巡线走 OpenCV 扫线，不用模型出车道线）。
@@ -36,6 +38,8 @@ profiles:
       parking_sign_B: parking_sign
       zebra_crossing: zebra
 
+  # ⚠️ 已废弃（v11 2026-10-09）：8 类契约整体放弃，模型轨只保留灯 3 态（见 light3cls）。
+  #    本 profile 仅作历史对照，勿在新代码/新链路引用。
   smartcar2026:
     task: detect
     imgsz: [480, 640]     # (h, w)：与摄像头原生分辨率一致，模型零缩放
@@ -59,8 +63,10 @@ profiles:
       obstacle_cone_red: cone
       parking_area: parking_area
 
-  # 我们自己训练的 4 类检测（2026-09-19 车上有 models/best_4cls_640x480_fp16.rknn，
-  # 输入正好是摄像头原生 480x640 → 模型零缩放、坐标即原图坐标）
+  # ⚠️ 已退役（v11 2026-10-09）：4cls 训练集无红绿灯、类内标签有左右语义，产品路径不再使用；
+  #    仅保留供 10-10 操场"退役实证"对照。历史背景：
+  #    我们自己训练的 4 类检测（2026-09-19 车上有 models/best_4cls_640x480_fp16.rknn，
+  #    输入正好是摄像头原生 480x640 → 模型零缩放、坐标即原图坐标）
   #
   # ⚠️ 类别事实（用户 2026-09-20 明确 + 与 vision/elements.py 的内置定义一致）：
   #    训练集只有 **锥桶 / 斑马线 / 停车区**，**没有红绿灯**。
@@ -83,3 +89,19 @@ profiles:
       crosswalk: zebra
       parkingLeft: parking_area
       parkingRight: parking_area
+
+  # 红绿灯专属 3 类检测（2026-10-09 v11 定案：模型轨只保留灯；8 类契约与 car4cls 废弃/退役）。
+  # 数据 = 现有红绿灯 571 张按灯态重标 + 现场补拍灯灭态；训练 code/train_light.sh；
+  # RKNN 转换由队友负责（2026-10-09 已对齐）。
+  light3cls:
+    task: detect
+    imgsz: [480, 640]
+    conf: 0.35
+    names:
+      0: traffic_light_off
+      1: traffic_light_red
+      2: traffic_light_green
+    map:
+      traffic_light_off: light      # 双通道校验用：off/unknown → 维持停车
+      traffic_light_red: light
+      traffic_light_green: light

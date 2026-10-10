@@ -22,6 +22,10 @@ class PerceptionMessage:
     right_x: Optional[int] = None
     center_x: Optional[float] = None
     lane_confidence: Optional[float] = None
+    # 护栏信息：本帧左右两侧各自的支持线段数（lane_ref 检出；None=该侧没检出或无该信息）
+    # 控制端用它收紧单侧/弱对帧的转向限幅（与 lane_ref_test 的 --single/--weak-limit-deg 对齐）
+    lane_n_left: Optional[int] = None
+    lane_n_right: Optional[int] = None
     blue_cone_count: int = 0
     yellow_cone_count: int = 0
     has_left_sign: bool = False
@@ -91,6 +95,8 @@ class PerceptionMessage:
             right_x=right_x,
             center_x=center_x,
             lane_confidence=confidence,
+            lane_n_left=_int("lane_n_left"),
+            lane_n_right=_int("lane_n_right"),
             blue_cone_count=_int("blue_cone_count", 0),
             yellow_cone_count=_int("yellow_cone_count", 0),
             has_left_sign=_bool("has_left_sign"),
@@ -112,6 +118,8 @@ class PerceptionMessage:
             "right_x": self.right_x,
             "center_x": self.center_x,
             "lane_confidence": self.lane_confidence,
+            "lane_n_left": self.lane_n_left,
+            "lane_n_right": self.lane_n_right,
             "blue_cone_count": self.blue_cone_count,
             "yellow_cone_count": self.yellow_cone_count,
             "has_left_sign": self.has_left_sign,

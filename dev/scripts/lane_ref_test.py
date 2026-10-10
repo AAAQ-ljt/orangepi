@@ -622,10 +622,10 @@ def main() -> int:
     ap.add_argument("--replay", default="", help="复盘一个会话目录里的帧（本地可跑，不碰硬件）")
     ap.add_argument("--roi-sweep", action="store_true", help="复盘时顺带重算候选带表")
     ap.add_argument("--camera", type=int, default=2, help="摄像头（默认 2=下摄，巡线固定这一路）")
-    ap.add_argument("--speed-us", type=float, default=1580.0,
-                    help="循迹巡航脉宽（默认 **1580**——2026-10-11 用户定案：1560 龟速不可接受；"
-                         f"死区 {settings.ESC_DEADBAND_US}，调试上限 {settings.ESC_DEBUG_MAX_US}；"
-                         "快的前提 = 增益帧率折算 + --single-hold 已上车）")
+    ap.add_argument("--speed-us", type=float, default=float(settings.ESC_CREEP_US),
+                    help=f"循迹巡航脉宽（默认 {settings.ESC_CREEP_US}；死区 "
+                         f"{settings.ESC_DEADBAND_US}，调试上限 {settings.ESC_DEBUG_MAX_US}）"""
+                         "★ 高速档现场给 --speed-us 1580+，见执行单 §3.1）")
     ap.add_argument("--speed-fast", type=float, default=SPEED_FAST_US,
                     help=f"误差小(<5px)时的脉宽增量（默认 {SPEED_FAST_US:+.0f}，0=不提速）")
     ap.add_argument("--speed-slow", type=float, default=SPEED_SLOW_US,
@@ -691,7 +691,12 @@ def main() -> int:
                          "经常是错的，限幅小它就没法把车甩起来（2026-09-23 操场 S 弯主振荡源）")
     ap.add_argument("--single-hold", action="store_true",
                     help="★ 10-11 操场新档：单侧兜底帧**不跟推算中心**（实测会跳 ±50px 造成蛇行），"
-                         "改为回中位直行 + 降速维持，等双侧恢复再跟线；默认关（保持原行为）")
+                         "改为回中位直行，等双侧恢复再跟线；默认关（保持原行为）")
+    ap.add_argument("--single-speed-us", type=float, default=None,
+                    help="丢线维持（single-hold）时的脉宽：默认 = speed-us 巡航保速"
+                         "（高速循迹核心——run_ref 实测 158/273 帧掉到 1550 龟速，"
+                         "高速下频繁丢线不能频繁龟速）；给更低值（如 1560）就是旧降速行为。"
+                         "压线风险 +10s/次 vs 龟速浪费时间，现场权衡；总上限与再见板停车仍然生效")
     ap.add_argument("--weak-limit-deg", type=float, default=10.0,
                     help="**弱对帧**（双侧但在的一侧 ≤2 段）的舵角限幅（默认 ±10°）：这类帧的"
                          "中心一跳 50~140px（占大跳变的 60%），限小一点就不至于被自己的读数甩动")
@@ -1146,13 +1151,15 @@ def main() -> int:
                                 if (args.single_hold and not r.both_sides):
                                     # ★ 单侧兜底帧（10-11 操场实测）：推算中心 = 可见线 + 半宽，
                                     #   可见线读数在飘（实测右线 540↔490）→ 跟它会蛇行 ±50px。
-                                    #   行为：回中位直行 + 降速维持，等双侧回来再跟线。
+                                    #   行为：回中位直行等双侧恢复；速度 = --single-speed-us
+                                    #   （默认保速巡航，高速循迹不因丢线反复龟速）。
                                     pid.reset()
                                     if err_filter is not None:
                                         err_filter.reset()
                                     steer = center_deg
                                     angle = center_deg
-                                    out_us = floor_pulse(args.speed_us, args.speed_slow)
+                                    out_us = (args.speed_us if args.single_speed_us is None
+                                              else float(args.single_speed_us))
                                     phase = "single"
                                     last_center = r.center_x
                                 else:

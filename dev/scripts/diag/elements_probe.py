@@ -81,7 +81,9 @@ def probe_frame(frame_bgr: np.ndarray) -> dict:
                                roi=(0.10, 0.90, 0.20, 0.95),
                                hsv_low=settings.START_BLUE_HSV_LOW,
                                hsv_high=settings.START_BLUE_HSV_HIGH)
-    r["ab"] = classify_ab(board) if board is not None else None
+    # ⚠️ classify_ab 是 2025 上届 parking_sign A/B 遗产（凸包比），本届规则无 A/B；
+    #    仅存档比对用，真实判左右 = 几何（蓝板底边中点 vs 黄区外框中点，见 parking_test.py）
+    r["ab_legacy"] = classify_ab(board) if board is not None else None
     return r
 
 

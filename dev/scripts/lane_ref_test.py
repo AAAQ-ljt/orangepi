@@ -62,6 +62,7 @@ from control.lane_control import (BigErrorGuard, LIMIT_DEG0, LossGuard, LossStat
                                   SPEED_FLOOR_MARGIN_US, adaptive_pulse, floor_pulse,
                                   gains_for)
 from vision.camera_guard import camera_exclusive, open_camera
+from vision.color_elements import detect_zebra
 from vision.lane_ref import (REF_BAND, LaneParams, LaneReading, LaneRefDetector, auto_look_band,
                              look_bounds, roi_bounds, sweep_bands, x_of_kb)
 from vision.start_gate import StartGate
@@ -741,6 +742,15 @@ def main() -> int:
     ap.add_argument("--cone-first-dir", choices=("left", "right"), default="left",
                     help="S 型第一段往哪边绕（默认 left：左绕→回正→右绕；"
                          "第二个锥桶在另一边时不用改，两段方向相反即成 S）")
+    # ---- 斑马线停车档（--zebra-stop；默认关，单项可测）----
+    ap.add_argument("--zebra-stop", action="store_true",
+                    help="斑马线停车档：检测到斑马线（连续 N 帧，ZEBRA_HYSTERESIS_FRAMES）→ "
+                         "停车 --zebra-seconds 秒 → 继续；默认关（纯循迹行为与之前完全一致）")
+    ap.add_argument("--zebra-seconds", type=float, default=float(settings.ZEBRA_STOP_SECONDS),
+                    help=f"斑马线停车时长（默认 {settings.ZEBRA_STOP_SECONDS:.0f}s，规则要求 ≥10）")
+    ap.add_argument("--zebra-count", type=int, default=None,
+                    help=f"斑马线条纹数阈值（默认 settings.ZEBRA_MIN_COUNT="
+                         f"{settings.ZEBRA_MIN_COUNT}；现场按 elements_probe 读数调）")
     args = ap.parse_args()
 
     # ---- 参数来源：命令行 > --ref-behavior 预设 > settings/site.yaml（ROI/前瞻带只有一处定义）
@@ -885,6 +895,9 @@ def main() -> int:
                     cone_phase = None            # None/"avoid1"/"resume"/"avoid2"
                     cone_phase_t0: Optional[float] = None
                     cone_stopped = False         # --cone-stop：检测到锥桶后停车（实验室模式）
+                    zebra_stop_until = 0.0       # 斑马线档：下次允许行驶的时刻（时间戳）
+                    zebra_streak = 0             # 连续检出帧数
+                    zebra_printed = False        # 恢复提示只打一次
                     avoid_deg = (settings.CONE_AVOID_DEG if args.cone_avoid_deg is None
                                  else float(args.cone_avoid_deg))
                     avoid_s = (settings.CONE_AVOID_S if args.cone_avoid_s is None
@@ -1038,9 +1051,32 @@ def main() -> int:
                         if r.error is not None and r.quality >= args.min_quality:
                             err_c = r.error if err_filter is None else err_filter.update(r.error)
 
+                        # ---- 斑马线停车档（--zebra-stop；默认关，不影响纯循迹）----
+                        # ⚠️ 必须在丢线保护之前计算：停车期间豁免 loss/big_err/画龙
+                        #    （车已停住，线看不全不算"丢线失控"）。
+                        if args.zebra_stop and now >= zebra_stop_until:
+                            if driving and detect_zebra(frame, min_count=args.zebra_count):
+                                zebra_streak += 1
+                                if zebra_streak >= settings.ZEBRA_HYSTERESIS_FRAMES:
+                                    zebra_streak = 0
+                                    zebra_stop_until = now + args.zebra_seconds
+                                    print(f"[REF] 🦓 检测到斑马线（连续 "
+                                          f"{settings.ZEBRA_HYSTERESIS_FRAMES} 帧）→ "
+                                          f"停车 {args.zebra_seconds:.0f}s（{zebra_stop_until:.1f} 恢复）")
+                            else:
+                                zebra_streak = 0
+                        else:
+                            zebra_streak = 0
+                        zebra_stopping = now < zebra_stop_until
+                        if zebra_stopping and not zebra_printed:
+                            zebra_printed = True  # 停上了（触发信息已打印）
+                        elif not zebra_stopping and zebra_printed:
+                            zebra_printed = False
+                            print(f"[REF] 🦓 停够 {args.zebra_seconds:.0f}s → 继续前进")
                         ls = loss.update(now, err_c is not None) if driving \
+                                and not zebra_stopping \
                             else LossState("idle", 0.0, 1.0)
-                        trip = bool(driving and args.err_stop_s > 0
+                        trip = bool(driving and not zebra_stopping and args.err_stop_s > 0
                                     and big_err.update(now, err_c, raw_error=err_raw))
                         if trip:
                             # ⚠️ err_c 可能为 None（读数质量不够时不进控制器），
@@ -1050,7 +1086,7 @@ def main() -> int:
                                                   err_c, err_raw))
                             state["stopped"] = True
 
-                        # ---- S 型避让状态机（driving 且开启时才推进；放在 trip 之后）----
+# ---- S 型避让状态机（driving 且开启时才推进；放在 trip 之后）----
                         if cone_tracker is not None and args.cone_avoid and driving \
                                 and not trip and not state["stopped"]:
                             now_c = time.time()
@@ -1080,6 +1116,10 @@ def main() -> int:
                         phase, out_us, angle = "stop", NEUTRAL_US, 90.0
                         if trip:
                             phase = "guard"
+                        elif zebra_stopping:
+                            # 斑马线停车：电调归零、舵机回中，停够 zebra_seconds 再走
+                            # （与"再见板停车"平级；--max-seconds 总上限仍然生效）
+                            phase, out_us, angle = "zebra", NEUTRAL_US, center_deg
                         elif cone_phase is not None and args.cone_avoid and driving \
                                 and not state["stopped"]:
                             # ---- S 型绕行：开环动作（参考实现 avoidFromLeft/Right 的参数化版）----
@@ -1146,7 +1186,8 @@ def main() -> int:
                         # ★ 画龙（S 弯）检测：这一帧的舵角已经算完，统计它是否在窗口内来回打满幅
                         #   （2026-09-23 操场实测：舵机 75°↔105° 来回甩、误差 ±100~300 翻符号，
                         #    连续计时型跑偏保护永远凑不满 → 用拐角次数直接抓）
-                        if driving and not trip and not state["stopped"]:
+                        if driving and not zebra_stopping and not trip \
+                                and not state["stopped"]:
                             if osc.update(now, angle, center_deg):
                                 trip = True
                                 print("[REF] ❌ 检测到画龙（S 弯）：舵机 2s 内大幅来回摆多次"

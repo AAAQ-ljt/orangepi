@@ -81,6 +81,8 @@ class FSM:
         # 更新防抖计数
         self._zebra_frames = self._zebra_frames + 1 if msg.has_zebra_crossing else 0
         self._cone_frames = self._cone_frames + 1 if msg.blue_cone_count > 0 else 0
+        # ⚠️ 上届遗产：has_sign_a/b = 2025 停车标志牌（凸包比），本届规则只有"挡板遮挡两格"，
+        #    PARKING 触发待 P1-3 接线改为"黄区+蓝板"（见开发文档 §2.6），此处字段先保留兼容。
         self._sign_frames = self._sign_frames + 1 if (msg.has_sign_a or msg.has_sign_b) else 0
 
         if msg.traffic_light_state == "red":

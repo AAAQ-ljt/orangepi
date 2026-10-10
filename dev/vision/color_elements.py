@@ -144,6 +144,35 @@ def detect_parking_yellow(frame_bgr: np.ndarray, roi=None,
     return int(m.sum() // 255) >= int(min_area)
 
 
+def parking_yellow_box(frame_bgr: np.ndarray, roi=None,
+                       hsv_low=None, hsv_high=None, min_area: int = None) -> Optional[Tuple[int, int, int, int]]:
+    """黄色胶布**最大连通域**的 bbox (x, y, w, h)（原图坐标，供停车几何使用）。
+
+    与 `detect_parking_yellow` 同源阈值，但返回外框几何——判左右/目标点/接近度都用它
+    （开发文档 §2.6：外框 = 一个实例，中线用几何推算，不靠分割线检测）。
+    面积 < min_area 或没有黄色返回 None。
+    """
+    h, w = frame_bgr.shape[:2]
+    roi = roi or settings.PARK_ZONE_ROI
+    min_area = settings.PARK_YELLOW_MIN_AREA if min_area is None else min_area
+    x0, x1 = int(w * roi[0]), int(w * roi[1])
+    y0, y1 = int(h * roi[2]), int(h * roi[3])
+    patch = frame_bgr[y0:y1, x0:x1]
+    if patch.size == 0:
+        return None
+    hsv = cv2.cvtColor(patch, cv2.COLOR_BGR2HSV)
+    low = np.array(hsv_low or settings.PARK_YELLOW_LOW, np.uint8)
+    high = np.array(hsv_high or settings.PARK_YELLOW_HIGH, np.uint8)
+    m = cv2.inRange(hsv, low, high)
+    contours, _ = cv2.findContours(m, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return None
+    x, y, bw, bh = cv2.boundingRect(max(contours, key=cv2.contourArea))
+    if bw * bh < int(min_area):
+        return None
+    return (x + x0, y + y0, bw, bh)
+
+
 # ------------------------------------------------------------------ 锥桶间隙决策树
 @dataclass
 class Gap:

@@ -10,7 +10,8 @@ import numpy as np
 import cv2
 
 from vision.color_elements import (classify_ab, choose_gap, detect_parking_yellow,
-                                   detect_traffic_light, detect_zebra)
+                                   detect_traffic_light, detect_zebra,
+                                   parking_yellow_box)
 from vision.cone_detect import ConeBox
 
 
@@ -82,6 +83,17 @@ def test_parking_yellow_area():
     img2 = np.full((480, 640, 3), (60, 60, 60), dtype=np.uint8)
     cv2.rectangle(img2, (100, 300), (120, 340), (0, 200, 220), -1)  # 20*40=800px 太小
     assert not detect_parking_yellow(img2)
+
+
+def test_parking_yellow_box_geometry():
+    """parking_yellow_box 返回最大黄区外框（原图坐标），判左右几何用。"""
+    img = np.full((480, 640, 3), (60, 60, 60), dtype=np.uint8)
+    cv2.rectangle(img, (100, 300), (500, 360), (0, 200, 220), -1)
+    box = parking_yellow_box(img)
+    assert box is not None
+    x, y, w, h = box
+    assert (x, y) == (100, 300) and w == 401 and h == 61, f"bbox={box}"
+    assert parking_yellow_box(np.full((480, 640, 3), (60, 60, 60), np.uint8)) is None
 
 
 # ------------------------------------------------------------------ 锥桶间隙决策树

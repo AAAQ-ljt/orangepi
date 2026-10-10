@@ -22,6 +22,7 @@ import sys
 import tempfile
 import time
 
+import cv2
 import numpy as np
 
 import scripts.lane_ref_test as lt
@@ -199,6 +200,43 @@ def test_never_blocks_means_never_drives():
     assert rc in (0, 1)
     phases = set(line.split(",")[1] for line in csv.splitlines()[1:] if line.count(",") > 2)
     assert phases <= {"stop"}, f"没有蓝板时只能停车，实际阶段 {sorted(phases)}"
+
+
+# ------------------------------------------------------------------ 斑马线档（--zebra-stop）
+def _zebra_frame() -> np.ndarray:
+    """暗底 + 5 条白色横条（在 ZEBRA_ROI 内 y≥168；底面无车道线避免串扰）。"""
+    frame = _blank_frame()
+    for y in range(200, 380, 36):
+        cv2.rectangle(frame, (80, y), (560, y + 14), (255, 255, 255), -1)
+    return frame
+
+
+def test_zebra_stop_triggers_then_resumes():
+    """--zebra-stop：跟线中遇到斑马线 → 进入 zebra 停车相位 → 停够后恢复 track。"""
+    frames = ([_lane_frame()] * 6          # 起步前自检窗口
+              + [_board_frame()] * 3       # 见板武装
+              + [_lane_frame()] * 6        # 移开板 → 放行跟线
+              + [_zebra_frame()] * 6       # 斑马线：连续 3 帧触发 → 停车
+              + [_lane_frame()] * 20)      # 停够 0.4s 后应恢复循迹
+    rc, _tmp, csv = _run(frames, ["--zebra-stop", "--zebra-seconds", "0.4"])
+    assert rc == 0
+    rows = [line.split(",") for line in csv.splitlines()[1:] if line.count(",") > 2]
+    phases = [r[1] for r in rows]
+    assert "zebra" in phases, f"应进入斑马线停车相位，实际 {phases}"
+    zi = phases.index("zebra")
+    assert "track" in phases[zi + 1:], "停够后应恢复循迹（track 相位）"
+
+
+def test_zebra_off_never_enters_zebra():
+    """不开 --zebra-stop：纯循迹行为不变（斑马线画面也不触发停车）。"""
+    frames = ([_lane_frame()] * 6
+              + [_board_frame()] * 3
+              + [_lane_frame()] * 6
+              + [_zebra_frame()] * 6
+              + [_lane_frame()] * 4)
+    rc, _tmp, csv = _run(frames, [])
+    assert rc == 0
+    assert "zebra" not in csv.splitlines()[0:], "默认必须不触发斑马线停车"
 
 
 def test_board_too_early_is_handled():

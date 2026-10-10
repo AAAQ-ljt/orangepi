@@ -325,11 +325,32 @@ def _preflight(frames: List[np.ndarray], args, params: LaneParams) -> Tuple[Lane
     if not frames:
         return params, None
     weak = False        # 自检证据够不够（不够就不采纳自检出的目标点，见 WEAK_RUN_MAX）
+    if args.auto_look:
+        look, rows, info = auto_look_band(frames, params)
+        if rows:
+            params.look_top_ratio, params.look_bottom_ratio = look
+            h = frames[0].shape[0]
+            lo, hi, n = info["longest_seg"]
+            print(f"[REF] ① 自动前瞻带：支持行 {min(rows)}~{max(rows)}，"
+                  f"最长连续段 y {lo}~{hi}（{n} 行）→ 用它中间 20%~80%（y "
+                  f"{int(look[0] * h)}~{int(look[1] * h)}）算中心（look "
+                  f"{look[0]:.2f}~{look[1]:.2f}）")
+            if n < 40:
+                print(f"[REF]    ⚠️ 最长连续段只有 {n} 行 —— 线不是一整段，中心会跳；"
+                      f"建议重新摆车/压镜头")
+        else:
+            print("[REF] ① 自动前瞻带：没有找到两条线都有边缘支持的行 → 用配置的 "
+                  f"{params.look_top_ratio:.2f}~{params.look_bottom_ratio:.2f}"
+                  f"（要手改就是 --look-top/--look-bottom）")
+    else:
+        print(f"[REF] ① 自动前瞻带：已关闭（--no-auto-look），用 "
+              f"{params.look_top_ratio:.2f}~{params.look_bottom_ratio:.2f}")
+
     if not args.auto_roi:
-        print(f"[REF] ① 候选带扫描：已关闭（--no-auto-roi），用配置的 "
+        print(f"[REF] ② 候选带扫描：已关闭（--no-auto-roi），用配置的 "
               f"{params.roi_top_ratio:.2f}~{params.roi_bottom_ratio:.2f}")
     else:
-        print(f"[REF] ① 候选带扫描（{len(frames)} 帧静止画面，每档独立检测器；约 5~10 秒）")
+        print(f"[REF] ② 候选带扫描（{len(frames)} 帧静止画面，每档独立检测器；约 5~10 秒）")
         print("[REF]    ROI上  ROI下   y范围      有中心  连续支持  支持行占比  中心跨距  质量")
         table = sweep_bands(frames, params)
         best = None
@@ -374,27 +395,6 @@ def _preflight(frames: List[np.ndarray], args, params: LaneParams) -> Tuple[Lane
                   f"（y {best['y_range'][0]}~{best['y_range'][1]}，"
                   f"{best['paired_frames']}/{best['n_frames']} 帧成对，"
                   f"最长连续支持 {best['run_max']:.0f} 行）")
-
-    if args.auto_look:
-        look, rows, info = auto_look_band(frames, params)
-        if rows:
-            params.look_top_ratio, params.look_bottom_ratio = look
-            h = frames[0].shape[0]
-            lo, hi, n = info["longest_seg"]
-            print(f"[REF] ② 自动前瞻带：支持行 {min(rows)}~{max(rows)}，"
-                  f"最长连续段 y {lo}~{hi}（{n} 行）→ 用它中间 20%~80%（y "
-                  f"{int(look[0] * h)}~{int(look[1] * h)}）算中心（look "
-                  f"{look[0]:.2f}~{look[1]:.2f}）")
-            if n < 40:
-                print(f"[REF]    ⚠️ 最长连续段只有 {n} 行 —— 线不是一整段，中心会跳；"
-                      f"建议重新摆车/压镜头")
-        else:
-            print("[REF] ② 自动前瞻带：没有找到两条线都有边缘支持的行 → 用配置的 "
-                  f"{params.look_top_ratio:.2f}~{params.look_bottom_ratio:.2f}"
-                  f"（要手改就是 --look-top/--look-bottom）")
-    else:
-        print(f"[REF] ② 自动前瞻带：已关闭（--no-auto-look），用 "
-              f"{params.look_top_ratio:.2f}~{params.look_bottom_ratio:.2f}")
 
     det = LaneRefDetector(params)
     centers: List[float] = []

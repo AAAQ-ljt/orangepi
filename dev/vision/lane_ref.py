@@ -575,11 +575,14 @@ def rows_with_support(frame_bgr: np.ndarray, left_kb: Tuple[float, float],
     run: List[Tuple[int, float, float]] = []
     checked = 0
     run_max = 0
+    margin = 30.0     # ★ 10-11：贴边段不算"线在画面内"——下摄平视角下车道线在 y≈195~205
+                      #   就从左右边缘出去，贴边段的拟合截距噪声最大（实测真值 x21/643 被
+                      #   读成 30/695）。自动前瞻带/支持统计都靠这条避免选到贴边段。
     step = max(1, step)
     for y in range(max(0, y_from), min(h, y_to), step):
         xl, xr = _x_at(*left_kb, y), _x_at(*right_kb, y)
         ok = False
-        if 0 <= xl < w and 0 <= xr < w and xl < xr:
+        if margin <= xl <= w - margin and margin <= xr <= w - margin and xl < xr:
             checked += 1
             sl = edges[y, max(0, int(xl - tol_px)):min(w, int(xl + tol_px) + 1)]
             sr = edges[y, max(0, int(xr - tol_px)):min(w, int(xr + tol_px) + 1)]

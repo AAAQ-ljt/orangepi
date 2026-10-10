@@ -90,7 +90,7 @@ def test_tracker_exit_clears_seen():
     assert not tr.update([b])          # 积累 1
     assert not tr.update([b])          # 积累 2
     assert tr.update([b])              # 3 帧 → present
-    assert not tr.update([])           # 缺 1
+    assert tr.update([])               # 缺 1：退出去抖是 2 帧，还没退出（仍 present）
     assert not tr.update([])           # 缺 2 → 退出
     assert not tr.update([b])          # 重进第 1 帧：修复前这里立刻复活（漏洞）
     assert not tr.update([b])          # 第 2 帧继续积累
@@ -114,5 +114,6 @@ if __name__ == "__main__":
     test_board_sized_blue_filtered()
     test_tracker_debounce()
     test_model_channel_falls_back_on_local()
+    test_tracker_exit_clears_seen()
     test_model_channel_requires_path()
     print("test_cone_detect: all passed")

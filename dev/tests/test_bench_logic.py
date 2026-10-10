@@ -194,23 +194,11 @@ def test_scaled_pulse_clamped_above_esc_deadband():
 
 
 if __name__ == "__main__":
-    test_never_runs_without_board()
-    test_board_stops()
-    test_board_wins_over_force_run()
-    test_lane_loss_stops_unless_forced()
-    test_align_uses_start_speed()
-    test_aligned_uses_track_speed()
-    test_no_lane_mode_skips_alignment()
-    test_default_pulses_are_above_esc_deadband()
-    test_auto_target_accepts_stable_samples()
-    test_auto_target_rejects_unstable_or_absurd()
-    test_align_verdict_detects_direction()
-    test_driving_off_course()
-    test_acquire_creep_without_lane()
-    test_acquire_does_not_override_force_run()
-    test_creep_stage_ignores_throttle_scale()
-    test_scaled_pulse_slows_down_instead_of_stopping()
-    test_scaled_pulse_clamped_above_esc_deadband()
-    test_bench_common_exposes_safety_api()
-    test_restore_is_idempotent()
-    print("test_bench_logic: all passed")
+    # 10-11 统一：动态收集（曾因手写白名单漏登记新用例 → 静默零执行）
+    fns = [v for k, v in sorted(globals().items())
+           if k.startswith("test_") and callable(v)
+           and getattr(v, "__module__", None) == __name__]
+    for fn in fns:
+        fn()
+        print(f"  ✅ {fn.__name__}")
+    print(f"test_bench_logic: all {len(fns)} passed")

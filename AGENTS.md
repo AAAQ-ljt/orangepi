@@ -153,9 +153,9 @@ cd dev && export PYTHONPATH=.
 
 # 单测（纯函数 + __main__ 风格，不需要 pytest）—— 直接全部跑一遍
 for t in tests/test_*.py; do "$PY" "$t" || echo "FAIL $t"; done
-# 当前 18 个文件：filters/pid/lane_arbiter/protocol/start_gate/control/elements/site_config/
+# 当前 19 个文件：filters/pid/lane_arbiter/protocol/start_gate/control/elements/site_config/
 #   camera_guard/rknn_detector/bench_logic/lane_ref/lane_ref_run/color_elements/cone_detect/
-#   imu/vision_replay + integration
+#   imu/parking_logic/vision_replay + integration
 "$PY" tests/test_integration.py        # 端到端：起控制端 + UDP 打假数据（dry-run）
 "$PY" tests/test_lane_ref_run.py       # 循迹：假摄像头跑完整状态机（自检→发车→跟线→丢线停车）
 
@@ -167,7 +167,7 @@ for t in tests/test_*.py; do "$PY" "$t" || echo "FAIL $t"; done
 
 - 所有新模块**必须能在没有摄像头、没有 PCA9685、没有模型的机器上 import 并测试**（用 mock 与合成图）。
 - 测试文件命名 `test_*.py`，用断言 + `if __name__ == "__main__"` 直接跑，别引入新的测试框架依赖。
-- 提交前**必须**跑通 `tests/test_*.py` 全部文件（当前 18 个）；高风险运动代码（循迹、台架、
+- 提交前**必须**跑通 `tests/test_*.py` 全部文件（当前 19 个）；高风险运动代码（循迹、台架、
   退出路径）除了纯函数测试，还要有"假硬件跑完整流程"的集成测试（照 `tests/test_lane_ref_run.py`）。
 
 ### 4.2 连车（免交互）

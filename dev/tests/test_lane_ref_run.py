@@ -174,19 +174,25 @@ def test_cone_avoid_immune_to_big_error_guard():
     """
     frames = ([_lane_frame()] * 6            # 自检窗口
               + [_board_frame()] * 3         # 板武装
-              + [_cone_frame()] * 4          # 锥桶出现（闸门可能判 blocked；tracker 攒 present=3+）
+              + [_cone_frame()] * 4          # 锥桶出现（闸门判 blocked；tracker 攒 present=3+）
               + [_lane_frame()] * 45         # "移开锥桶"：driving=True + present 余温 → S 型；
-                                             # 误差 79 持续 → 旧代码在 avoid 里 ~1.5s 就被 guard
-              + [_blank_frame()] * 40)       # 丢线收尾（无中心 → 不喂保护；自然 lost 结束）
-    # 注：绕行结束后**不再给"持续大误差"帧**——BigErrorGuard 的振荡判据（窗口 ≥6 帧、
-    #     大误差占比 ≥60%）在那时触发是**正确行为**（真跑偏），不属于本用例要测的豁免。
+                                             # 误差 79 持续 → 旧代码在 avoid 里几帧就被 guard
+              + [_blank_frame()] * 40)       # 丢线收尾（无中心 → 不喂保护）
     rc, _tmp, csv = _run(frames, ["--cone-method", "hsv", "--cone-avoid",
                                   "--cone-avoid-s", "0.6", "--cone-resume-s", "0.4",
                                   "--no-auto-target", "--target-ratio", "0.4625"])
     assert rc == 0
     phases = [line.split(",")[1] for line in csv.splitlines()[1:] if line.count(",") > 2]
-    assert "guard" not in phases, f"绕行期间不应触发跑偏保护，实际相位 {phases}"
-    assert "avoid1" in phases and "resume" in phases and "avoid2" in phases,         f"S 型三段应完整走完，实际 {phases}"
+    for need in ("avoid1", "resume", "avoid2"):
+        assert need in phases, f"S 型三段应完整走完，实际 {phases}"
+    # ★ 结论只看 guard 出现在"哪"：本用例全程误差恒 79px，S 走完后剩下的线帧迟早会让
+    #   big_err 的振荡判据（窗口 ≥6 帧、占比 ≥60%）触发——那是**正确行为**（真跑偏），
+    #   且触发早晚取决于机器速度（每帧 dt 决定 S 消耗掉多少线帧）。
+    #   所以不断言"不得出现 guard"，只要求它**不得在 S 走完之前**出现：
+    #   豁免失效时 guard 会在 avoid1 中途就打进来（此时 resume/avoid2 还没出现）。
+    if "guard" in phases:
+        assert phases.index("guard") > phases.index("avoid2"), \
+            f"S 未走完就被跑偏保护打断（豁免失效）：{phases}"
 
 
 def test_cone_cooldown_gates_respawn():
@@ -230,6 +236,36 @@ def test_cone_cli_overrides_reach_detector():
                                        "--cone-hsv-high", "2,2,2"])
     assert "avoid1" not in [r[1] for r in
                             (l.split(",") for l in csv.splitlines()[1:]) if len(r) > 2],         "故意错的 HSV 不应检出"
+
+
+def test_cone_avoid_direction_respects_steer_sign():
+    """实车口径（site.yaml steer_sign=-1，角度增大=左转）下绕行方向必须正确（四轮审查补）。
+
+    本地默认跑在 settings 的 +1 口径；实车是 -1。方向公式 angle = center ± first*sign*deg
+    必须在两种符号下都镜像正确——本用例把**实车符号**下的方向契约锁死：
+    first_dir=left → avoid1 转左（角度更大），avoid2 转右；first_dir=right 正好相反。
+    """
+    frames = ([_lane_frame()] * 6
+              + [_board_frame()] * 3
+              + [_cone_high_frame()] * 30
+              + [_blank_frame()] * 30)
+    for first, a1_gt_mid in (("left", True), ("right", False)):
+        rc, _tmp, csv = _run(frames, ["--cone-method", "hsv", "--cone-avoid",
+                                      "--cone-avoid-s", "0.5", "--cone-resume-s", "0.3",
+                                      "--cone-roi-top", "0.05",
+                                      "--steer-sign", "-1", "--cone-first-dir", first])
+        assert rc == 0
+        rows = [(l.split(",")[1], float(l.split(",")[6])) for l in
+                csv.splitlines()[1:] if l.count(",") > 6]
+        a1 = [a for p, a in rows if p == "avoid1"]
+        a2 = [a for p, a in rows if p == "avoid2"]
+        mid = [a for p, a in rows if p == "resume"]
+        assert a1 and a2 and mid, (
+            f"应触发完整 S 型（first_dir={first}），实际相位 {sorted(set(p for p, _ in rows))}")
+        assert (a1[0] > mid[0]) is a1_gt_mid, \
+            f"first_dir={first}: avoid1 相对中位方向错（{a1[0]:.0f} vs 中位 {mid[0]:.0f}）"
+        assert (a2[0] < mid[0]) is a1_gt_mid, \
+            f"first_dir={first}: avoid2 应与 avoid1 反向（{a2[0]:.0f} vs 中位 {mid[0]:.0f}）"
 
 
 def test_analyze_image_respects_cone_overrides():

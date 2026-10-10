@@ -161,13 +161,14 @@ def test_reference_band_is_always_a_candidate():
 def test_gains_switch_basis():
     """PID 增益的口径：参考数字是按 320 宽整定的，我们的误差是 640 宽像素。
 
-    literal = 直接抄 0.15/0.01/0.12；width = 按画面宽度换算（640 → 0.075/0.005/0.06）。
+    literal = 直接抄 0.15/0.01/0.12 再按帧率折算（我们 15FPS，官方 30FPS → ki/kd ×2）；
+    width = 按画面宽度换算后再折算（640 → kp 0.075、ki/kd ×2）。
     """
     from control.lane_control import gains_for
-    assert gains_for(640, "literal") == (0.15, 0.01, 0.12)
+    assert gains_for(640, "literal") == (0.15, 0.02, 0.24)
     kp, ki, kd = gains_for(640, "width")
-    assert abs(kp - 0.075) < 1e-9 and abs(ki - 0.005) < 1e-9 and abs(kd - 0.06) < 1e-9
-    assert gains_for(320, "width") == (0.15, 0.01, 0.12), "320 宽时两种口径应当重合"
+    assert abs(kp - 0.075) < 1e-9 and abs(ki - 0.01) < 1e-9 and abs(kd - 0.12) < 1e-9
+    assert gains_for(320, "width") == (0.15, 0.02, 0.24), "320 宽时与 literal（折算后）重合"
 
 
 def test_unanchored_fallback_preserves_reference_behavior():

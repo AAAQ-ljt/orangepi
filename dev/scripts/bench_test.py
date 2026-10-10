@@ -237,6 +237,9 @@ def main() -> int:
     args = ap.parse_args()
 
     # 标定/只读模式不驱动电机，因此不需要 --allow-motion
+    if args.show:
+        print("⚠️ X11 转发下画面只有 1~2FPS（2026-10-10 操场实测），且 cv2.imshow 可能拖慢主循环；")
+        print("   车态判断请以图传/CSV 为准，勿用转发画面判速判向。")
     use_motor = (not args.no_motor) and args.calibrate == 0
     if use_motor and not args.allow_motion:
         print("[BENCH] 拒绝运行：这次会驱动电机。确认四轮架空或场地空旷、有人在旁能立即断电，"

@@ -51,18 +51,21 @@ NEUTRAL_US = float(settings.ESC_STOP_US)
 
 
 def gains_for(width: int, mode: str = "literal") -> Tuple[float, float, float]:
-    """把参考实现的 PID 增益换成"我们这张画面宽度"口径。
+    """把参考实现的 PID 增益换成"我们这张画面宽度/帧率"口径。
 
     mode:
-      literal —— 直接抄参考数字（0.15/0.01/0.12）。这是旧版一直在用的、现场调参表假定的那一套；
-      width   —— 按画面宽度等比换算（320/width），即"同一个物理横偏给同一个舵角"。
-                 我们的误差是 640 宽的像素，所以等于 0.075/0.005/0.06。
-    **两种都不是错的，但物理含义不同**，所以做成显式开关 + 开跑前打印，别让它默默变。
+      literal —— 直接抄参考数字（0.15/0.01/0.12）再按帧率折算；
+      width   —— 按画面宽度等比换算（320/width，kp）再按帧率折算。
+    **帧率折算（2026-10-10 操场复盘实锤，10-11 起生效）**：官方参数是 30FPS 环境整定的，
+    我们的 640×480 摄像头实测就是 ~15FPS（不是代码慢）。而参考实现的 PID **没有 dt**：
+    积分/微分都是"每帧一步" → 帧率减半时，单位物理时间内积分累积减半、微分项
+    （相邻帧误差差）也减半 → 同一辆车的等效应 **ki、kd 都必须 ×2**，kp 与帧率无关。
+    照抄数字不折算 = 阻尼只有一半 → 操场实测蛇形 43 次翻转/28s 蠕动（run_ref）。
     """
     if mode == "width" and width > 0:
         scale = float(REF_GAIN_WIDTH) / float(width)
-        return KP_REF * scale, KI_REF * scale, KD_REF * scale
-    return KP_REF, KI_REF, KD_REF
+        return (KP_REF * scale, KI_REF * scale * 2.0, KD_REF * scale * 2.0)
+    return KP_REF, KI_REF * 2.0, KD_REF * 2.0
 
 
 class PidRef:

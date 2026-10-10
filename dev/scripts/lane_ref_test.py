@@ -688,6 +688,9 @@ def main() -> int:
     ap.add_argument("--single-limit-deg", type=float, default=5.0,
                     help="**单侧兜底帧**的舵角限幅（默认 ±5°）：运动时只靠一侧线推出来的中心"
                          "经常是错的，限幅小它就没法把车甩起来（2026-09-23 操场 S 弯主振荡源）")
+    ap.add_argument("--single-hold", action="store_true",
+                    help="★ 10-11 操场新档：单侧兜底帧**不跟推算中心**（实测会跳 ±50px 造成蛇行），"
+                         "改为回中位直行 + 降速维持，等双侧恢复再跟线；默认关（保持原行为）")
     ap.add_argument("--weak-limit-deg", type=float, default=10.0,
                     help="**弱对帧**（双侧但在的一侧 ≤2 段）的舵角限幅（默认 ±10°）：这类帧的"
                          "中心一跳 50~140px（占大跳变的 60%），限小一点就不至于被自己的读数甩动")
@@ -1139,13 +1142,26 @@ def main() -> int:
                             phase = cone_phase
                         elif driving:
                             if ls.phase == "fresh":
-                                steer = pid.step(err_c)
-                                # ★ 单侧/弱对帧的中心不可靠（实测一跳 50~140px），
-                                #   单独收窄它们的舵角：还能走，但甩不动
-                                steer = apply_steer_cap(center_deg, steer, r.both_sides,
-                                                        r.n_left, r.n_right,
-                                                        args.single_limit_deg,
-                                                        args.weak_limit_deg)
+                                if (args.single_hold and not r.both_sides):
+                                    # ★ 单侧兜底帧（10-11 操场实测）：推算中心 = 可见线 + 半宽，
+                                    #   可见线读数在飘（实测右线 540↔490）→ 跟它会蛇行 ±50px。
+                                    #   行为：回中位直行 + 降速维持，等双侧回来再跟线。
+                                    pid.reset()
+                                    if err_filter is not None:
+                                        err_filter.reset()
+                                    steer = center_deg
+                                    angle = center_deg
+                                    out_us = floor_pulse(args.speed_us, args.speed_slow)
+                                    phase = "single"
+                                    last_center = r.center_x
+                                else:
+                                    steer = pid.step(err_c)
+                                    # ★ 单侧/弱对帧的中心不可靠（实测一跳 50~140px），
+                                    #   单独收窄它们的舵角：还能走，但甩不动
+                                    steer = apply_steer_cap(center_deg, steer, r.both_sides,
+                                                            r.n_left, r.n_right,
+                                                            args.single_limit_deg,
+                                                            args.weak_limit_deg)
                                 angle = steer
                                 out_us = adaptive_pulse(err_c, args.speed_us,
                                                         args.speed_fast, args.speed_slow)

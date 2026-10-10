@@ -752,6 +752,19 @@ def main() -> int:
     ap.add_argument("--cone-first-dir", choices=("left", "right"), default="left",
                     help="S 型第一段往哪边绕（默认 left：左绕→回正→右绕；"
                          "第二个锥桶在另一边时不用改，两段方向相反即成 S）")
+    # ---- 锥桶现场覆盖项（10-11 加：HSV/ROI 阈值现场调不用改文件）----
+    ap.add_argument("--cone-hsv-low", default="",
+                    help="覆盖锥桶蓝 HSV 下限，格式 'H,S,V'（默认 settings.CONE_BLUE_HSV_LOW）")
+    ap.add_argument("--cone-hsv-high", default="",
+                    help="覆盖锥桶蓝 HSV 上限，格式 'H,S,V'（默认 settings.CONE_BLUE_HSV_HIGH）")
+    ap.add_argument("--cone-roi-top", type=float, default=None,
+                    help="覆盖 CONE_GATE_ROI 上沿（默认 0.35——C-001 实测会切掉远小锥桶，"
+                         "现场候选 0.05）")
+    ap.add_argument("--cone-avoid-us", type=int, default=None,
+                    help=f"绕行油门脉宽（默认 settings.CONE_AVOID_US={settings.CONE_AVOID_US}）")
+    ap.add_argument("--cone-cooldown-s", type=float, default=None,
+                    help=f"一轮绕行结束后的冷却秒数（默认 settings.CONE_COOLDOWN_S="
+                         f"{settings.CONE_COOLDOWN_S:.0f}——防同一个锥桶二进宫）")
     # ---- 斑马线停车档（--zebra-stop；默认关，单项可测）----
     ap.add_argument("--zebra-stop", action="store_true",
                     help="斑马线停车档：检测到斑马线（连续 N 帧，ZEBRA_HYSTERESIS_FRAMES）→ "
@@ -762,6 +775,21 @@ def main() -> int:
                     help=f"斑马线条纹数阈值（默认 settings.ZEBRA_MIN_COUNT="
                          f"{settings.ZEBRA_MIN_COUNT}；现场按 elements_probe 读数调）")
     args = ap.parse_args()
+
+    def _parse_hsv3(s: str):
+        """'H,S,V' → (H, S, V)；空串 → None。"""
+        if not s:
+            return None
+        parts = [int(v) for v in s.split(",")]
+        assert len(parts) == 3, f"HSV 需 'H,S,V' 三个数：{s!r}"
+        return tuple(parts)
+
+    cone_hsv_low = _parse_hsv3(args.cone_hsv_low)
+    cone_hsv_high = _parse_hsv3(args.cone_hsv_high)
+    cone_roi = None
+    if args.cone_roi_top is not None:
+        cone_roi = (settings.CONE_GATE_ROI[0], settings.CONE_GATE_ROI[1],
+                    float(args.cone_roi_top), settings.CONE_GATE_ROI[3])
 
     # ---- 参数来源：命令行 > --ref-behavior 预设 > settings/site.yaml（ROI/前瞻带只有一处定义）
     def opt(name: str, default):
@@ -896,7 +924,13 @@ def main() -> int:
                                       " 下的 car4cls 权重（--cone-model 可显式指定）→ 回退 hsv")
                                 method = "hsv"
                         cone_det = ConeDetector(method=method,
-                                                model_path=(model_path or None))
+                                                model_path=(model_path or None),
+                                                roi=cone_roi,
+                                                hsv_low=cone_hsv_low,
+                                                hsv_high=cone_hsv_high)
+                        if cone_hsv_low or cone_hsv_high or cone_roi:
+                            print(f"[REF] 锥桶现场覆盖：hsv_low={cone_hsv_low} "
+                                  f"hsv_high={cone_hsv_high} roi={cone_roi}")
                         cone_tracker = ConeTracker()
                         print(f"[REF] 锥桶检测：{method} 通道"
                               + (f"（{model_path}）" if model_path else "")
@@ -914,6 +948,11 @@ def main() -> int:
                                else float(args.cone_avoid_s))
                     resume_s = (settings.CONE_SEGUE_S if args.cone_resume_s is None
                                 else float(args.cone_resume_s))
+                    avoid_us = (settings.CONE_AVOID_US if args.cone_avoid_us is None
+                                else int(args.cone_avoid_us))
+                    cooldown_s = (settings.CONE_COOLDOWN_S if args.cone_cooldown_s is None
+                                  else float(args.cone_cooldown_s))
+                    cone_cooldown_until = 0.0    # 一轮绕行结束后的冷却截止（防同一锥桶二进宫）
                     seen_board = False
                     preflight_done = False
                     station_ok = True          # 自检通过才能发车（2026-09-23 操场实测加）
@@ -1072,7 +1111,7 @@ def main() -> int:
                                     zebra_stop_until = now + args.zebra_seconds
                                     print(f"[REF] 🦓 检测到斑马线（连续 "
                                           f"{settings.ZEBRA_HYSTERESIS_FRAMES} 帧）→ "
-                                          f"停车 {args.zebra_seconds:.0f}s（{zebra_stop_until:.1f} 恢复）")
+                                          f"停车 {args.zebra_seconds:.1f}s（{zebra_stop_until:.1f} 恢复）")
                             else:
                                 zebra_streak = 0
                         else:
@@ -1082,11 +1121,15 @@ def main() -> int:
                             zebra_printed = True  # 停上了（触发信息已打印）
                         elif not zebra_stopping and zebra_printed:
                             zebra_printed = False
-                            print(f"[REF] 🦓 停够 {args.zebra_seconds:.0f}s → 继续前进")
+                            print(f"[REF] 🦓 停够 {args.zebra_seconds:.1f}s → 继续前进")
                         ls = loss.update(now, err_c is not None) if driving \
                                 and not zebra_stopping \
                             else LossState("idle", 0.0, 1.0)
-                        trip = bool(driving and not zebra_stopping and args.err_stop_s > 0
+                        # ★ 10-11 修：绕行是“故意的大幅转向”——绕行期间不更新跑偏保护
+                        #   （此前注释声称豁免但实现没有 → 假帧实测 S 型走到一半被 guard 停死）
+                        in_avoid = cone_phase is not None and args.cone_avoid
+                        trip = bool(driving and not zebra_stopping and not in_avoid
+                                    and args.err_stop_s > 0
                                     and big_err.update(now, err_c, raw_error=err_raw))
                         if trip:
                             # ⚠️ err_c 可能为 None（读数质量不够时不进控制器），
@@ -1101,9 +1144,11 @@ def main() -> int:
                                 and not trip and not state["stopped"]:
                             now_c = time.time()
                             if cone_phase is None:
-                                if cone_present:
+                                if cone_present and now_c >= cone_cooldown_until:
                                     cone_phase = "avoid1"
                                     cone_phase_t0 = now_c
+                                    big_err.reset()      # 清绕行前残留，避免回归 track 立刻被旧累积触发
+                                    osc.reset()
                                     print(f"[REF] 🚩 检测到锥桶 → S 型避让开始"
                                           f"（{args.cone_first_dir}绕 {avoid_s:.1f}s）")
                             elif cone_phase == "avoid1":
@@ -1121,7 +1166,10 @@ def main() -> int:
                                     cone_phase = None
                                     cone_phase_t0 = None
                                     cone_tracker.reset()
-                                    print("[REF] → 避让结束，回到循迹")
+                                    cone_cooldown_until = now_c + cooldown_s
+                                    big_err.reset()
+                                    osc.reset()
+                                    print(f"[REF] → 避让结束，回到循迹（冷却 {cooldown_s:.0f}s）")
 
                         phase, out_us, angle = "stop", NEUTRAL_US, center_deg
                         if trip:
@@ -1145,7 +1193,7 @@ def main() -> int:
                             else:                                          # resume：回中直行找下一个
                                 angle = center_deg
                             steer = angle
-                            out_us = settings.CONE_AVOID_US
+                            out_us = avoid_us
                             phase = cone_phase
                         elif driving:
                             if ls.phase == "fresh":
@@ -1214,7 +1262,8 @@ def main() -> int:
                         #   （2026-09-23 操场实测：舵机 75°↔105° 来回甩、误差 ±100~300 翻符号，
                         #    连续计时型跑偏保护永远凑不满 → 用拐角次数直接抓）
                         if driving and not zebra_stopping and not trip \
-                                and not state["stopped"]:
+                                and not state["stopped"] \
+                                and not (cone_phase is not None and args.cone_avoid):
                             if osc.update(now, angle, center_deg):
                                 trip = True
                                 print("[REF] ❌ 检测到画龙（S 弯）：舵机 2s 内大幅来回摆多次"

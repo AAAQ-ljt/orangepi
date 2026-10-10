@@ -152,6 +152,32 @@ def test_cones_trigger_s_avoid_then_resume():
     assert "track" in phases, "绕行结束后应回到循迹"
 
 
+def test_cone_avoid_immune_to_big_error_guard():
+    """绕行豁免跑偏保护（10-11 修复回归）。
+
+    场景（复刻审查复现实验）：误差恒 +79px（用 --no-auto-target 把目标点偏置到 296，
+    线在画面正中、质量 1.00）——修复前 big_err 在绕行期间照常累积，S 型走到一半被
+    guard 停死、整次行程结束；修复后绕行期间不更新保护、进出各 reset，S 三段完整。
+    时序照真实复现：锥桶块先被发车闸门当板挡几帧（stop，tracker 无条件攒 present），
+    "锥桶移开"（线帧）后 avoid1 启动。
+    """
+    frames = ([_lane_frame()] * 6            # 自检窗口
+              + [_board_frame()] * 3         # 板武装
+              + [_cone_frame()] * 4          # 锥桶出现（闸门可能判 blocked；tracker 攒 present=3+）
+              + [_lane_frame()] * 45         # "移开锥桶"：driving=True + present 余温 → S 型；
+                                             # 误差 79 持续 → 旧代码在 avoid 里 ~1.5s 就被 guard
+              + [_blank_frame()] * 40)       # 丢线收尾（无中心 → 不喂保护；自然 lost 结束）
+    # 注：绕行结束后**不再给"持续大误差"帧**——BigErrorGuard 的振荡判据（窗口 ≥6 帧、
+    #     大误差占比 ≥60%）在那时触发是**正确行为**（真跑偏），不属于本用例要测的豁免。
+    rc, _tmp, csv = _run(frames, ["--cone-method", "hsv", "--cone-avoid",
+                                  "--cone-avoid-s", "0.6", "--cone-resume-s", "0.4",
+                                  "--no-auto-target", "--target-ratio", "0.4625"])
+    assert rc == 0
+    phases = [line.split(",")[1] for line in csv.splitlines()[1:] if line.count(",") > 2]
+    assert "guard" not in phases, f"绕行期间不应触发跑偏保护，实际相位 {phases}"
+    assert "avoid1" in phases and "resume" in phases and "avoid2" in phases,         f"S 型三段应完整走完，实际 {phases}"
+
+
 def test_cone_avoid_off_never_enters_avoid():
     """没开 --cone-avoid 时，即使检测到锥桶也不绕行（默认行为不变）。"""
     frames = ([_lane_frame()] * 6
@@ -217,7 +243,8 @@ def test_zebra_stop_triggers_then_resumes():
               + [_board_frame()] * 3       # 见板武装
               + [_lane_frame()] * 6        # 移开板 → 放行跟线
               + [_zebra_frame()] * 6       # 斑马线：连续 3 帧触发 → 停车
-              + [_lane_frame()] * 20)      # 停够 0.4s 后应恢复循迹
+              + [_lane_frame()] * 20       # 停够 0.4s 后应恢复循迹
+              + [_blank_frame()] * 40)     # 丢线收尾（自然 lost，rc=0）
     rc, _tmp, csv = _run(frames, ["--zebra-stop", "--zebra-seconds", "0.4"])
     assert rc == 0
     rows = [line.split(",") for line in csv.splitlines()[1:] if line.count(",") > 2]
@@ -233,7 +260,8 @@ def test_zebra_off_never_enters_zebra():
               + [_board_frame()] * 3
               + [_lane_frame()] * 6
               + [_zebra_frame()] * 6
-              + [_lane_frame()] * 4)
+              + [_lane_frame()] * 4
+              + [_blank_frame()] * 40)
     rc, _tmp, csv = _run(frames, [])
     assert rc == 0
     assert "zebra" not in csv.splitlines()[0:], "默认必须不触发斑马线停车"
@@ -322,16 +350,10 @@ def test_session_dir_is_created_before_csv():
 
 
 if __name__ == "__main__":
-    for name in ("test_full_state_machine_walks_all_phases",
-                 "test_cones_trigger_s_avoid_then_resume",
-                 "test_cone_avoid_off_never_enters_avoid",
-                 "test_cone_stop_blocks_then_resumes",
-                 "test_never_blocks_means_never_drives",
-                 "test_board_too_early_is_handled",
-                 "test_single_side_lane_keeps_running",
-                 "test_camera_dead_exits_cleanly",
-                 "test_run_guard_trip_does_not_crash",
-                 "test_session_dir_is_created_before_csv"):
-        globals()[name]()
-        print(f"  ✅ {name}")
-    print("test_lane_ref_run: all 10 passed")
+    # 10-11 修：改用全量收集（此前是手写白名单——新增用例忘记登记就会静默不跑）
+    fns = [v for k, v in sorted(globals().items())
+           if k.startswith("test_") and callable(v)]
+    for fn in fns:
+        fn()
+        print(f"  ✅ {fn.__name__}")
+    print(f"test_lane_ref_run: all {len(fns)} passed")

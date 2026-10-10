@@ -150,9 +150,12 @@ class ConeDetector:
 
     def __init__(self, method: str = "hsv", model_path: Optional[str] = None,
                  profile_name: str = "car4cls", conf_threshold: Optional[float] = None,
-                 roi: Optional[Tuple[float, float, float, float]] = None):
+                 roi: Optional[Tuple[float, float, float, float]] = None,
+                 hsv_low=None, hsv_high=None):
         self.method = method
         self.roi = roi
+        self.hsv_low = hsv_low        # 现场覆盖（None = 用 settings.CONE_BLUE_HSV_*）
+        self.hsv_high = hsv_high
         self.model_path = model_path
         self._rknn = None
         self._profile = None
@@ -182,9 +185,11 @@ class ConeDetector:
 
     def detect(self, frame_bgr: np.ndarray) -> List[ConeBox]:
         if self.method == "hsv":
-            return detect_cones_hsv(frame_bgr, roi=self.roi)
+            return detect_cones_hsv(frame_bgr, roi=self.roi,
+                                    hsv_low=self.hsv_low, hsv_high=self.hsv_high)
         if self._model is None:
-            return detect_cones_hsv(frame_bgr, roi=self.roi)
+            return detect_cones_hsv(frame_bgr, roi=self.roi,
+                                    hsv_low=self.hsv_low, hsv_high=self.hsv_high)
         try:
             elements = self._postprocess(self._model.infer(self._model.preprocess(frame_bgr)),
                                          self._profile,
@@ -242,6 +247,7 @@ class ConeTracker:
             if self.present:
                 if self._missing >= self.exit_frames:
                     self.present = False
+                    self._seen = 0          # 10-11 修：退出后清零，防"出→1 帧重现→立刻复活"跳过去抖
             else:
                 self._seen = 0              # 从未成立时清掉积累，防止缓慢爬升误触发
         return self.present

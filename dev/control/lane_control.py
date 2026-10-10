@@ -56,16 +56,20 @@ def gains_for(width: int, mode: str = "literal") -> Tuple[float, float, float]:
     mode:
       literal —— 直接抄参考数字（0.15/0.01/0.12）再按帧率折算；
       width   —— 按画面宽度等比换算（320/width，kp）再按帧率折算。
-    **帧率折算（2026-10-10 操场复盘实锤，10-11 起生效）**：官方参数是 30FPS 环境整定的，
-    我们的 640×480 摄像头实测就是 ~15FPS（不是代码慢）。而参考实现的 PID **没有 dt**：
-    积分/微分都是"每帧一步" → 帧率减半时，单位物理时间内积分累积减半、微分项
-    （相邻帧误差差）也减半 → 同一辆车的等效应 **ki、kd 都必须 ×2**，kp 与帧率无关。
-    照抄数字不折算 = 阻尼只有一半 → 操场实测蛇形 43 次翻转/28s 蠕动（run_ref）。
+    **帧率折算（2026-10-10/11 复盘，请按下面两笔账各算各的，别混）**：官方参数是 30FPS
+    环境整定的，我们的摄像头实测锁 15FPS（模组硬限制）。参考实现的 PID **没有 dt**：
+      · 积分：`Ki·Σe`，每秒累积 = Ki·FPS → 帧率减半则收敛速度减半 → **Ki 需 ×2**；
+      · 微分：`Kd·Δe/帧`，等效连续阻尼 = **Kd·dt = Kd/FPS** → 帧率减半则阻尼**加倍** →
+        照抄 0.12 在 15FPS 已是官方 30FPS 用 0.12 时的 2 倍阻尼。**要严格等效官方应 ×0.5（0.06）**；
+        但 10-10 蛇形主因已定位为幻影线对（见 lane_ref `_paired_ok` 画面内判据），阻尼本身是
+        现场 A/B 项：0.06（等效官方）/ 0.12（照抄）/ 0.24（强阻尼）三档实测。**本函数默认取
+        官方原值 0.12 不折算**（kd 是"手感"参数，由现场定；此前 ×2 的推导方向搞反了，已撤销）。
+      · kp：与帧率无关，不变。
     """
     if mode == "width" and width > 0:
         scale = float(REF_GAIN_WIDTH) / float(width)
-        return (KP_REF * scale, KI_REF * scale * 2.0, KD_REF * scale * 2.0)
-    return KP_REF, KI_REF * 2.0, KD_REF * 2.0
+        return (KP_REF * scale, KI_REF * scale * 2.0, KD_REF * scale)
+    return KP_REF, KI_REF * 2.0, KD_REF
 
 
 class PidRef:
@@ -94,6 +98,14 @@ class PidRef:
         self.integral = 0.0
         self.last_error = 0.0
         self.last_angle = None
+
+    def prime(self, error: float) -> None:
+        """把上一帧误差预置为当前值：下一帧的微分项从 0 起跳。
+
+        使用场景（10-11 修）：`--single-hold` 每帧丢线帧都 reset、恢复双侧帧时
+        `last_error=0` → 微分 = error−0 = 全量误差，kd 大时是一记假"踢腿"。
+        """
+        self.last_error = float(error)
 
     def step(self, error: float) -> float:
         self.integral += float(error)

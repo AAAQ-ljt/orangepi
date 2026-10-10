@@ -355,7 +355,7 @@ class LaneRefDetector:
             reading.right_kb = right
 
         if left is not None and right is not None:
-            if self._paired_ok(left, right, y_ref):
+            if self._paired_ok(left, right, y_ref, w):
                 self._fill_center(reading, left, right, w, h)
                 reading.both_sides = True
                 reading.half_width = abs(reading.right_x - reading.left_x) * 0.5
@@ -365,8 +365,11 @@ class LaneRefDetector:
                     prior.update(reading.half_width)
                 reading.quality = Q_BOTH * self._support_factor(len(segs))
             else:
-                note = (f"配对宽度越界（{abs(reading.right_x - reading.left_x):.0f}px 不在 "
-                        f"{self.p.pair_w_min:.0f}~{self.p.pair_w_max:.0f}），按不可信处理")
+                lx_, rx_ = reading.left_x, reading.right_x
+                note = (f"配对不可信（宽 {abs(rx_ - lx_):.0f}px / 闸门 "
+                        f"{self.p.pair_w_min:.0f}~{self.p.pair_w_max:.0f}；"
+                        f"L={lx_:.0f} R={rx_:.0f} 画面宽 {w}"
+                        f"{'｜有线段出画面' if (lx_ < 30 or rx_ > w - 30) else ''}）")
                 return self._finalize_untrusted(reading, prior, note)
             return reading
 
@@ -430,9 +433,22 @@ class LaneRefDetector:
         return min(1.0, float(n_segs) / float(full))
 
     def _paired_ok(self, left: Tuple[float, float], right: Tuple[float, float],
-                   y_ref: float) -> bool:
-        """成对宽度是否落进物理区间（配对宽度闸门，2026-09-19 操场实测加）。"""
-        w_pair = _x_at(*right, y_ref) - _x_at(*left, y_ref)
+                   y_ref: float, w: int) -> bool:
+        """成对宽度是否落进物理区间（配对宽度闸门，2026-09-19 操场实测加）。
+
+        ⚠️ 2026-10-11 补"画面内判据"（10-10 操场实锤）：ROI 里的稳定长边缘不止白线
+        ——左边框/地面接缝/画面外线段外推都会是"长直线"。复算 setup 帧：
+        左线锁在 x≈19~38（贴画面左边框）、右线 x≈675~695（整个在 640 画布外），
+        宽度 646~665 落进 [120,700] 闸门、q=1.00 无告警，target 就标到了这幻影对的
+        中点（362.7）。两条代表线在 y_ref 处**必须都落在画面内**（留 30px 余量）——
+        画面外的线段是外推值，不是真车道线。
+        """
+        lx = _x_at(*left, y_ref)
+        rx = _x_at(*right, y_ref)
+        margin = 30.0
+        if not (margin <= lx <= w - margin and margin <= rx <= w - margin):
+            return False
+        w_pair = rx - lx
         if w_pair <= 0:
             return False
         return self.p.pair_w_min <= w_pair <= self.p.pair_w_max

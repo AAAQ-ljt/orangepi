@@ -586,13 +586,14 @@ def replay(directory: str, params: LaneParams, args, steer_sign: float,
     det = LaneRefDetector(params)
     err_filter = None if args.no_filter else ErrorFilter(args.filter_window, args.filter_outlier)
     kp, ki, kd = gains
-    pid = PidRef(kp, ki, kd, args.limit_deg, args.smooth, sign=steer_sign)
+    center_ref = float(settings.SERVO_CENTER_ANGLE)     # 复盘口径与实车一致（90°≠直行）
+    pid = PidRef(kp, ki, kd, args.limit_deg, args.smooth, sign=steer_sign, center=center_ref)
     rows = []
     for f in frames:
         r = det.detect(f)
         ef = err_filter.update(r.error) if (err_filter is not None and r.error is not None) \
             else r.error
-        angle = pid.step(ef) if (ef is not None and abs(ef) < args.err_stop_px) else 90.0
+        angle = pid.step(ef) if (ef is not None and abs(ef) < args.err_stop_px) else center_ref
         rows.append((r, ef, angle))
     both = sum(1 for r, _, _ in rows if r.both_sides)
     single = sum(1 for r, _, _ in rows if r.center_x is not None and not r.both_sides)
@@ -604,11 +605,11 @@ def replay(directory: str, params: LaneParams, args, steer_sign: float,
               f"{np.percentile(a, 95):+.0f}  极值 {a.min():+.0f}~{a.max():+.0f}")
     angles = np.asarray([ang for _, _, ang in rows], dtype=float)
     if angles.size:
-        sat = float(np.mean(np.abs(angles - 90.0) >= args.limit_deg - 1e-6)) * 100
+        sat = float(np.mean(np.abs(angles - center_ref) >= args.limit_deg - 1e-6)) * 100
         step = np.abs(np.diff(angles)) if angles.size > 1 else np.zeros(1)
-        flips = int(np.sum(np.diff(np.sign(angles - 90.0)) != 0))
+        flips = int(np.sum(np.diff(np.sign(angles - center_ref)) != 0))
         print(f"[REF] 控制律（kp={kp} ki={ki} kd={kd} 限幅±{args.limit_deg}°）："
-              f"平均|舵角−90|={np.mean(np.abs(angles - 90.0)):.1f}°  打满限幅 {sat:.0f}%  "
+              f"平均|舵角−{center_ref:.0f}|={np.mean(np.abs(angles - center_ref)):.1f}°  打满限幅 {sat:.0f}%  "
               f"单帧最大变化 {step.max():.1f}°  方向翻转 {flips} 次")
         print("[REF]   （翻转多=抖动 → 加 kd 或降 kp；一直打满/越修越偏 → 目标点或转向方向不对）")
     return 0
@@ -1122,7 +1123,7 @@ def main() -> int:
                                     cone_tracker.reset()
                                     print("[REF] → 避让结束，回到循迹")
 
-                        phase, out_us, angle = "stop", NEUTRAL_US, 90.0
+                        phase, out_us, angle = "stop", NEUTRAL_US, center_deg
                         if trip:
                             phase = "guard"
                         elif zebra_stopping:
@@ -1154,6 +1155,8 @@ def main() -> int:
                                     #   行为：回中位直行等双侧恢复；速度 = --single-speed-us
                                     #   （默认保速巡航，高速循迹不因丢线反复龟速）。
                                     pid.reset()
+                                    if r.error is not None:
+                                        pid.prime(r.error)   # 10-11：恢复时微分从 0 起跳，防 kd 假踢腿
                                     if err_filter is not None:
                                         err_filter.reset()
                                     steer = center_deg
@@ -1194,7 +1197,7 @@ def main() -> int:
                                 # 丢线维持：沿用上次中心，误差按时间衰减回中位（越久越回正）
                                 held = (last_center - params.target_ratio * target_w) \
                                     if last_center is not None else 0.0
-                                angle = pid.step(held * ls.decay) if abs(held) > 1e-6 else 90.0
+                                angle = pid.step(held * ls.decay) if abs(held) > 1e-6 else center_deg
                                 steer = angle
                                 out_us = floor_pulse(args.speed_us, args.speed_slow)
                                 phase = "hold"

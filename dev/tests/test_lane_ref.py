@@ -161,14 +161,14 @@ def test_reference_band_is_always_a_candidate():
 def test_gains_switch_basis():
     """PID 增益的口径：参考数字是按 320 宽整定的，我们的误差是 640 宽像素。
 
-    literal = 直接抄 0.15/0.01/0.12 再按帧率折算（我们 15FPS，官方 30FPS → ki/kd ×2）；
-    width = 按画面宽度换算后再折算（640 → kp 0.075、ki/kd ×2）。
+    literal = 抄 0.15/0.01/0.12，ki 按帧率折算 ×2（积分收敛），kd 不折算（现场 A/B）；
+    width = 按画面宽度换算后再折算（640 → kp 0.075）。
     """
     from control.lane_control import gains_for
-    assert gains_for(640, "literal") == (0.15, 0.02, 0.24)
+    assert gains_for(640, "literal") == (0.15, 0.02, 0.12)
     kp, ki, kd = gains_for(640, "width")
-    assert abs(kp - 0.075) < 1e-9 and abs(ki - 0.01) < 1e-9 and abs(kd - 0.12) < 1e-9
-    assert gains_for(320, "width") == (0.15, 0.02, 0.24), "320 宽时与 literal（折算后）重合"
+    assert abs(kp - 0.075) < 1e-9 and abs(ki - 0.01) < 1e-9 and abs(kd - 0.06) < 1e-9
+    assert gains_for(320, "width") == (0.15, 0.02, 0.12), "320 宽时与 literal 重合"
 
 
 def test_unanchored_fallback_preserves_reference_behavior():
@@ -529,6 +529,29 @@ def test_big_error_guard_needs_sustained_error():
 
 
 # ---------------------------------------------------------------- 8~9 自动选带 / 前瞻带
+def test_paired_rejects_out_of_frame_lines():
+    """10-10 操场幻影对实锤回归：左右线在 y_ref 处必须落在画面内（留 30px 余量）。
+
+    复算 setup 帧的真实形状：左线贴画面左边框（x≈30）、右线被 Hough 外推到画面外
+    （x≈686 > 640）——配对宽度 656 落进 [120,700] 闸门，旧实现全票放行（q=1.00），
+    target 就标到这对幻影线的中点（362.7）。新实现必须拒掉。
+    """
+    det = LaneRefDetector()
+
+    def line_through(x1, y1, x2, y2):
+        # kb 是 y = k·x + b 口径（见 lane_ref._x_at：(y-b)/k）
+        k = (y2 - y1) / (x2 - x1)
+        return (k, y1 - k * x1)
+
+    y_ref = 199.0
+    ghost_l = line_through(30, 199, 150, 400)      # 贴左边框
+    ghost_r = line_through(686, 199, 800, 400)     # 画面外（>640）
+    assert not det._paired_ok(ghost_l, ghost_r, y_ref, 640), "右线在画面外 → 必须判不可信"
+    ok_l = line_through(200, 199, 220, 400)
+    ok_r = line_through(430, 199, 470, 400)
+    assert det._paired_ok(ok_l, ok_r, y_ref, 640), "画面内的真线对应放行"
+
+
 def test_sweep_bands_finds_band_that_sees_the_lines():
     """配置的带是错的（罩不到白线）时，扫描必须能选到真正锁住两条线的那一档。"""
     frames = [_lane_image()] * 5

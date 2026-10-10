@@ -148,6 +148,26 @@ def _fmt(v, fmt="%.1f") -> str:
     return "-" if v is None else fmt % v
 
 
+def parse_hsv3(s: str):
+    """'H,S,V' → (H, S, V)；空串 → None。输入错误抛 ValueError（中文提示，调用方 print+return 2）。
+
+    ⚠️ 不用 assert：`python -O` 下会被整条跳过；且要校验范围（0~255），
+    否则 np.uint8 会把 300 静默截成 44，行为诡异。
+    """
+    if not s:
+        return None
+    parts = s.split(",")
+    if len(parts) != 3:
+        raise ValueError(f"HSV 需 'H,S,V' 三个 0~255 的整数，收到 {len(parts)} 个数：{s!r}")
+    try:
+        vals = tuple(int(v) for v in parts)
+    except ValueError:
+        raise ValueError(f"HSV 必须是整数：{s!r}")
+    if any(not (0 <= v <= 255) for v in vals):
+        raise ValueError(f"HSV 每项须在 0~255：{s!r}")
+    return vals
+
+
 def _sided_text(r) -> str:
     """状态行里的"双侧/单侧/无"——没读数时写"单侧"会误导人（2026-09-22 实验室实测发现）。"""
     if r is None or r.center_x is None:
@@ -534,9 +554,24 @@ def analyze_image(path: str, params: LaneParams, args=None) -> int:
           f"{'  ' + r.note if r.note else ''}")
     print(f"[REF] 镜头朝向体检：{det.visible_range(img)['text']}")
     # 锥桶检测（单图验证；hsv 不依赖权重，model 需要车上有 rknn 权重）
+    # 10-11 P1 修：--cone-roi-top / --cone-hsv-low/high 也必须在单图路径生效
+    #   （此前只有实跑主循环传了——现场用 --image 验阈值会得到假阴性）
     if args is not None and getattr(args, "cone_method", "off") != "off":
         from vision.cone_detect import ConeDetector
-        cone_det = ConeDetector(method=args.cone_method, model_path=args.cone_model or None)
+        from vision.cone_detect import detect_cones_hsv as _dc_hsv
+        img_roi = None
+        if getattr(args, "cone_roi_top", None) is not None:
+            top = float(args.cone_roi_top)
+            img_roi = (settings.CONE_GATE_ROI[0], settings.CONE_GATE_ROI[1],
+                       top, settings.CONE_GATE_ROI[3])
+        try:
+            img_low = parse_hsv3(getattr(args, "cone_hsv_low", "") or "")
+            img_high = parse_hsv3(getattr(args, "cone_hsv_high", "") or "")
+        except ValueError as exc:
+            print(f"[REF] --cone-hsv-low/high 参数错误：{exc}")
+            return 2
+        cone_det = ConeDetector(method=args.cone_method, model_path=args.cone_model or None,
+                                roi=img_roi, hsv_low=img_low, hsv_high=img_high)
         cones = cone_det.detect(img)
         if cones:
             for c in cones:
@@ -545,8 +580,8 @@ def analyze_image(path: str, params: LaneParams, args=None) -> int:
         elif cone_det.method == "hsv":
             # 部署 ROI 没检出，但全图可能检出（比如训练图是手持朝前拍、锥桶在上半画面）：
             # 提示“锥桶在 ROI 外”，区分“检测器不行”和“锥桶没进部署区域”
-            from vision.cone_detect import detect_cones_hsv
-            all_cones = detect_cones_hsv(img, roi=(0.0, 1.0, 0.0, 1.0))
+            all_cones = _dc_hsv(img, roi=(0.0, 1.0, 0.0, 1.0),
+                               hsv_low=img_low, hsv_high=img_high)
             if all_cones:
                 print(f"[REF] 锥桶: 部署 ROI 内无；全图检出 "
                       f"{[f'x={c.center_x:.0f} y={c.xyxy[1]:.0f}~{c.xyxy[3]:.0f}' for c in all_cones[:3]]}"
@@ -776,18 +811,18 @@ def main() -> int:
                          f"{settings.ZEBRA_MIN_COUNT}；现场按 elements_probe 读数调）")
     args = ap.parse_args()
 
-    def _parse_hsv3(s: str):
-        """'H,S,V' → (H, S, V)；空串 → None。"""
-        if not s:
-            return None
-        parts = [int(v) for v in s.split(",")]
-        assert len(parts) == 3, f"HSV 需 'H,S,V' 三个数：{s!r}"
-        return tuple(parts)
-
-    cone_hsv_low = _parse_hsv3(args.cone_hsv_low)
-    cone_hsv_high = _parse_hsv3(args.cone_hsv_high)
+    # 10-11 P2 修：显式校验 + 一行中文提示（不用 assert），坏参数直接拒绝
+    try:
+        cone_hsv_low = parse_hsv3(args.cone_hsv_low)
+        cone_hsv_high = parse_hsv3(args.cone_hsv_high)
+    except ValueError as exc:
+        print(f"[REF] --cone-hsv-low/high 参数错误：{exc}")
+        return 2
     cone_roi = None
     if args.cone_roi_top is not None:
+        if not (0.0 <= args.cone_roi_top < 1.0):
+            print(f"[REF] --cone-roi-top 须在 [0,1)：{args.cone_roi_top}")
+            return 2
         cone_roi = (settings.CONE_GATE_ROI[0], settings.CONE_GATE_ROI[1],
                     float(args.cone_roi_top), settings.CONE_GATE_ROI[3])
 

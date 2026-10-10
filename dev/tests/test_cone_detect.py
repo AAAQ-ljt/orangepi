@@ -8,7 +8,7 @@ from __future__ import annotations
 import cv2
 import numpy as np
 
-from vision.cone_detect import ConeDetector, ConeTracker, detect_cones_hsv
+from vision.cone_detect import ConeBox, ConeDetector, ConeTracker, detect_cones_hsv
 
 
 def _canvas() -> np.ndarray:
@@ -81,6 +81,21 @@ def test_model_channel_falls_back_on_local():
     _draw_cone(img, 300, 430, 90, 130)
     cones = det.detect(img)
     assert len(cones) >= 1, "回退到 hsv 后应仍能检出合成锥桶"
+
+
+def test_tracker_exit_clears_seen():
+    """10-11 修：present 退出后第一帧重现不得立刻复活（否则 1 帧就跳过去抖）。"""
+    tr = ConeTracker(enter_frames=3, exit_frames=2)
+    b = ConeBox(xyxy=(0.0, 0.0, 10.0, 10.0), area_ratio=0.01, conf=0.9)
+    assert not tr.update([b])          # 积累 1
+    assert not tr.update([b])          # 积累 2
+    assert tr.update([b])              # 3 帧 → present
+    assert not tr.update([])           # 缺 1
+    assert not tr.update([])           # 缺 2 → 退出
+    assert not tr.update([b])          # 重进第 1 帧：修复前这里立刻复活（漏洞）
+    assert not tr.update([b])          # 第 2 帧继续积累
+    assert tr.update([b])              # 第 3 帧才复活
+    assert tr.present
 
 
 def test_model_channel_requires_path():

@@ -58,6 +58,17 @@ def _blank_frame() -> np.ndarray:
     return frame
 
 
+def _cone_high_frame() -> np.ndarray:
+    """锥桶在画面上部（y 70~170）：默认 CONE_GATE_ROI(0.35) 切不到。
+
+    用**淡蓝** (200,170,120)：dominance=B−max(R,G)=30 < 35，不会被发车闸门当蓝板
+    （真实锥桶 S≈70 也是低饱和，此口径一致）；仍在锥桶 HSV (70,30,150)~ 内可检出。
+    """
+    frame = _lane_frame()
+    frame[70:170, 295:385] = (200, 170, 120)
+    return frame
+
+
 def _cone_frame(shift: int = 0, size: int = 90) -> np.ndarray:
     """红棕底 + 双斜白线 + 一个蓝色锥桶块（下摄视角：锥桶在画面中下部，ROI 内）。"""
     frame = _lane_frame(shift=shift)
@@ -176,6 +187,72 @@ def test_cone_avoid_immune_to_big_error_guard():
     phases = [line.split(",")[1] for line in csv.splitlines()[1:] if line.count(",") > 2]
     assert "guard" not in phases, f"绕行期间不应触发跑偏保护，实际相位 {phases}"
     assert "avoid1" in phases and "resume" in phases and "avoid2" in phases,         f"S 型三段应完整走完，实际 {phases}"
+
+
+def test_cone_cooldown_gates_respawn():
+    """CONE_COOLDOWN_S 接线（10-11）：锥桶常驻视野时，第二轮 avoid1 必须等冷却期满。"""
+    frames = ([_lane_frame()] * 6
+              + [_board_frame()] * 3
+              + [_cone_high_frame()] * 110      # 锥桶常驻：够 S1(1.6s) + 冷却 + S2 完整
+              + [_blank_frame()] * 80)          # 丢线收尾（第三轮不会再启动 → 自然 lost）
+    rc, _tmp, csv = _run(frames, ["--cone-method", "hsv", "--cone-avoid",
+                                  "--cone-avoid-s", "0.6", "--cone-resume-s", "0.4",
+                                  "--cone-roi-top", "0.05", "--cone-cooldown-s", "1.0"])
+    assert rc == 0
+    rows = [(float(r[0]), r[1]) for r in
+            (line.split(",") for line in csv.splitlines()[1:]) if len(r) > 2]
+    starts = []
+    for i, (t, ph) in enumerate(rows):
+        if ph == "avoid1" and (i == 0 or rows[i - 1][1] != "avoid1"):
+            starts.append(t)
+    assert len(starts) >= 2, f"锥桶常驻应触发至少两轮 S，实际起点 {starts}"
+    # 起点差 = S 总时长(0.6+0.4+0.6) + 冷却 1.0s ≈ 2.6s
+    gap = starts[1] - starts[0]
+    assert 2.3 <= gap < 3.6, f"两轮 avoid1 间隔 {gap:.2f}s 应≈ S时长+冷却(2.6s)"
+
+
+def test_cone_cli_overrides_reach_detector():
+    """--cone-roi-top / --cone-hsv-* 必须真的进检测器（10-11 覆盖项透传回归）。"""
+    frames = ([_lane_frame()] * 6
+              + [_board_frame()] * 3
+              + [_cone_high_frame()] * 30
+              + [_blank_frame()] * 30)
+    base = ["--cone-method", "hsv", "--cone-avoid",
+            "--cone-avoid-s", "0.6", "--cone-resume-s", "0.4"]
+    rc, _t, csv = _run(frames, base)
+    assert "avoid1" not in [r[1] for r in
+                            (l.split(",") for l in csv.splitlines()[1:]) if len(r) > 2],         "默认 ROI(0.35) 切掉高处锥桶 → 不应绕行"
+    rc, _t, csv = _run(frames, base + ["--cone-roi-top", "0.05"])
+    assert "avoid1" in [r[1] for r in
+                        (l.split(",") for l in csv.splitlines()[1:]) if len(r) > 2],         "--cone-roi-top 0.05 后应检出并绕行"
+    rc, _t, csv = _run(frames, base + ["--cone-roi-top", "0.05",
+                                       "--cone-hsv-low", "1,1,1",
+                                       "--cone-hsv-high", "2,2,2"])
+    assert "avoid1" not in [r[1] for r in
+                            (l.split(",") for l in csv.splitlines()[1:]) if len(r) > 2],         "故意错的 HSV 不应检出"
+
+
+def test_analyze_image_respects_cone_overrides():
+    """P1 回归（10-11）：--image 单图路径必须接收 roi/hsv 覆盖项，不能读默认值。"""
+    import contextlib
+    import io as _io
+    import tempfile
+    tmp = tempfile.mkdtemp(prefix="cone_img_")
+    path = os.path.join(tmp, "high_cone.jpg")
+    cv2.imencode(".jpg", _cone_high_frame())[1].tofile(path)
+    for extra, expect in (([], "部署 ROI 内无"),
+                          (["--cone-roi-top", "0.05"], "锥桶(hsv): x=")):
+        argv_back = sys.argv
+        sys.argv = (["lane_ref_test.py", "--image", path, "--cone-method", "hsv"]
+                    + extra)
+        buf = _io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf):
+                lt.main()
+        finally:
+            sys.argv = argv_back
+        out = buf.getvalue()
+        assert expect in out, f"{extra} 时输出应含 {expect!r}，实际：{out[-200:]}"
 
 
 def test_cone_avoid_off_never_enters_avoid():
@@ -352,7 +429,8 @@ def test_session_dir_is_created_before_csv():
 if __name__ == "__main__":
     # 10-11 修：改用全量收集（此前是手写白名单——新增用例忘记登记就会静默不跑）
     fns = [v for k, v in sorted(globals().items())
-           if k.startswith("test_") and callable(v)]
+           if k.startswith("test_") and callable(v)
+           and getattr(v, "__module__", None) == __name__]
     for fn in fns:
         fn()
         print(f"  ✅ {fn.__name__}")

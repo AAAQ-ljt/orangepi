@@ -622,9 +622,10 @@ def main() -> int:
     ap.add_argument("--replay", default="", help="复盘一个会话目录里的帧（本地可跑，不碰硬件）")
     ap.add_argument("--roi-sweep", action="store_true", help="复盘时顺带重算候选带表")
     ap.add_argument("--camera", type=int, default=2, help="摄像头（默认 2=下摄，巡线固定这一路）")
-    ap.add_argument("--speed-us", type=float, default=float(settings.ESC_CREEP_US),
-                    help=f"循迹脉宽（默认 {settings.ESC_CREEP_US}；死区 "
-                         f"{settings.ESC_DEADBAND_US}，调试上限 {settings.ESC_DEBUG_MAX_US}）")
+    ap.add_argument("--speed-us", type=float, default=1580.0,
+                    help="循迹巡航脉宽（默认 **1580**——2026-10-11 用户定案：1560 龟速不可接受；"
+                         f"死区 {settings.ESC_DEADBAND_US}，调试上限 {settings.ESC_DEBUG_MAX_US}；"
+                         "快的前提 = 增益帧率折算 + --single-hold 已上车）")
     ap.add_argument("--speed-fast", type=float, default=SPEED_FAST_US,
                     help=f"误差小(<5px)时的脉宽增量（默认 {SPEED_FAST_US:+.0f}，0=不提速）")
     ap.add_argument("--speed-slow", type=float, default=SPEED_SLOW_US,

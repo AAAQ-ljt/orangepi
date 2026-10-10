@@ -785,8 +785,8 @@ def main() -> int:
                     help=f"两段绕行间的回正直行秒（默认 settings.CONE_SEGUE_S="
                          f"{settings.CONE_SEGUE_S:.1f}）")
     ap.add_argument("--cone-first-dir", choices=("left", "right"), default="left",
-                    help="S 型第一段往哪边绕（默认 left：左绕→回正→右绕；"
-                         "第二个锥桶在另一边时不用改，两段方向相反即成 S）")
+                    help="S 型第一段往哪边绕（**居中档默认方向**；锥偏左/偏右时按位置自动选侧，"
+                         "此参数只在锥桶居中（|center_x−target|≤CONE_SIDE_TOLERANCE_PX）时生效）")
     # ---- 锥桶现场覆盖项（10-11 加：HSV/ROI 阈值现场调不用改文件）----
     ap.add_argument("--cone-hsv-low", default="",
                     help="覆盖锥桶蓝 HSV 下限，格式 'H,S,V'（默认 settings.CONE_BLUE_HSV_LOW）")
@@ -974,6 +974,7 @@ def main() -> int:
                     cone_phase = None            # None/"avoid1"/"resume"/"avoid2"
                     cone_phase_t0: Optional[float] = None
                     cone_stopped = False         # --cone-stop：检测到锥桶后停车（实验室模式）
+                    cone_first_dir_eff = args.cone_first_dir   # 任务 A：本次 S 实际绕行侧（触发时定，S 内不复算）
                     zebra_stop_until = 0.0       # 斑马线档：下次允许行驶的时刻（时间戳）
                     zebra_streak = 0             # 连续检出帧数
                     zebra_printed = False        # 恢复提示只打一次
@@ -1180,12 +1181,31 @@ def main() -> int:
                             now_c = time.time()
                             if cone_phase is None:
                                 if cone_present and now_c >= cone_cooldown_until:
+                                    # ★ 任务 A（10-11）：按锥桶横向位置选绕行侧（只算一次，S 内复用）
+                                    #   cones[0]=最近锥（面积最大）；target = 车道中线（自检标定）
+                                    eff = args.cone_first_dir
+                                    cx = cones[0].center_x if cones else None
+                                    tgt = params.target_ratio * target_w
+                                    if cx is not None:
+                                        if cx < tgt - settings.CONE_SIDE_TOLERANCE_PX:
+                                            eff = "right"          # 锥偏左 → 往右绕
+                                        elif cx > tgt + settings.CONE_SIDE_TOLERANCE_PX:
+                                            eff = "left"           # 锥偏右 → 往左绕
+                                    cone_first_dir_eff = eff
                                     cone_phase = "avoid1"
                                     cone_phase_t0 = now_c
                                     big_err.reset()      # 清绕行前残留，避免回归 track 立刻被旧累积触发
                                     osc.reset()
-                                    print(f"[REF] 🚩 检测到锥桶 → S 型避让开始"
-                                          f"（{args.cone_first_dir}绕 {avoid_s:.1f}s）")
+                                    if cx is None:
+                                        side_txt = "位置未知"
+                                    elif cx < tgt - settings.CONE_SIDE_TOLERANCE_PX:
+                                        side_txt = "偏左"
+                                    elif cx > tgt + settings.CONE_SIDE_TOLERANCE_PX:
+                                        side_txt = "偏右"
+                                    else:
+                                        side_txt = "居中"
+                                    print(f"[REF] 🚩 检测到锥桶（{side_txt}，x={'' if cx is None else round(cx)} "
+                                          f"vs 中线 {tgt:.0f}）→ {eff}绕 {avoid_s:.1f}s")
                             elif cone_phase == "avoid1":
                                 if now_c - cone_phase_t0 >= avoid_s:
                                     cone_phase = "resume"
@@ -1220,7 +1240,7 @@ def main() -> int:
                             # 安全兜底：绕行时油门降到 CONE_AVOID_US 低速；任何时刻再见板 → driving=False
                             # 直接进上面的停车分支；--max-seconds 总上限仍然生效。
                             sign = steer_sign                          # +1=角度大右转 / -1=角度大左转
-                            first = -1.0 if args.cone_first_dir == "left" else 1.0
+                            first = -1.0 if cone_first_dir_eff == "left" else 1.0
                             if cone_phase == "avoid1":
                                 angle = center_deg + first * sign * avoid_deg    # 先向 first 侧
                             elif cone_phase == "avoid2":
@@ -1256,14 +1276,18 @@ def main() -> int:
                                                             r.n_left, r.n_right,
                                                             args.single_limit_deg,
                                                             args.weak_limit_deg)
-                                angle = steer
-                                out_us = adaptive_pulse(err_c, args.speed_us,
-                                                        args.speed_fast, args.speed_slow)
-                                if not r.both_sides:
-                                    out_us = floor_pulse(args.speed_us, args.speed_slow)
-                                phase = "track"
-                                last_center = r.center_x
-                                n_track += 1
+                                    # ⚠️ 以下四条必须**留在 else 内**：放到外面会覆盖上面
+                                    #   single 分支刚设好的 out_us(=--single-speed-us) 与
+                                    #   phase="single"（2026-10-11 假帧复跑实锤：会退化成
+                                    #   floor_pulse 且 CSV 里没有 single 阶段）。
+                                    angle = steer
+                                    out_us = adaptive_pulse(err_c, args.speed_us,
+                                                            args.speed_fast, args.speed_slow)
+                                    if not r.both_sides:
+                                        out_us = floor_pulse(args.speed_us, args.speed_slow)
+                                    phase = "track"
+                                    last_center = r.center_x
+                                    n_track += 1
                             elif ls.phase == "hold" and ls.since_s == INF:
                                 # 发车后还没见过一次线：低速探路（舵角回中位，往前拱找线）
                                 pid.reset()

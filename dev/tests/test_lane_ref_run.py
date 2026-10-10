@@ -58,14 +58,15 @@ def _blank_frame() -> np.ndarray:
     return frame
 
 
-def _cone_high_frame() -> np.ndarray:
+def _cone_high_frame(cone_dx: int = 0) -> np.ndarray:
     """锥桶在画面上部（y 70~170）：默认 CONE_GATE_ROI(0.35) 切不到。
 
     用**淡蓝** (200,170,120)：dominance=B−max(R,G)=30 < 35，不会被发车闸门当蓝板
     （真实锥桶 S≈70 也是低饱和，此口径一致）；仍在锥桶 HSV (70,30,150)~ 内可检出。
+    cone_dx：只横向平移锥桶（任务 A 三位置场景用；线不动）。
     """
     frame = _lane_frame()
-    frame[70:170, 295:385] = (200, 170, 120)
+    frame[70:170, 295 + cone_dx:385 + cone_dx] = (200, 170, 120)
     return frame
 
 
@@ -289,6 +290,38 @@ def test_analyze_image_respects_cone_overrides():
             sys.argv = argv_back
         out = buf.getvalue()
         assert expect in out, f"{extra} 时输出应含 {expect!r}，实际：{out[-200:]}"
+
+
+def test_cone_avoid_side_from_position():
+    """任务 A（10-11）：按锥桶横向位置选绕行侧——偏右→左绕、偏左→右绕、居中→默认 left。
+
+    实车口径（--steer-sign -1，角度增大=左转）：left → avoid1 角度大于中位，right 小于。
+    锥块中心（340+dx） vs 自检目标点（≈375）：dx=0 居中（差 35 < 容差 60）。
+    """
+    def run_with(dx):
+        frames = ([_lane_frame()] * 6 + [_board_frame()] * 3
+                  + [_cone_high_frame(cone_dx=dx)] * 40 + [_blank_frame()] * 30)
+        return _run(frames, ["--cone-method", "hsv", "--cone-avoid",
+                             "--cone-avoid-s", "0.5", "--cone-resume-s", "0.3",
+                             "--cone-roi-top", "0.05", "--steer-sign", "-1"])
+
+    def a1_gt_mid(csv):
+        rows = [(l.split(",")[1], float(l.split(",")[6])) for l in
+                csv.splitlines()[1:] if l.count(",") > 6]
+        a1 = [a for p, a in rows if p == "avoid1"]
+        mid = [a for p, a in rows if p == "resume"]
+        assert a1 and mid, "需要 avoid1 与 resume 相位"
+        return sum(a1) / len(a1) > sum(mid) / len(mid)
+
+    rc, _t, csv = run_with(200)      # 锥在画面右侧（偏右）→ 左绕
+    assert rc == 0
+    assert a1_gt_mid(csv), "偏右锥应左绕（avoid1 角度 > 中位）"
+    rc, _t, csv = run_with(-200)     # 锥偏左 → 右绕
+    assert rc == 0
+    assert not a1_gt_mid(csv), "偏左锥应右绕（avoid1 角度 < 中位）"
+    rc, _t, csv = run_with(0)        # 居中（差 35 < 容差）→ 默认 left
+    assert rc == 0
+    assert a1_gt_mid(csv), "居中锥应走默认 left（avoid1 角度 > 中位）"
 
 
 def test_cone_avoid_off_never_enters_avoid():

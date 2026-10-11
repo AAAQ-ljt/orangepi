@@ -335,6 +335,7 @@ StartGateState(blocked: bool, armed: bool, released: bool, blue_ratio: float, ti
 | 两个模型同时无脑调 RKNN | NPU 争抢导致总吞吐下降；先"单推理线程 + 任务队列"，必要时再 core mask 隔离 |
 | 主循环里 `cv::imwrite` / X11 `imshow` | 卡住控制回路 / headless 下直接崩；调试预览用开关控制 |
 | 依赖 `main.py --dry-run` 参数 | 该参数不存在，dry-run 是**默认行为** |
+| **图传延迟 30s+ 且恒定不自愈**（2026-10-11 已修） | ffmpeg 输入队列 `thread_queue_size 512` 是"延迟水库"（512 帧按真实帧率可攒十几~三十秒）：5G 上行一旦低于编码码率，TCP 推流背压把它灌满，之后 WebRTC 按 1x 慢放旧帧，只有重启才能清空。已改两个 `ffmpeg-stream*` 单元：queue→16（积压上限 ~1s，卡顿时丢帧代替攒延迟）+ capped CRF（`-crf 23 -maxrate 1200k -bufsize 300k`，两路 ≤2.5Mbps）——改后源端滞后恒定 ~2s、drop=0。积压测量：`/var/log/ffmpeg-stream.log` 的 `time=` 与进程 `etimes` 相减。原件备份 `/root/dev/backup-20261011/`。另：网页只有 WebRTC、没有 HLS 代码，"延迟大=HLS 兜底"的旧说法作废 |
 
 ---
 

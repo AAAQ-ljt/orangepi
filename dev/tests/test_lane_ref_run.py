@@ -423,8 +423,8 @@ def test_board_too_early_is_handled():
 
 def test_single_side_lane_keeps_running():
     """只看到一侧线时：靠半宽先验兜底继续跟线（不是"一丢线就停"）。"""
-    half_lane = _lane_frame()
-    half_lane[:, 500:] = (35, 45, 120)      # 擦掉右线（BGR 底色）
+    half_lane = _lane_frame(left=True, right=False)   # 只画左线。别用"擦列"法：
+    #   右线 x<500 的残段会留幻影边缘，车端旧 cv2 的 HoughLinesP 把它凑成假对
     frames = ([_lane_frame()] * 6 + [_board_frame()] * 4 + [half_lane] * 25)
     # 这一条不需要自检扫带（省时间），直接测"单侧还能不能走"
     rc, _tmp, csv = _run(frames, ["--acquire-s", "0.15", "--hold-s", "0.2",
@@ -444,8 +444,10 @@ def test_single_hold_keeps_speed_and_labels_phase():
     → 该参数完全失效（单侧帧退化成 `floor_pulse` = base+speed_slow）、CSV 里没有 single 阶段、
     A/D 两档对照会得出"这参数没用"的错误结论。本用例锁住修复后的行为。
     """
-    half = _lane_frame()
-    half[:, 500:] = (35, 45, 120)          # 擦掉右线 → 只剩左侧（单侧兜底帧）
+    half = _lane_frame(left=True, right=False)   # 只画左线 = 单侧兜底帧。不要用
+    #   "擦掉 x≥500"构造：右线 x<500 的残段是幻影边缘，车端旧 cv2 的 HoughLinesP
+    #   会把它和左线凑成假对（both_sides=1，10 帧里 8 帧）→ 用例变抛硬币
+    #   （2026-10-11 串口实测：本地 cv2 5.0 全过、车上 17/19 挂这条）。
     frames = [_lane_frame()] * 6 + [_board_frame()] * 4 + [half] * 10 + [_lane_frame()] * 10
     rc, _tmp, csv = _run(frames, ["--acquire-s", "0.15", "--hold-s", "0.2",
                                   "--no-auto-roi", "--no-auto-look", "--single-hold",

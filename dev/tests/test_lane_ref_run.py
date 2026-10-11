@@ -436,6 +436,32 @@ def test_single_side_lane_keeps_running():
     assert singles, "应当出现过【单侧】帧（both_sides=0）"
 
 
+def test_single_hold_keeps_speed_and_labels_phase():
+    """`--single-hold`：单侧兜底帧不跟推算中心（回中位），且**速度取 --single-speed-us**。
+
+    回归（2026-10-11 假帧复跑实锤）：`angle/out_us/phase` 这几条原先写在 if/else **外面**，
+    会把 single 分支刚设好的 `out_us`(=--single-speed-us) 与 `phase="single"` 覆盖掉
+    → 该参数完全失效（单侧帧退化成 `floor_pulse` = base+speed_slow）、CSV 里没有 single 阶段、
+    A/D 两档对照会得出"这参数没用"的错误结论。本用例锁住修复后的行为。
+    """
+    half = _lane_frame()
+    half[:, 500:] = (35, 45, 120)          # 擦掉右线 → 只剩左侧（单侧兜底帧）
+    frames = [_lane_frame()] * 6 + [_board_frame()] * 4 + [half] * 10 + [_lane_frame()] * 10
+    rc, _tmp, csv = _run(frames, ["--acquire-s", "0.15", "--hold-s", "0.2",
+                                  "--no-auto-roi", "--no-auto-look", "--single-hold",
+                                  "--single-speed-us", "1560", "--speed-us", "1580",
+                                  "--speed-slow", "-10"])
+    assert rc in (0, 1)
+    rows = [ln.split(",") for ln in csv.splitlines()[1:] if ln.count(",") > 10]
+    singles = [r for r in rows if r[1] == "single"]
+    assert singles, f"应当出现 single 阶段，实际阶段 {sorted(set(r[1] for r in rows))}"
+    assert {r[7] for r in singles} == {"1560"}, \
+        f"单侧帧脉宽必须取 --single-speed-us(1560)，实际 {sorted({r[7] for r in singles})}"
+    center = float(lt.settings.SERVO_CENTER_ANGLE)
+    assert {float(r[6]) for r in singles} == {center}, \
+        f"单侧帧舵角必须回中位({center})，实际 {sorted({float(r[6]) for r in singles})}"
+
+
 def test_camera_dead_exits_cleanly():
     """摄像头一直不给画面 → 在 --read-fail-s 内报错退出（rc=1），不空转到 --max-seconds；
     而且安全层照常收尾（summary 落盘）。"""

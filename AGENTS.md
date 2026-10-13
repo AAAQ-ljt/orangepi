@@ -336,6 +336,7 @@ StartGateState(blocked: bool, armed: bool, released: bool, blue_ratio: float, ti
 | 主循环里 `cv::imwrite` / X11 `imshow` | 卡住控制回路 / headless 下直接崩；调试预览用开关控制 |
 | 依赖 `main.py --dry-run` 参数 | 该参数不存在，dry-run 是**默认行为** |
 | **图传延迟 30s+ 且恒定不自愈**（2026-10-11 已修） | ffmpeg 输入队列 `thread_queue_size 512` 是"延迟水库"（512 帧按真实帧率可攒十几~三十秒）：5G 上行一旦低于编码码率，TCP 推流背压把它灌满，之后 WebRTC 按 1x 慢放旧帧，只有重启才能清空。已改两个 `ffmpeg-stream*` 单元：queue→16（积压上限 ~1s，卡顿时丢帧代替攒延迟）+ capped CRF（`-crf 23 -maxrate 1200k -bufsize 300k`，两路 ≤2.5Mbps）——改后源端滞后恒定 ~2s、drop=0。积压测量：`/var/log/ffmpeg-stream.log` 的 `time=` 与进程 `etimes` 相减。原件备份 `/root/dev/backup-20261011/`。另：网页只有 WebRTC、没有 HLS 代码，"延迟大=HLS 兜底"的旧说法作废 |
+| **开机后 frp/SSH 全断、frpc 卡 activating**（2026-10-13 已修） | 不是 frp 的问题，是**车没网**：`car-net.service` 的 ExecStart 直接执行 `/root/dev/scripts/net/car-net.sh auto`，脚本一丢执行位 systemd 就报 `203/EXEC`、重试 10 次放弃 → 不拨号 → 无上行 → frpc 连不上服务器。**根因在仓库**：全库 `.sh` 在 git 里都是 `100644`（无执行位），凡"按仓库原样同步到车"必复现（同步工具不会替 git 补 +x）；之前能用是因为有人手动拨过号，把坑盖住了。车端已修：全部 `.sh` 补 `+x`，`systemctl reset-failed car-net.service` 后 restart 实测通过（日志"上电联网完成（蜂窝）"）。**仓库侧待办**：对 `dev/scripts` 下被 systemd 直接执行的入口脚本 `git update-index --chmod=+x` 后提交，否则下次全量同步/换车再踩。排查路径：`car-net.sh status` 看"默认出口/蜂窝"，`journalctl -b -u car-net.service` 搜 `203` |
 
 ---
 

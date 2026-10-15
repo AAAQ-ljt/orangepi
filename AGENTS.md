@@ -130,7 +130,9 @@ D:\5g\orangepi\
     │   ├── car-test/    # 硬件自检 test_all.sh
     │   ├── car-frp/  server-frp/   # frp 两端配置留存（可复现）
     │   └── capture_dataset.py / record_video.py / cam-identify.py / safe_pwm_init.sh …
-    ├── img/             # 拍照/录像脚本 + 采集数据（**数据不入 git**）
+    ├── img/             # 拍照/录像脚本（脚本入库；拍出来的图片不入库）
+    ├── data/            # ★ 采集数据统一放这里（**整目录不入 git**，2026-10-15 起；
+    │                    #   原 setup_eyes/ show_test/ 等已迁入：`dev/data/<用途>/`）
     ├── logs/            # 运行日志（不入 git；可随时清空）
     ├── models/          # 模型（不入 git）
     ├── backup-*/        # 官方配置备份（只读保留，回滚用）

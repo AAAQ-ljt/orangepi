@@ -35,3 +35,15 @@ runs/
 *.pid
 dev/models/
 dev/calib/
+
+# ===== 车端运行产物 / 采集数据（2026-10-15）：规则强制，不靠自觉 =====
+#   · 采集数据统一放 dev/data/（车端已把 setup_eyes/show_test 等迁进去）
+#   · site.yaml 是车端本地标定覆盖层（故意不入库、不参与同步；值请按惯例写回 settings.py 并注日期）
+#   · dev/video/ 只入库脚本（record.py/README.md），录像由上面的 *.mp4 挡住
+dev/data/
+dev/logs/
+dev/img/*.jpg
+dev/img/*.jpeg
+dev/img/*.png
+dev/backup-*/
+dev/config/site.yaml

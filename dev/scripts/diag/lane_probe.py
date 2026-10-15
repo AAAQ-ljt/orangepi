@@ -229,7 +229,7 @@ class _Reading:
 
 
 def _detector(roi_top_ratio=None, roi_bottom_ratio=None):
-    """参考实现版检测器（`vision/lane_ref.py`，与 `lane_ref_test.py` 同一个类）。
+    """参考实现版检测器（`vision/lane_ref.py`，与旧入口 `lane_ref_test.py` 同一个类；后者已归档）。
 
     不传 ROI 就用现场标定值（settings ← config/site.yaml），保证探针结论与
     `lane_ref_test.py` 自检时选的带一致。

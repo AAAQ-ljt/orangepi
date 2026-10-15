@@ -153,7 +153,7 @@ AB_HULL_RATIO = 0.88              # < 0.88 → A（有三角缺口）；≥ 0.88
 # ---------------------------------------------------------------- 扫线
 # ⚠️ 2026-09-23 代码审查 B11：本区段是**两份已归档实现**（lane_scan / lane_hough，见
 # dev/attic/lane-old-20260919.tar.gz）的配置。当前生效的循迹实现在 `vision/lane_ref.py`
-# （入口 scripts/lane_ref_test.py），只消费 LANE_ROI_* / LANE_PAIR_W_* / LANE_LINE_MIN_* /
+# （2026-10-14 起入口 scripts/lane_final_test.py；旧 lane_ref_test.py 已归档），只消费 LANE_ROI_* / LANE_PAIR_W_* /
 # LANE_MASK_OPEN_PX / LANE_WHITE_* 等少量项；其余（LANE_CANNY_*、LANE_HOUGH_*、LANE_SLOPE_*、
 # LANE_FIT_*、LANE_TRACK_*、LANE_LOOKAHEAD_RATIO、LANE_WEIGHT_PEAK、LANE_MIN_VALID_ROWS、
 # LANE_MAX_LINE_W_PX、LANE_ROW_STEP、LANE_MIN_SEG_LEN_SUM、LANE_EDGE_MARGIN）**当前零引用**，
@@ -265,7 +265,7 @@ ERROR_FILTER_MAX_REJECTS = 4
 # 起点沿用官方上届巡线的"纯 PD"结构与经验比例（kp≈0.235 / kd≈0.6），
 # 按我们的误差单位（px/4、限幅 ±40）与舵机角度限幅（±30°）等比换算。
 # ⚠️ 这只是**起点**，必须现场整定；官方积分项恒为 0，我们默认也保持 0。
-# ★ 帧率口径（2026-10-12）：循迹实跑（`scripts/lane_ref_test.py` → `PidRef`）的 kp/ki/kd
+# ★ 帧率口径（2026-10-12）：循迹实跑（`scripts/lane_final_test.py` → `PidRef`）的 kp/ki/kd
 #   是 **15fps 登记口径**，代码按实测 dt 自动折算（30fps → 逐帧等效 ki 减半、kd 加倍），
 #   所以现场 A/B 表**继续按 15fps 口径写数字**。下面这几个是本文件旧 A 路径（vision_main +
 #   planner 那套带 dt 的位置式 PID）用的，和循迹脚本的增益不是同一套。

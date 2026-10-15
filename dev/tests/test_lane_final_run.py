@@ -79,8 +79,11 @@ def _run(frames, extra_args, fail_after: int = 10 ** 9, cyclic: bool = True):
     finally:
         sys.argv = argv
         lft.open_camera, lft.camera_exclusive = saved
-    with open(csv, "r", encoding="utf-8") as fh:
-        return rc, tmp, fh.read()
+    try:
+        with open(csv, "r", encoding="utf-8") as fh:
+            return rc, tmp, fh.read()
+    except FileNotFoundError:          # --calibrate 这类模式不落 CSV，正常
+        return rc, tmp, ""
 
 
 def _phases(csv_text: str):
@@ -160,6 +163,21 @@ def test_servo_center_from_settings() -> None:
         assert any(abs(a - 86.5) < 6.0 for a in angs), f"舵角应以 86.5 为中位：{angs[:8]}"
     finally:
         settings.SERVO_CENTER_ANGLE = saved
+
+
+def test_online_calibrate_mode() -> None:
+    """车上静止标定（--calibrate）：假摄像头喂静止赛道帧 → 出 target 候选、不写 site.yaml、rc=0。"""
+    import contextlib as _ctx
+    import io as _io
+    frames = [_lane_frame()] * 60           # 静止（完全一样的帧）
+    buf = _io.StringIO()
+    with _ctx.redirect_stdout(buf):
+        rc, _, _ = _run(frames, ["--calibrate", "--calibrate-s", "0.4", "--no-save-site"],
+                        cyclic=True)
+    out = buf.getvalue()
+    assert rc == 0, f"rc={rc}"
+    assert "静止标定" in out and "center 中位" in out, out[-400:]
+    assert "--target-x" in out, "应打印可直接复制的 --target-x"
 
 
 def main() -> int:

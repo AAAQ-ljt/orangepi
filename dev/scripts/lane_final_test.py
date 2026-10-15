@@ -958,6 +958,61 @@ def _calibrate_report(items: List[Tuple[int, np.ndarray]], det: LaneFinalDetecto
     return 0
 
 
+# ================================================================ 车上静止标定（--calibrate）
+def run_online_calibrate(args, det: LaneFinalDetector) -> int:
+    """车**静止摆正在车道里**，采几秒帧出统计 → target_x 候选；默认写回 site.yaml。
+
+    这一步是现场唯一必须做的事：检测档参数是"这台车+这个机位"标定的常量，只有 target_x
+    取决于"车摆在哪"（标定时车必须在车道中间、车头对着行进方向）。
+    """
+    rows: List[Reading] = []
+    with camera_exclusive(services=("ffmpeg-stream-sub.service",)):
+        cap = open_camera(args.cam, settings.IMG_W, settings.IMG_H, fourcc="MJPG")
+        if cap is None:
+            print("[LANE] 摄像头打不开（推流是否占着？看 car-mode.sh status）")
+            return 1
+        t0 = time.monotonic()
+        try:
+            while (time.monotonic() - t0) < args.calibrate_s:
+                ok, frame = cap.read()
+                if not ok or frame is None:
+                    time.sleep(0.02)
+                    continue
+                rows.append(det.detect(frame))
+        finally:
+            cap.release()
+    if not rows:
+        print("[LANE] 一帧都没读到")
+        return 1
+    both = [r for r in rows if r.both_sides and r.center_x is not None]
+    cs = np.asarray([r.center_x for r in both], dtype=float)
+    ws = np.asarray([r.half_w * 2 for r in both if r.half_w], dtype=float)
+    kl = np.asarray([r.left_k for r in both if r.left_k is not None], dtype=float)
+    kr = np.asarray([r.right_k for r in both if r.right_k is not None], dtype=float)
+    print(f"[LANE] 静止标定：{len(rows)} 帧，双侧 {len(both)}（{len(both) / len(rows) * 100:.0f}%）"
+          f"，单侧 {sum(1 for r in rows if r.valid and not r.both_sides)}，"
+          f"丢失 {sum(1 for r in rows if not r.valid)}")
+    if len(both) < 5:
+        print("[LANE] ⚠️ 双侧帧太少（<5）→ 车没摆正在道中 / 镜头没对着赛道，别用这次的结果")
+        print("[LANE]    先看叠加图：图片在 /root/dev/img/ 或跑 lane_final_test.py --no-motor 看读数")
+        return 1
+    med = float(np.median(cs))
+    print(f"[LANE] center 中位 **{med:.1f}**（p05~p95 {np.percentile(cs, 5):.1f}~{np.percentile(cs, 95):.1f}；"
+          f"跨距 {np.percentile(cs, 95) - np.percentile(cs, 5):.0f}px，越小越说明车没动）")
+    if ws.size:
+        print(f"[LANE] 配对宽中位 {np.median(ws):.0f}px（半宽 {np.median(ws) / 2:.0f}）"
+              f" | k 中位 左 {np.median(kl):+.2f} / 右 {np.median(kr):+.2f}")
+    print(f"[LANE] ⇒ 跑车命令直接用：--target-x {med:.0f}")
+    if args.save_site:
+        try:
+            from config import site as _site
+            path = _site.save({"target_x": round(med, 1)})
+            print(f"[LANE] ✅ 已写回 {path} 的 target_x = {round(med, 1)}（A 路径与以后运行都会用它）")
+        except Exception as exc:
+            print(f"[LANE] ⚠️ 写 site.yaml 失败（不影响本次打印的结果）：{exc}")
+    return 0
+
+
 # ================================================================ 在线模式（摄像头 + 可选电机）
 def run_online(args, det: LaneFinalDetector, center_deg: float, sign: float,
                runner: LaneRunner) -> int:
@@ -1077,7 +1132,12 @@ def build_parser() -> argparse.ArgumentParser:
     src.add_argument("--fps", type=float, default=None,
                      help="钉死帧率口径（离线默认读 meta.effective_fps；在线默认实测）")
     src.add_argument("--calibrate", action="store_true",
-                     help="只出标定统计（ROI/前瞻带/宽度/target 候选），不落盘")
+                     help="只出标定统计：离线(--frames/--video)或**车上静止**(默认)都能用；"
+                          "车上模式会把 target_x 写进 site.yaml（--no-save-site 可关）")
+    src.add_argument("--calibrate-s", type=float, default=4.0,
+                     help="车上静止标定采多少秒（默认 4s，够 60~120 帧）")
+    src.add_argument("--no-save-site", dest="save_site", action="store_false", default=True,
+                     help="车上 --calibrate 不写回 site.yaml")
 
     dst = ap.add_argument_group("检测档（1014 素材标定；换机位后重标）")
     dst.add_argument("--roi-top", type=int, default=ROI_TOP_PX)
@@ -1099,10 +1159,9 @@ def build_parser() -> argparse.ArgumentParser:
                      help="且另一侧移动不超过它才算\"只跳了一侧\"")
 
     ctl = ap.add_argument_group("控制（登记口径 15fps；运行按实测 dt 折算）")
-    ctl.add_argument("--target-x", type=float, default=TARGET_X0,
-                     help=f"期望中心 x（默认 {TARGET_X0:.0f} = 1014 素材候选；"
-                          f"**现场必须用 --calibrate 复核**——旧 site.yaml 的 320/343/375 是"
-                          f"旧镜头姿态标定，对本机位作废）")
+    ctl.add_argument("--target-x", type=float, default=None,
+                     help="期望中心 x（默认取车端 site.yaml 的现场标定值，没有则 330 = 1014 素材候选；"
+                          "**现场先用 --calibrate 标一次**）")
     ctl.add_argument("--speed-us", type=float, default=float(settings.ESC_CREEP_US),
                      help="循迹巡航脉宽（现场高速档用 1580+；低于死区直接拒绝）")
     ctl.add_argument("--start-us", type=float, default=float(settings.ESC_CREEP_US),
@@ -1172,7 +1231,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             print("[LANE] dry-run：--no-motor/默认不动电机；加 --allow-motion 才动车")
 
     # ---- 参数合成（默认 = 检测档 + settings，CLI 覆盖）
-    target_x = float(args.target_x)
+    # target_x：CLI > site.yaml 的现场标定值 > 1014 素材候选（TARGET_X0=330）
+    target_x = args.target_x
+    if target_x is None:
+        try:
+            from config import site as _site
+            _v = _site.load().get("target_x")
+            if _v is not None:
+                target_x = float(_v)
+                print(f"[LANE] target_x={target_x:.1f}（取自车端 site.yaml 的现场标定值）")
+        except Exception as _exc:            # 读不到就用素材候选，绝不因此起不来
+            print(f"[LANE] 读 site.yaml 的 target_x 失败（忽略）：{_exc}")
+    if target_x is None:
+        target_x = TARGET_X0
+        print(f"[LANE] target_x={target_x:.0f}（1014 素材候选；**现场请先 --calibrate 重标**）")
     center_deg = float(args.servo_center if args.servo_center is not None
                        else settings.SERVO_CENTER_ANGLE)
     sign = float(args.steer_sign if args.steer_sign is not None else settings.STEER_SIGN)
@@ -1204,6 +1276,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     print(f"[LANE] 增益（登记 {REF_FPS:.0f}fps）：kp={kp:.3f} ki={ki:.3f} kd={kd:.3f}"
           f"；30fps 逐帧等效 " + "ki=%.3f kd=%.3f" % runner.pid.frame_equivalent(30.0))
+
+    if args.calibrate and not offline:
+        return run_online_calibrate(args, det)
 
     if offline:
         return run_offline(args, det, center_deg, sign, runner)

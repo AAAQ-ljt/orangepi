@@ -259,8 +259,15 @@ class LaneFinalDetector:
         ratio = (REF_FPS / float(fps)) if fps else 1.0
         self.jump_px = float(jump_reject_px) * ratio
         self.coherent_px = float(jump_coherent_px) * ratio
+        # ★ 性能（2026-10-15，小车实测 41.7ms/帧 > 33ms 预算）：
+        #   灰度/顶帽只算"检测带 ±14 行"（顶帽核 25 → 14 行余量足够），
+        #   而不是整帧 480 行 —— 省 2.3 倍的形态学开销，读数口径完全不变。
+        # 余量必须 ≥ 顶帽核半径（25//2=12）+ 1：采样行 r 的形态学窗口要落在裁剪区内，
+        # 否则边界行的响应与整帧版不同（实测：余量 14 会把双侧率从 82% 打到 77%）
+        self._row0 = max(0, self.y_top - 14)
+        self._row1 = self.y_bot + 26
         self._prev: Optional[Tuple[float, float]] = None    # 上一次接受的 (left_x, right_x)
-        self.last_attached: Optional[np.ndarray] = None     # 诊断：最近一帧的脊响应图
+        self.last_attached: Optional[np.ndarray] = None     # 诊断：最近一帧的脊响应图（**只含检测带**）
         self.last_seeds = 0                                  # 诊断：本帧 Hough 种子数
 
     # -------------------------------------------------- 脊响应
@@ -289,7 +296,11 @@ class LaneFinalDetector:
 
     def _seed_candidates(self, resp: np.ndarray) -> List[Tuple[float, float]]:
         """在脊核上跑 HoughLinesP，返回候选 (k, x@y_ref)（已过斜率闸门）。"""
-        band = np.ascontiguousarray(resp[self.y_top:self.y_bot])
+        # ⚠️ 取种范围必须仍是 y_top~y_bot（2026-10-15 实测：放宽到 0 行会把画面顶部
+        #    远端过曝区喂进 Hough，假种子分数压过真线 → 双侧率 82%→75%、jump-reject 翻倍）
+        a = max(0, self.y_top - self._row0)
+        b = max(a + 1, self.y_bot - self._row0)
+        band = np.ascontiguousarray(resp[a:b])
         mask = ((band > RIDGE_MASK_THR).astype(np.uint8)) * 255
         segs = cv2.HoughLinesP(mask, 1, math.radians(HOUGH_THETA_DEG), HOUGH_THR,
                                minLineLength=HOUGH_MIN_LEN, maxLineGap=HOUGH_MAX_GAP)
@@ -303,6 +314,8 @@ class LaneFinalDetector:
             k = dy / dx
             if not (self.k_min <= abs(k) <= self.k_max):
                 continue
+            # 坐标换算：resp 的行号是"带内局部行"（局部 = 绝对 − _row0）；Hough 切片的
+            # 起点是 y_top−_row0 → Hough 返回的行号 + y_top 才是整帧行号（两处必须配套，改一个就废）
             y1f = float(y1) + self.y_top
             x_ref = float(x1) + (self.y_ref - y1f) / k
             out.append((float(k), x_ref))
@@ -311,7 +324,7 @@ class LaneFinalDetector:
     def _search_side(self, resp: np.ndarray,
                      seeds: Sequence[Tuple[float, float]], side: str) -> Optional[Tuple[float, float, float, int]]:
         """该侧最强线：Hough 种子里脊分最高者 → 局部精修（k/x 小步爬山）。返回 (score,k,x_ref,n)。"""
-        ys = np.arange(self.y_top, self.y_bot, ROW_STEP)
+        ys = np.arange(self.y_top, self.y_bot, ROW_STEP) - self._row0   # 带内局部行号
         x_lo, x_hi = XREF_LEFT if side == "left" else XREF_RIGHT
         want_pos = side == "right"
         best = (0.0, None, None, 0)
@@ -342,7 +355,9 @@ class LaneFinalDetector:
 
     # -------------------------------------------------- 一帧读数
     def detect(self, frame_bgr: np.ndarray) -> Reading:
-        gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+        # 只转/只算检测带那几行（见 __init__ 的 _row0/_row1 说明）
+        band = frame_bgr[self._row0:min(self._row1, frame_bgr.shape[0])]
+        gray = cv2.cvtColor(band, cv2.COLOR_BGR2GRAY)
         resp = self._ridge(gray)
         self.last_attached = resp
         seeds = self._seed_candidates(resp)
@@ -711,7 +726,10 @@ class Recorder:
             f"{r.n_l},{r.n_r},{r.quality:.2f},{int(r.both_sides)},{_fmt(r.half_w)},"
             f"{since_s:.2f},\"{r.tag}\",\"{r.note}\",{fps:.1f}\n")
         self.n_rows += 1
-        self._fh.flush()
+        # ⚠️ 不每帧 flush：SD 卡上每帧一次落盘是 ms 级开销（2026-10-15 实测把环路从 ~25fps
+        #    拖到 ~15fps）；每 30 行（≈1s）落一次，崩溃最多丢 1 秒，收尾 close() 也会落
+        if self.n_rows % 30 == 0:
+            self._fh.flush()
 
     def maybe_save(self, t: float, frame: np.ndarray, vis: np.ndarray) -> None:
         if not self.wants_save(t):
@@ -1036,6 +1054,9 @@ def run_online(args, det: LaneFinalDetector, center_deg: float, sign: float,
     print(f"[LANE] 丢线阶梯：维持 {runner.loss.hold_s:.1f}s（误差衰减回中位）→ 停车；"
           f"发车后 {runner.acquire_s:.1f}s 没见线按探路低速")
     print(f"[LANE] 落盘：{rec.csv_path}（每 {args.save_every_s:.1f}s 存一帧到 {args.save_dir}）")
+    print("[LANE] ⚠️ 帧率口径：相机请求 640x480@30（亮环境 30fps / 暗环境 AE 长曝光掉到 9~18）；"
+          "日志与 CSV 里的 fps 是**本脚本主循环的消费速率**（受 CPU 限制，通常 15~30），"
+          "控制律按实测 dt 折算，两者都不影响手感")
     if use_motor:
         print("[LANE] ⚠️ 用法：车摆正在车道里 → 启动 → 看到「自检完成」→ 蓝板挡到下摄正前方"
               "（先看到→再移开=发车）→ 想停就把板挡回去 / Ctrl+C")
@@ -1086,9 +1107,12 @@ def run_online(args, det: LaneFinalDetector, center_deg: float, sign: float,
                         t_rel = now - t0
                         rec.row(t_rel, co.phase, r, co.err_filt, det.target_x, co.angle,
                                 co.out_us, fps, since_s=co.since_s)
-                        vis = annotate(frame, r, det, co.phase, extra=f"esc={co.out_us:.0f}")
-                        last_vis = vis
-                        rec.maybe_save(t_rel, frame, vis)
+                        # ★ 叠加图只在该存图时才画（2026-10-15：每帧全帧绘制在 Pi 上是 ~10ms 级，
+                        #   把主循环从 ~25fps 拖到 ~15fps；存图频率本来就是 1s 一张）
+                        if rec.wants_save(t_rel):
+                            vis = annotate(frame, r, det, co.phase, extra=f"esc={co.out_us:.0f}")
+                            last_vis = vis
+                            rec.maybe_save(t_rel, frame, vis)
                         frames += 1
                         if frames % max(1, args.print_every) == 0:
                             print(f"[LANE] t={t_rel:5.1f}s fps={fps:4.1f} {co.phase:12s} "

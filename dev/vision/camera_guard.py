@@ -146,7 +146,14 @@ def open_camera(index: int, width: int = 640, height: int = 480,
                 cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*fourcc))
             cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
-            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            # ★ 帧率（2026-10-15 小车实测，指令级）：
+            #   `CAP_PROP_BUFFERSIZE=1` 会把出帧率**砍半**——同一颗下摄、同一帧画面：
+            #      BUFFERSIZE=1 → 14.1fps；不设（驱动默认 4）→ 28.0fps；BUFFERSIZE=4 → 28.5fps
+            #   （单缓冲时驱动必须等应用把 buffer 放回才能抓下一帧；ffmpeg 走同一设备是 29.8fps。）
+            #   代价权衡：默认 4 缓冲最多压 ~4 帧（≈130ms）滞后；我们读得比出帧快，
+            #   队列基本是空的，所以"永远拿最新帧"的意图仍然成立。
+            # ⚠️ 别再把它设回 1；FPS 必须显式要 30，否则协商到的捕获间隔可能是模组默认值。
+            cap.set(cv2.CAP_PROP_FPS, 30)
             return cap
         cap.release()
         if time.time() >= deadline:

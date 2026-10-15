@@ -39,6 +39,14 @@
 4. 时域一致性（keep-prev jump-reject，2026-10-11 操场教训）：一侧帧间跳 >60px（15fps 口径，
    按实测 dt 折算）而另一侧 ≤25px → 丢该侧走单侧兜底，且**不清记忆**；
 5. 单侧帧默认**回中位直行 + 保速**（2026-10-11 操场实测：跟推算中心会 ±50px 蛇行）。
+6. ★ 单侧帧也要过时域门限（2026-10-15，事故复盘）：只剩一侧时那条线会**突然锁到别的
+   结构上**——实测 5.34s→5.47s 左线 x@y_ref 从 +163 跳到 −58（一跳 220px），q=0.55
+   照样算"有效" → 车带着垃圾中心全速直冲。门限沿用 jump_px（实测合法逐帧位移 p99
+   只有 28~42px、垃圾跳 200px+，60px 分得开）；触发 = **丢本帧读数**走丢线阶梯，
+   不做任何"修正"（宁可停，也不要带着垃圾读数继续跑）；
+7. ★ 单侧帧的"回中位保速"有**时限**（`--single-max-s`，默认 1.2s）：10-11 的用意是
+   S 弯里"短暂"丢一侧；连续 1.2s 都只有一侧 = 车已出线/线已出画，继续保速就是直冲
+   （2026-10-15 的"冲出赛道"就是这样来的）。超时按丢线停车（可恢复）。
 
 帧率口径（下摄 ≈30fps，自动曝光，亮/暗会 9~30 变）
 ---------------------------------------------------
@@ -92,6 +100,7 @@ import glob
 import math
 import os
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from typing import List, Optional, Sequence, Tuple
@@ -106,7 +115,7 @@ from control.filters import ErrorFilter
 from control.lane_control import (BigErrorGuard, LossGuard, NEUTRAL_US, OscillationGuard,
                                   PidRef, adaptive_pulse, floor_pulse, gains_for)
 from control.rate import REF_FPS, FrameRate
-from vision.camera_guard import camera_exclusive, open_camera
+from vision.camera_guard import camera_exclusive, crop_frame, open_camera
 from vision.start_gate import StartGate
 
 # ================================================================ 检测档（1014 素材实测标定）
@@ -165,6 +174,7 @@ ACQUIRE_S0 = 3.0            # 发车后"还没见过线"的探路窗口
 SINGLE_LIMIT_DEG = 5.0      # 单侧帧舵角限幅（10-11 操场：单侧读数会飘，限小甩不动）
 WEAK_LIMIT_DEG = 10.0       # 弱对帧（一侧支持不足）限幅
 WEAK_MIN_SAMPLES = 40       # 采样点低于它算"弱对"（满 66）
+SINGLE_MAX_S0 = 1.2         # ★ 单侧帧"回中位保速"的时限（秒）；超时按丢线停车（0=关）
 ERR_STOP_PX0, ERR_STOP_S0 = 60.0, 1.5
 RESUME_FRAMES = 5           # 丢线停车后连续 N 帧有效才自动恢复（防抖）
 PRINT_EVERY0 = 10
@@ -267,6 +277,9 @@ class LaneFinalDetector:
         self._row0 = max(0, self.y_top - 14)
         self._row1 = self.y_bot + 26
         self._prev: Optional[Tuple[float, float]] = None    # 上一次接受的 (left_x, right_x)
+        # 每侧最近一次"被接受"的 x@y_ref（双侧/单侧都算）——单侧帧的时域门限用它当参照
+        # （2026-10-15：单侧帧原来完全裸奔，出线后一跳 220px 也照收）
+        self._side_x: dict = {}
         self.last_attached: Optional[np.ndarray] = None     # 诊断：最近一帧的脊响应图（**只含检测带**）
         self.last_seeds = 0                                  # 诊断：本帧 Hough 种子数
 
@@ -413,8 +426,26 @@ class LaneFinalDetector:
                 r.score_r = 0.0
                 r.n_r = 0
 
+        # ---- 单侧帧的时域门限（2026-10-15 新增，见模块 docstring 第 6 条）----
+        # 只剩一侧时没有"另一侧稳不稳"可对照，就拿**该侧最近一次被接受的 x**当参照：
+        # 一跳 200px+ 的读数直接丢（本帧变成"没读数"→ 走丢线阶梯），不试图修正。
+        if (left is None) != (right is None):
+            side = "L" if left is not None else "R"
+            cur = r.left_x if left is not None else r.right_x
+            ref = self._side_x.get(side)
+            if ref is not None and abs(cur - ref) > self.jump_px:
+                r.add_tag(f"1side-jump-{side}")
+                r.note = (f"单侧{side}线帧间跳 {abs(cur - ref):.0f}px"
+                          f"（>门限 {self.jump_px:.0f}）→ 丢本帧读数（走丢线阶梯）")
+                left = right = None
+                r.left_k = r.left_x = r.right_k = r.right_x = None
+                r.score_l = r.score_r = 0.0
+                r.n_l = r.n_r = 0
+                return self._finish(r, frame_bgr.shape[1])
+
         if left is not None and right is not None:
             self._prev = (r.left_x, r.right_x)
+            self._side_x["L"], self._side_x["R"] = r.left_x, r.right_x
             r.both_sides = True
             r.half_w = (r.right_x - r.left_x) * 0.5
             r.width_measured = True
@@ -435,6 +466,9 @@ class LaneFinalDetector:
         else:
             r.center_x = r.right_x - hw
             fill = "width" if r.width_measured else "seed"
+        # 单侧读数被接受 → 记住这一侧的 x（下次单侧帧的时域门限参照）
+        self._side_x["L" if left is not None else "R"] = (r.left_x if left is not None
+                                                          else r.right_x)
         # 参考实现原样：缺的一侧代画面边界（仅当推算中心离谱时退化用）
         w = frame_bgr.shape[1]
         border_center = ((r.left_x if left is not None else 0.0)
@@ -473,6 +507,7 @@ class LaneFinalDetector:
     def reset(self) -> None:
         self.prior.reset()
         self._prev = None
+        self._side_x.clear()
 
 
 # ================================================================ 转向限幅 / 相位机
@@ -500,6 +535,48 @@ class ControlOut:
     since_s: float = 0.0          # 距最后一次有效读数的秒数（丢线时长；进 CSV 便于复盘）
 
 
+class _CameraReader(threading.Thread):
+    """后台读帧线程（daemon）：主循环只"取最新一帧"，**读不到帧也能超时退出**。
+
+    为什么必须有（2026-10-15 现场事故）：下摄 UVC 会卡死（已知故障，重启是标准恢复手段），
+    此时 `cap.read()` **无限阻塞** —— 主循环既不退出、也不再写电调，车就带着最后的油门前冲，
+    而 Ctrl+C 无效（信号只给主循环设标志，循环已经卡在阻塞的 read 里）。
+    把 read 挪进 daemon 线程后，主循环改成"看帧的年龄"：
+      · 有新帧 → 正常处理（队列只留最新一帧，不攒滞后）；
+      · 超过 --read-fail-s 没新帧 → 判相机故障 → 正常走收尾（停车 + 释放摄像头）；
+    线程即使永久卡在 read 里也不拦着进程退出（daemon=True）。
+    """
+
+    def __init__(self, cap, stop_event: "threading.Event") -> None:
+        super().__init__(daemon=True, name="cam-reader")
+        self.cap = cap
+        self._stop_ev = stop_event          # 不叫 _stop：threading.Thread 内部已有 _stop()，会撞车
+        self._lock = threading.Lock()
+        self._frame = None
+        self._t = 0.0
+        self._seq = 0
+        self.read_ok = 0
+        self.read_fail = 0
+
+    def run(self) -> None:
+        while not self._stop_ev.is_set():
+            try:
+                ok, frame = self.cap.read()
+            except Exception:                              # noqa: BLE001
+                ok, frame = False, None
+            if ok and frame is not None:
+                with self._lock:
+                    self._frame, self._t, self._seq = frame, time.monotonic(), self._seq + 1
+                self.read_ok += 1
+            else:
+                self.read_fail += 1
+                time.sleep(0.05)
+
+    def latest(self):
+        with self._lock:
+            return self._frame, self._t, self._seq
+
+
 class LaneRunner:
     """相位机 + 控制律（与硬件无关；在线/离线共用同一条代码路径）。"""
 
@@ -511,7 +588,8 @@ class LaneRunner:
                  err_stop_px: float, err_stop_s: float, fps_ref: float,
                  use_filter: bool = True, filter_window: Optional[int] = None,
                  filter_outlier_px: Optional[float] = None,
-                 observe_only: bool = False) -> None:
+                 observe_only: bool = False,
+                 single_max_s: float = SINGLE_MAX_S0) -> None:
         self.det = det
         self.rate = rate
         self.center_deg = float(center_deg)
@@ -520,6 +598,8 @@ class LaneRunner:
                                 else float(single_speed_us))
         self.single_hold = bool(single_hold)
         self.single_limit, self.weak_limit = float(single_limit), float(weak_limit)
+        self.single_max_s = float(single_max_s)     # 单侧连续超时（秒；0=关）
+        self._single_since: Optional[float] = None  # 连续单侧从哪一刻开始
         self.min_quality = float(min_quality)
         self.acquire_s = float(acquire_s)
         self.pid = PidRef(kp, ki, kd, limit_deg, smooth, sign=sign,
@@ -565,6 +645,7 @@ class LaneRunner:
                     self.stopped = False
                     self.stop_reason = ""
                     self._valid_streak = 0
+                    self._single_since = None
                     self.loss.reset()
                     self.pid.reset()
                     if self.err_filter:
@@ -581,15 +662,30 @@ class LaneRunner:
         if ls.phase == "fresh":
             self.frames_ok += 1
             self.last_center = r.center_x
+            if r.both_sides:
+                self._single_since = None            # 双侧恢复 → 单侧计时清零
             # ★ 单侧帧：默认回中位直行 + 保速（10-11 操场实测：跟推算中心会蛇行）
             if self.single_hold and not r.both_sides:
+                if self._single_since is None:
+                    self._single_since = now
+                held_s = now - self._single_since
+                # ★ 时限（2026-10-15）：连续单侧 = 车已出线/线已出画，继续保速就是直冲
+                if 0.0 < self.single_max_s <= held_s:
+                    self._single_since = None
+                    tail = "（离线回放：只记录不停车）" if self.observe_only else ""
+                    print(f"[LANE] ⚠️ 单侧持续 {held_s:.1f}s"
+                          f"（>门限 {self.single_max_s:.1f}s）→ 按丢线停车"
+                          f"（防'出线后回中位保速直冲'）{tail}")
+                    if not self.observe_only:
+                        self.stopped, self.stop_reason = True, "lost"
+                        return ControlOut("lost", center, NEUTRAL_US, None)
                 self.pid.reset()
                 if r.error is not None:
                     self.pid.prime(r.error)       # 恢复双侧时微分从 0 起跳（防假踢腿）
                 if self.err_filter:
                     self.err_filter.reset()
                 return ControlOut("single", center, self.single_speed_us, None,
-                                  note="单侧回中位直行")
+                                  note=f"单侧回中位直行（已 {held_s:.1f}s）")
             err = r.error if r.error is not None else 0.0
             err_filt = self.err_filter.update(err) if self.err_filter is not None else err
             angle = self.pid.step(err_filt, self.rate.dt)
@@ -783,12 +879,16 @@ def _pick_indices(n: int, args) -> List[int]:
 
 
 def frame_source(args) -> Tuple[str, List[Tuple[int, np.ndarray]], float]:
-    """把 --frames/--video/--image 读成 [(帧号, 图)] 与素材 fps（用于离线 dt）。"""
+    """把 --frames/--video/--image 读成 [(帧号, 图)] 与素材 fps（用于离线 dt）。
+
+    ★ 统一走 `crop_frame()`（裁掉画面底部的车盖，见 settings.FRAME_CROP_BOTTOM_PX）：
+      在线/离线同源，检测档坐标系不变（只切底部，y 原点不动）。
+    """
     if args.image:
         img = imread_any(args.image)
         if img is None:
             raise SystemExit(f"[LANE] 读不到图：{args.image}")
-        return os.path.basename(args.image), [(0, img)], float(args.fps or REF_FPS)
+        return os.path.basename(args.image), [(0, crop_frame(img))], float(args.fps or REF_FPS)
     if args.frames:
         paths = list_frames(args.frames)
         if not paths:
@@ -811,7 +911,7 @@ def frame_source(args) -> Tuple[str, List[Tuple[int, np.ndarray]], float]:
             if img is None:
                 print(f"[LANE] ⚠️ 读不到 {paths[i]}（跳过）")
                 continue
-            out.append((i, img))
+            out.append((i, crop_frame(img)))
         return os.path.basename(os.path.normpath(args.frames)), out, fps
     if args.video:
         cap = cv2.VideoCapture(args.video)
@@ -826,7 +926,7 @@ def frame_source(args) -> Tuple[str, List[Tuple[int, np.ndarray]], float]:
             if not ok:
                 break
             if i in want:
-                out.append((i, frame))
+                out.append((i, crop_frame(frame)))
             i += 1
         cap.release()
         return os.path.basename(args.video), out, fps
@@ -840,6 +940,7 @@ def summarize(rows: List[Reading], centers: List[Optional[float]],
     single = sum(1 for r in rows if r.valid and not r.both_sides)
     lost = sum(1 for r in rows if not r.valid)
     jr = sum(1 for r in rows if "jump-reject" in r.tag)
+    sj = sum(1 for r in rows if "1side-jump" in r.tag)
     pr = sum(1 for r in rows if "pair-reject" in r.tag)
     widths = [r.half_w * 2 for r in rows if r.both_sides and r.half_w]
     ks_l = [r.left_k for r in rows if r.left_k is not None]
@@ -864,7 +965,7 @@ def summarize(rows: List[Reading], centers: List[Optional[float]],
     lines = [
         f"[LANE] {n} 帧 | 双侧 {both}（{both / max(1, n) * 100:.0f}%）| 单侧 {single} | "
         f"丢失 {lost}（{lost / max(1, n) * 100:.0f}%）| 最长连丢 {max(runs) if runs else 0} 帧",
-        f"[LANE] 时域拒绝：jump-reject {jr} 帧 / pair-reject {pr} 帧",
+        f"[LANE] 时域拒绝：jump-reject {jr} 帧 / 单侧跳拒绝 {sj} 帧 / pair-reject {pr} 帧",
         f"[LANE] center 中位 {pct(cs, 50):+.1f}  p05~p95 {pct(cs, 5):+.0f}~{pct(cs, 95):+.0f} "
         f"| 帧间|Δcenter| p50 {pct(dif, 50):.1f} p90 {pct(dif, 90):.1f} | "
         f"k 中位 左 {pct(np.asarray(ks_l), 50):+.2f} / 右 {pct(np.asarray(ks_r), 50):+.2f}",
@@ -996,7 +1097,7 @@ def run_online_calibrate(args, det: LaneFinalDetector) -> int:
                 if not ok or frame is None:
                     time.sleep(0.02)
                     continue
-                rows.append(det.detect(frame))
+                rows.append(det.detect(crop_frame(frame)))
         finally:
             cap.release()
     if not rows:
@@ -1040,9 +1141,59 @@ def run_online(args, det: LaneFinalDetector, center_deg: float, sign: float,
     state = {"stopped": False, "driver": None, "restored": False, "used_motor": use_motor}
     install_signal_guard(state)
 
+    # ★ 电调看门狗（2026-10-15 事故修复）：**独立进程**，主控卡死/被杀时由它把电调拉回
+    #   1500us。为什么必须有：PCA9685 会一直输出最后一次写进去的脉宽 —— 相机 UVC 卡死让
+    #   `cap.read()` 无限阻塞、或进程被 OOM/SIGKILL 杀掉时，车会带着最后的油门前冲，
+    #   而 Ctrl+C 完全无效（信号只给主循环设标志）。现场已因此丢过两次车（都要断电）。
+    wd = None
+    if use_motor and args.watchdog_s > 0:
+        try:
+            from scripts.esc_watchdog import WatchdogClient
+            wd = WatchdogClient(timeout_s=args.watchdog_s)
+            wd.start()
+        except Exception as exc:                       # noqa: BLE001
+            wd = None
+            print(f"[LANE] ⚠️ 电调看门狗没起来（{exc}）——跑动期间请人守着、手边留断电开关！")
+
     gate = None if args.no_start_gate else StartGate()
     rec = Recorder(args.log_csv or os.path.join(args.save_dir, "run.csv"), args.save_dir,
                    args.save_every_s, args.save_max)
+    if args.save_every_s > 0:
+        print(f"[LANE] 存图：每 {args.save_every_s:.1f}s 一张（最多 {args.save_max} 张 → "
+              f"覆盖 {args.save_every_s * args.save_max:.0f}s；不够就调 --save-max）")
+    else:
+        print("[LANE] 存图：关（--save-every-s 0）")
+
+    # ★ 会话元数据（2026-10-15）：把"这趟用了什么参数 + 为什么停"落进会话目录的 session.json。
+    #   为什么：CSV 只记 phase=guard，不记是画龙还是跑偏；stdout 一旦丢（进程被杀/没接 tee）
+    #   就查不到原因（现场已遇到）。session.json 落盘即证据，不依赖任何管道。
+    sess = {
+        "started": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "pid": os.getpid(),
+        "params": {
+            "target_x": det.target_x, "kp": runner.pid.kp, "ki": runner.pid.ki,
+            "kd": runner.pid.kd, "limit_deg": runner.pid.limit_deg,
+            "smooth": runner.pid.smooth, "speed_us": runner.speed_us,
+            "start_us": runner.start_us, "single_max_s": runner.single_max_s,
+            "single_hold": runner.single_hold, "hold_s": runner.loss.hold_s,
+            "acquire_s": runner.acquire_s, "min_quality": runner.min_quality,
+            "watchdog_s": args.watchdog_s, "watchdog": wd is not None, "cam": args.cam,
+            "max_seconds": args.max_seconds, "save_every_s": args.save_every_s,
+            "save_max": args.save_max, "allow_motion": use_motor,
+        },
+        "result": None,
+    }
+    phase_counts: dict = {}
+
+    def _dump_sess() -> None:
+        try:
+            import json
+            with open(os.path.join(args.save_dir, "session.json"), "w", encoding="utf-8") as fh:
+                json.dump(sess, fh, ensure_ascii=False, indent=1)
+        except Exception:                                  # noqa: BLE001
+            pass
+
+    _dump_sess()
 
     print("[LANE] 最终循迹（自检 → 蓝板边沿发车 → 跟线 → 丢线阶梯 → 落盘）")
     print(f"[LANE] 舵机中位={center_deg:.1f}° 转向符号={sign:+.0f} "
@@ -1050,10 +1201,14 @@ def run_online(args, det: LaneFinalDetector, center_deg: float, sign: float,
           f"（15fps 登记口径）限幅±{runner.pid.limit_deg:.0f}° 平滑={runner.pid.smooth}")
     print(f"[LANE] 脉宽：起步 {runner.start_us:.0f} / 循迹 {runner.speed_us:.0f}us"
           f"（大误差 {floor_pulse(runner.speed_us):.0f}；死区 {settings.ESC_DEADBAND_US}）"
-          f"；单侧帧 {'回中位直行' if runner.single_hold else '跟推算中心'}")
+          f"；单侧帧 {'回中位直行' if runner.single_hold else '跟推算中心'}"
+          f"（时限 {runner.single_max_s:.1f}s 后按丢线停）")
     print(f"[LANE] 丢线阶梯：维持 {runner.loss.hold_s:.1f}s（误差衰减回中位）→ 停车；"
           f"发车后 {runner.acquire_s:.1f}s 没见线按探路低速")
     print(f"[LANE] 落盘：{rec.csv_path}（每 {args.save_every_s:.1f}s 存一帧到 {args.save_dir}）")
+    _crop = int(getattr(settings, "FRAME_CROP_LINE_Y", 0) or 0)
+    print(f"[LANE] 画面裁剪：保留 y<{_crop}（车盖不入画；闸门/检测/存图同源）"
+          if _crop else "[LANE] 画面裁剪：关闭（settings.FRAME_CROP_LINE_Y=0）")
     print("[LANE] ⚠️ 帧率口径：相机请求 640x480@30（亮环境 30fps / 暗环境 AE 长曝光掉到 9~18）；"
           "日志与 CSV 里的 fps 是**本脚本主循环的消费速率**（受 CPU 限制，通常 15~30），"
           "控制律按实测 dt 折算，两者都不影响手感")
@@ -1065,6 +1220,8 @@ def run_online(args, det: LaneFinalDetector, center_deg: float, sign: float,
 
     rc = 0
     frames = 0
+    last_err = last_ang = last_us = None
+    wd_tripped = False
     try:
         with MotorSession(state, enabled=use_motor,
                           speed_us_max=max(runner.start_us, runner.speed_us)) as pca:
@@ -1078,21 +1235,35 @@ def run_online(args, det: LaneFinalDetector, center_deg: float, sign: float,
                     #   2026-10-14 首版混用 time.time()，t_rel 变成 -1.7e9，
                     #   `t_rel >= --max-seconds` 永远不成立（端到端测试里挂死才发现）。
                     t0 = time.monotonic()
-                    read_fail_since: Optional[float] = None
                     last_vis: Optional[np.ndarray] = None
                     allowed = bool(args.no_start_gate)
+                    # ★ 读帧挪进 daemon 线程（2026-10-15 事故）：主循环只取最新帧 + 看"帧年龄"，
+                    #   这样相机 UVC 卡死时能判死退出，而不是永久阻塞在 cap.read() 里。
+                    stop_ev = threading.Event()
+                    reader = _CameraReader(cap, stop_ev)
+                    reader.start()
+                    last_seq = 0
                     while True:
-                        ok, frame = cap.read()
-                        now = time.monotonic()
-                        if not ok or frame is None:
-                            if read_fail_since is None:
-                                read_fail_since = now
-                            elif now - read_fail_since > args.read_fail_s:
-                                print("[LANE] ❌ 摄像头连续读失败 → 退出")
+                        frame, t_frame, seq = reader.latest()
+                        if seq == last_seq:                 # 还没有新帧
+                            now = time.monotonic()
+                            if state.get("stopped"):
+                                break
+                            if t_frame and now - t_frame > args.read_fail_s:
+                                print(f"[LANE] ❌ 摄像头 {now - t_frame:.1f}s 没出新帧"
+                                      f"（UVC 卡死？）→ 安全退出（看门狗会先把电调归零）")
                                 rc = 1
                                 break
+                            if args.max_seconds > 0 and now - t0 >= args.max_seconds:
+                                print(f"[LANE] 到达 --max-seconds {args.max_seconds:.0f}s → 停车退出")
+                                break
+                            time.sleep(0.005)
                             continue
-                        read_fail_since = None
+                        last_seq = seq
+                        now = time.monotonic()
+                        frame = crop_frame(frame)      # 裁掉底部车盖（闸门/检测/存图同源）
+                        if wd is not None:
+                            wd.feed()                  # ★ 每帧喂看门狗（/dev/shm utime，微秒级）
                         fps = runner.rate.update_now(now)
                         if runner.err_filter is not None:
                             runner.err_filter.set_fps(fps)
@@ -1110,10 +1281,12 @@ def run_online(args, det: LaneFinalDetector, center_deg: float, sign: float,
                         # ★ 叠加图只在该存图时才画（2026-10-15：每帧全帧绘制在 Pi 上是 ~10ms 级，
                         #   把主循环从 ~25fps 拖到 ~15fps；存图频率本来就是 1s 一张）
                         if rec.wants_save(t_rel):
-                            vis = annotate(frame, r, det, co.phase, extra=f"esc={co.out_us:.0f}")
+                            vis = annotate(frame, r, det, co.phase, extra=f"ang={co.angle:.1f} esc={co.out_us:.0f}")
                             last_vis = vis
                             rec.maybe_save(t_rel, frame, vis)
                         frames += 1
+                        phase_counts[co.phase] = phase_counts.get(co.phase, 0) + 1
+                        last_err, last_ang, last_us = r.error, co.angle, co.out_us
                         if frames % max(1, args.print_every) == 0:
                             print(f"[LANE] t={t_rel:5.1f}s fps={fps:4.1f} {co.phase:12s} "
                                   f"c={_fmt(r.center_x) or '—':>5} err={_fmt(r.error) or '—':>6} "
@@ -1123,7 +1296,15 @@ def run_online(args, det: LaneFinalDetector, center_deg: float, sign: float,
                         if args.max_seconds > 0 and t_rel >= args.max_seconds:
                             print(f"[LANE] 到达 --max-seconds {args.max_seconds:.0f}s → 停车退出")
                             break
-                    cap.release()
+                    # 收尾：先请读帧线程停；它若卡在 read() 里（UVC 卡死）就别 release ——
+                    # cv2 在并发 read 期间 release 是未定义行为，宁可让进程退出时由内核回收。
+                    stop_ev.set()
+                    reader.join(timeout=0.3)
+                    if reader.is_alive():
+                        print("[LANE] ⚠️ 读帧线程卡在 cap.read()（相机没响应）：跳过 release，"
+                              "由进程退出回收（副摄推流要等本进程结束才能拿回设备）")
+                    else:
+                        cap.release()
                     if last_vis is not None and args.save_dir:
                         cv2.imwrite(os.path.join(args.save_dir, "last.jpg"), last_vis)
     except KeyboardInterrupt:
@@ -1132,10 +1313,28 @@ def run_online(args, det: LaneFinalDetector, center_deg: float, sign: float,
         rec.close()
         if use_motor:
             restore_remote_stage(state, "run_online 退出")
+        if wd is not None:
+            wd_code = wd.stop()                        # 电机已安全 → 再解除看门狗
+            wd_tripped = wd_code in (2, 3)              # 2/3 = 心跳停过并写了安全值
+        # 结果落进 session.json（含着陆原因、相位分布、末帧读数）——复盘不依赖 stdout
+        sess["result"] = {
+            "ended": time.strftime("%Y-%m-%d %H:%M:%S"), "rc": rc, "frames": frames,
+            "frames_ok": runner.frames_ok, "guard_trips": runner.guard_trips,
+            "stop_reason": runner.stop_reason or "—", "fps_end": round(runner.rate.fps, 1),
+            "phases": dict(sorted(phase_counts.items())),
+            "last": {"center_x": runner.last_center, "error_px": last_err,
+                     "angle_deg": last_ang, "esc_us": last_us},
+            "watchdog_tripped": wd_tripped,
+        }
+        _dump_sess()
     fps_end = runner.rate.fps
     print(f"[LANE] 结束：{frames} 帧 | 有效跟线 {runner.frames_ok} 帧 "
           f"| 护栏/超时 {runner.guard_trips} 次 | 末帧率 {fps_end:.1f}")
-    print(f"[LANE] 回实验室看：{rec.csv_path}"
+    print(f"[LANE] 末态：停机原因={runner.stop_reason or '—'}"
+          f"（osc=画龙 / big-err=跑偏 / lost=丢线）| 相位分布={dict(sorted(phase_counts.items()))}")
+    if wd_tripped:
+        print("[LANE] ⚠️ 这一趟看门狗触发过（主控卡死/被杀）——务必看它打印的 🔛 那几行！")
+    print(f"[LANE] 回实验室看：{rec.csv_path} + session.json"
           + (f" + {args.save_dir}/ann_*.jpg" if args.save_every_s > 0 else ""))
     return rc
 
@@ -1202,6 +1401,8 @@ def build_parser() -> argparse.ArgumentParser:
     ctl.add_argument("--single-hold", dest="single_hold", action="store_true", default=True,
                      help="单侧帧回中位直行（默认开；10-11 操场定案）")
     ctl.add_argument("--no-single-hold", dest="single_hold", action="store_false")
+    ctl.add_argument("--single-max-s", type=float, default=SINGLE_MAX_S0,
+                     help="单侧连续多久就按丢线停车（秒；0=关。防'出线后回中位保速直冲'）")
     ctl.add_argument("--min-quality", type=float, default=MIN_QUALITY0)
     ctl.add_argument("--hold-s", type=float, default=HOLD_S0, help="丢线维持窗口（秒）")
     ctl.add_argument("--acquire-s", type=float, default=ACQUIRE_S0,
@@ -1228,6 +1429,8 @@ def build_parser() -> argparse.ArgumentParser:
                     help="跳过蓝板边沿发车（实验室/离线用；默认必须见板再消失才走）")
     hw.add_argument("--max-seconds", type=float, default=MAX_SECONDS0)
     hw.add_argument("--read-fail-s", type=float, default=8.0)
+    hw.add_argument("--watchdog-s", type=float, default=1.0,
+                    help="电调看门狗超时（秒；0=关。主控卡死/被杀时由独立进程强制停车）")
 
     out = ap.add_argument_group("输出/记录")
     out.add_argument("--out", default="", help="离线产物目录（默认 1014_lane_final/run）")
@@ -1235,7 +1438,8 @@ def build_parser() -> argparse.ArgumentParser:
                      help="在线会话目录（默认 /root/dev/logs/lane_<时间戳>）")
     out.add_argument("--log-csv", default="", help="CSV 路径（默认会话目录/run.csv）")
     out.add_argument("--save-every-s", type=float, default=1.0, help="每 N 秒存一帧（0=不存）")
-    out.add_argument("--save-max", type=int, default=400)
+    out.add_argument("--save-max", type=int, default=0,
+                     help="每会话最多存多少张图；0=自动（在线按 --max-seconds 算满全程，不让长趟丢尾巴；离线沿用 400）")
     out.add_argument("--every", type=int, default=0, help="离线：每 N 帧存一张叠加图")
     out.add_argument("--montage", type=int, default=0, help="离线：每 N 帧收进接触表")
     out.add_argument("--print-every", type=int, default=PRINT_EVERY0)
@@ -1296,10 +1500,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         args.single_limit_deg, args.weak_limit_deg, args.min_quality,
         args.hold_s, args.acquire_s, args.err_stop_px, args.err_stop_s, REF_FPS,
         use_filter=not args.no_filter, filter_window=args.filter_window,
-        filter_outlier_px=args.filter_outlier, observe_only=offline)
+        filter_outlier_px=args.filter_outlier, observe_only=offline,
+        single_max_s=args.single_max_s)
 
     print(f"[LANE] 增益（登记 {REF_FPS:.0f}fps）：kp={kp:.3f} ki={ki:.3f} kd={kd:.3f}"
           f"；30fps 逐帧等效 " + "ki=%.3f kd=%.3f" % runner.pid.frame_equivalent(30.0))
+
+    # --save-max 0 = 自动：在线按 --max-seconds 算满全程（0.2s×120s=620 张），
+    # 旧默认 400 只覆盖 80s —— 2026-10-15 现场跑 120s 的趟次后半段没图。
+    if args.save_max <= 0:
+        if (not offline) and args.max_seconds > 0 and args.save_every_s > 0:
+            args.save_max = int(args.max_seconds / args.save_every_s) + 20
+        else:
+            args.save_max = 400
 
     if args.calibrate and not offline:
         return run_online_calibrate(args, det)

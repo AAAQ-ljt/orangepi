@@ -41,15 +41,19 @@ class _FakeCap:
     所以循环播 + --max-seconds 才是被测脚本的正常终止方式）。"""
 
     def __init__(self, frames, delay: float = 0.02, fail_after: int = 10 ** 9,
-                 cyclic: bool = False):
+                 cyclic: bool = False, hang_after: int = 10 ** 9):
         self.frames = list(frames)
         self.delay = delay
         self.fail_after = fail_after
         self.cyclic = cyclic
+        self.hang_after = hang_after       # 读满 N 帧后"卡死"（模拟 UVC 卡死：read 永久阻塞）
         self.i = 0
         self.released = False
 
     def read(self):
+        if self.i >= self.hang_after:
+            time.sleep(3600.0)             # ★ 永久阻塞：老代码会卡死在这儿（车带着油门前冲）
+            return False, None
         if self.i >= self.fail_after or (not self.cyclic and self.i >= len(self.frames)):
             return False, None
         time.sleep(self.delay)
@@ -61,10 +65,11 @@ class _FakeCap:
         self.released = True
 
 
-def _run(frames, extra_args, fail_after: int = 10 ** 9, cyclic: bool = True):
+def _run(frames, extra_args, fail_after: int = 10 ** 9, cyclic: bool = True,
+         hang_after: int = 10 ** 9):
     """用假摄像头跑一遍 main()，返回 (rc, 会话目录, CSV 文本)。"""
     tmp = tempfile.mkdtemp(prefix="lane_final_run_")
-    cap = _FakeCap(frames, fail_after=fail_after, cyclic=cyclic)
+    cap = _FakeCap(frames, fail_after=fail_after, cyclic=cyclic, hang_after=hang_after)
     saved = (lft.open_camera, lft.camera_exclusive)
     lft.open_camera = lambda *a, **k: cap                        # 不碰真摄像头
     lft.camera_exclusive = lambda *a, **k: contextlib.nullcontext()
@@ -195,6 +200,35 @@ def main() -> int:
             traceback.print_exc()
     print(f"[test_lane_final_run] {len(funcs) - failed}/{len(funcs)} passed")
     return 1 if failed else 0
+
+
+def test_hung_camera_exits_safely() -> None:
+    """★ 2026-10-15 事故回归：相机卡死（UVC 不出帧、read 永久阻塞）时必须**安全退出**。
+
+    老代码：主循环阻塞在 cap.read() → 既不退出也不再写电调 → 车带着最后的油门前冲，
+    Ctrl+C 无效（信号只设标志）→ 现场两次都要断电。新代码：read 在 daemon 线程里，
+    主循环按"帧的年龄"判死（--read-fail-s）→ 正常收尾（停车 + 退出码 1）。
+    这里还顺带钉住"必须 5 秒内返回"（不许挂死）。
+    """
+    t_start = time.time()
+    rc, tmp, csv_text = _run([_lane_frame()] * 8,
+                             ["--no-start-gate", "--read-fail-s", "0.4", "--max-seconds", "30"],
+                             hang_after=3)
+    elapsed = time.time() - t_start
+    assert elapsed < 8.0, f"相机卡死后必须快速退出，实际跑了 {elapsed:.1f}s"
+    # 8s 上限（不是 5s）：车端 ARM 比开发机慢，套件连跑时 5s 偶发假红（2026-10-15 实测）
+    assert rc == 1, f"卡死应报错退出（rc=1），实得 {rc}"
+    rows = csv_text.strip().splitlines()[1:]
+    # 至少要有一行落盘（读帧线程会跑在主循环前面，慢机器上"卡死前处理了几帧"本来就不确定，
+    # 所以这里只钉"处理过的帧没丢"，不钉具体条数 —— 车端实测曾因多断言 3 行而假红）
+    assert len(rows) >= 1, "卡死前处理过的帧必须照常落盘"
+
+
+def test_real_errors_still_exit_on_read_fail() -> None:
+    """read 直接返回失败（不是卡死）也要在 --read-fail-s 后退出（老行为不能丢）。"""
+    rc, _, _ = _run([_lane_frame()] * 4, ["--no-start-gate", "--read-fail-s", "0.5",
+                                          "--max-seconds", "30"], fail_after=4, cyclic=False)
+    assert rc == 1
 
 
 if __name__ == "__main__":

@@ -51,8 +51,24 @@ def test_wait_device_free_times_out(monkeypatch=None):
 
 
 def test_stop_ffmpeg_never_raises_without_systemctl():
-    """没有 systemctl（开发机）时只当"没停成"，绝不抛异常。"""
-    stop_ffmpeg(services=FFMPEG_SERVICES, settle_s=0.0, timeout_s=0.2)
+    """没有 systemctl（开发机）时只当"没停成"，绝不抛异常。
+
+    ⚠️ 2026-10-15 修正：**这个测试原来会真的 `systemctl stop` 掉两路推流**——
+    在车上跑 `run_tests.sh` 会把图传整个停掉且不恢复（实测：跑完两路都 inactive，
+    现场图传空档）。所以这里把 `_systemctl` 换成记录器：既不碰真服务，又能验证
+    "对每个推流服务都发了 stop"（等价于 systemctl 缺失时"静默失败"的语义）。
+    """
+    import vision.camera_guard as cg
+
+    calls = []
+    real = cg._systemctl
+    cg._systemctl = lambda *a: (calls.append(a), 1)[1]      # 模拟"没有 systemctl"（返回非零）
+    try:
+        stop_ffmpeg(services=FFMPEG_SERVICES, settle_s=0.0, timeout_s=0.2)
+    finally:
+        cg._systemctl = real
+    stops = [c for c in calls if c and c[0] == "stop"]
+    assert len(stops) == len(FFMPEG_SERVICES), f"应对每个服务都尝试 stop，实际 {calls}"
 
 
 def test_open_camera_returns_none_for_missing_device():
@@ -61,10 +77,39 @@ def test_open_camera_returns_none_for_missing_device():
     assert cap is None
 
 
+def test_crop_frame_removes_bottom_band():
+    """画面裁剪（2026-10-15）：保留 y < settings.FRAME_CROP_LINE_Y 的行，只切底部。
+
+    语义要钉住：
+      · 默认（settings 值）→ 高度 = 384（保留 0~383 行），且**顶部原样**（行 0 不动）；
+      · line_y=0 → 原样返回（同一对象，不做拷贝）；
+      · line_y ≥ 画面高（小图/配置离谱）→ 原样返回，绝不能把画面裁没。
+    """
+    import numpy as np
+
+    from config import settings
+    from vision.camera_guard import crop_frame
+
+    frame = np.zeros((480, 640, 3), dtype=np.uint8)
+    frame[:384] = (10, 20, 30)
+    frame[384:] = (99, 99, 99)                  # "车盖"区
+    frame[0, 0] = (7, 8, 9)                     # 顶部标记行（在填充之后设，别被覆盖）
+    out = crop_frame(frame)
+    assert out.shape[0] == settings.FRAME_CROP_LINE_Y, f"高度不对：{out.shape}"
+    assert out.shape[1] == 640 and out.shape[2] == 3
+    assert tuple(out[0, 0]) == (7, 8, 9), "必须保留顶部（原点不能动）"
+    assert not (out == 99).all(), "车盖区必须已被裁掉"
+    assert crop_frame(frame, 0) is frame, "line_y=0 应原样返回"
+    small = np.zeros((96, 640, 3), dtype=np.uint8)
+    assert crop_frame(small) is small, "小图（高 < 裁剪线）应原样返回，别裁空"
+    assert crop_frame(None) is None
+
+
 if __name__ == "__main__":
     test_device_holders_is_safe_and_well_typed()
     test_wait_device_free_returns_immediately_when_no_holders()
     test_wait_device_free_times_out()
     test_stop_ffmpeg_never_raises_without_systemctl()
     test_open_camera_returns_none_for_missing_device()
+    test_crop_frame_removes_bottom_band()
     print("test_camera_guard: all passed")

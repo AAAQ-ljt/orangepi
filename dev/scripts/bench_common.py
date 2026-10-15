@@ -92,6 +92,11 @@ def restore_remote_stage(state: dict, reason: str = "") -> None:
         else:
             print("[BENCH] ⚠️ 有服务没起来，请手动执行："
                   "systemctl start opi-control ffmpeg-stream ffmpeg-stream-sub")
+        # ★ 2026-10-15 现场提醒：opi-control 一旦起来就**接管 PCA9685** —— 如果谁的
+        #   手机/网页正停在摇杆页（或键盘按住），车会直接按那个输入动起来，
+        #   而我们这边的 Ctrl+C 已经没用了（脚本已经退出，不是它在开车）。
+        print("[BENCH] ⚠️ 注意：远程控制已恢复 = 网页摇杆/键盘**现在能直接让车动** —— "
+              "别把手机/网页停在摇杆页；要车绝对不动就断电或 systemctl stop opi-control")
     else:
         for svc in STREAM_SERVICES:
             ok = svc_active(svc)

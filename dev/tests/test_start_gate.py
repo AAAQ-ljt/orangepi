@@ -111,6 +111,62 @@ def test_dominance_cue_covers_dark_board():
     assert st.blocked, f"应靠主导度判据确认，读数 {st.metrics.summary}"
 
 
+# --------------------------------------------------- 车盖边缘回归（2026-10-15 现场事故）
+COVER_BGR = (87, 72, 56)      # 实测：车盖上沿的"暗蓝灰"像素（HSV≈(105, 91, 87)）
+
+
+def _cover_edge_frame(h: int = H, w: int = W, y0: int = 405) -> np.ndarray:
+    """红棕跑道 + 底部一条"车盖上沿"暗蓝灰带（2026-10-15 实拍特征）。
+
+    这条带会**过**蓝掩膜（S=91≥80、V=87≥60、H≈105 ∈ [95,135]），
+    所以老判据"面积≥0.06 就武装"会被它骗开（当天两次无板发车）。
+    """
+    frame = _track_frame(h, w)
+    frame[y0:h, :] = COVER_BGR
+    return frame
+
+
+def test_cover_edge_band_is_not_a_board():
+    """2026-10-15 事故回归：车盖上沿的暗蓝灰带不是蓝板，绝不能武装/发车。
+
+    两个层次都要钉（任一被改回去就红）：
+      · B（判据）：把 ROI 手工设回旧档 (0.15,0.85,0.20,0.95)，让蓝带落进 ROI ——
+        此时面积 0.13 ≥ 0.06 但主导度只有 15 < 35，必须**不武装**；
+      · A（区域）：用 settings 默认 ROI（底边 0.80）时蓝带根本不在 ROI 内。
+    """
+    frame = _cover_edge_frame()
+    old_roi = (0.15, 0.85, 0.20, 0.95)
+
+    # —— B：蓝带在 ROI 内，靠"面积路径也要主导度"挡住
+    m_old = blue_metrics(frame, roi=old_roi)
+    assert m_old.area_ratio >= 0.06, f"用例前提：旧 ROI 下面积必须够大（{m_old.area_ratio:.3f}）"
+    assert m_old.dominance < 35.0, f"用例前提：车盖带主导度必须低（{m_old.dominance:.1f}）"
+    gate_b = StartGate(roi=old_roi, arm_frames=3, verbose=False)
+    st = None
+    for _ in range(5):
+        st = gate_b.update(frame)
+    assert not st.armed, f"车盖边缘带被当成蓝板了！读数 {st.metrics.summary}"
+    assert not st.released
+
+    # —— A：settings 默认 ROI（2026-10-15 起底边 0.80）下蓝带不入 ROI
+    from config import settings
+    m_new = blue_metrics(frame, roi=settings.START_GATE_ROI)
+    assert m_new.area_ratio < 0.06, f"默认 ROI 下不该看到车盖带（{m_new.area_ratio:.3f}）"
+    gate_a = StartGate(arm_frames=3, verbose=False)
+    for _ in range(5):
+        st = gate_a.update(frame)
+    assert not st.armed, "默认 ROI 下车盖带不该武装闸门"
+
+    # —— 反向验证：真板放上去照样武装（别把判据改死）
+    board = frame.copy()
+    board[200:300, 150:450] = (220, 80, 40)          # 一块亮饱和蓝板
+    gate_c = StartGate(arm_frames=2, verbose=False)
+    st_c = None
+    for _ in range(3):
+        st_c = gate_c.update(board)
+    assert st_c.armed, f"真板必须仍能武装，读数 {st_c.metrics.summary}"
+
+
 # --------------------------------------------------------------------- 其它
 def test_flicker_resets_release_counter():
     gate = StartGate(arm_frames=2, release_frames=3, verbose=False)
@@ -160,6 +216,7 @@ if __name__ == "__main__":
     test_b_board_placed_later()
     test_dominance_cue_works_when_board_is_small()
     test_dominance_cue_covers_dark_board()
+    test_cover_edge_band_is_not_a_board()
     test_flicker_resets_release_counter()
     test_timeout_only_warns_never_releases()
     test_bench_rule_never_runs_without_board()

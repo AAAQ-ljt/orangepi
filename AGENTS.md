@@ -2,7 +2,8 @@
 
 > 本文件是**所有 AI 助手（ZCode / Claude / 其他 agent）在本仓库工作时的第一读物**，等价于团队开发规范。
 > 人类队员也请先读这一份。原始的长版规范已合并进本文件（`doc/开发规范.md` 已删除）。
-> 最后更新：2026-10-14——**循迹重写为最终脚本**：摄像头机械固定完成、实拍素材 `train/opencv-level1/video/true_track_sub_video/2.mp4`（3573 帧 @28.9fps）到手 → 旧的一整套（`lane_ref_test.py` 实跑入口 / `lane_official.py` 官方口径离线件 / `centroid_follow.py`）**已归档**（`archive/20261014-lane-scripts/` + `dev/attic/lane-old-20261014.tar.gz`）；新入口 = **`dev/scripts/lane_final_test.py`**（单文件：脊搜索检测 + PD 控制 + 记录 + 安全；离线 `--frames/--video/--calibrate`、在线 `--no-motor/--allow-motion`），标定与全片验证报告在 `train/opencv-level1/lane_test/1014_lane_final/report.md`（全片双侧 82%、剔除末段 89%、丢失 0%、中心 p90 5.8px、单帧 10ms）。⚠️ 检测链路**不再照抄官方 Hough**（官方链路在这套素材上锁的是路面刷痕：默认 ROI 双侧率仅 25%），改法/证据见报告。`vision_main` 这条 A 路径仍用 `lane_ref.py`（本轮不动）。旧记录：2026-10-12——①**图传全链复核**：车端两路推流 `ss` 实证 ESTAB→自建 `121.40.149.155`、官方 82.157.204.126 零流量；**`cam_car0027` 是流名、从未停用**（09-15 停的是官方通道；`ffmpeg-stream*` 为 enabled——"只 stop 不 disable"会随重启复活）；新网页入口 `https://car1.liyekai380.dpdns.org/`（实测后端 cam_car0027 有流）。②**双摄身份 VID:PID 更正**：`/dev/video0`=32e4:0234「Global Shutter Camera」、`/dev/video2`=2993:0858「icspring camera」（与旧记载相反，云台归属待 `cam-identify.py` 复核）。③**2026-10-13 镜头压低**：现场档改 ROI 0.15~0.75 / 前瞻带 0.17~0.26、新增贴边容差 `LANE_PAIR_EDGE_TOL_PX=40`（旧档在车道占满画面时会全盲、自检不发车）——细节见 `doc/开发文档.md` §2.2；④**巡线下摄真帧率随光照 9~30fps**（亮环境实测 29.8、暗环境 AE 长曝光掉到 9~16；"15fps"是暗环境真实值）。**循迹控制律已按实测帧率折算**（2026-10-12）：增益/窗口的登记口径 = 15fps（现场整定帧率），运行时时按实测 dt 折算成连续时间形式（`dev/control/rate.py` + `PidRef.step(e, dt)`），所以**换帧率不用重标 kp/kd**；现场 A/B 表继续按 15fps 口径写数字。2026-10-11 记录：巡线**前瞻带根治**：下摄平视角下真车道线是虚线、在 y≈195~205 就从画面左右边缘出去 → 自动前瞻带加"不贴边"余量后落到 y≈120~168，自检可发车已复验；`kd` 折算方向修正、`prime()` 防踢腿。现场命令单已删除（2026-10-15；新的循迹现场清单见 `lane_test/1014_lane_final/report.md` §6）。其余同 v11：**模型轨 = 红绿灯专属 3 类 light3cls，8 类契约与 4cls 全部废弃/退役，其余元素全 OpenCV**；RKNN 转换移交队友。**doc 已重构：开发相关内容只信 `doc/开发文档.md`，旧文档进 `doc/attic/` 只读不维护**）
+> 最后更新：2026-10-15——**现场事故复盘 + 四块修复**（详见 `doc/开发文档.md` §7 的 2026-10-15 条目）：① **闸门误发车**（下摄压低不够时"车自己车盖的上沿"落进 `START_GATE_ROI`，那圈暗蓝灰像素面积 0.06~0.14 压着 0.06 阈值抖 → 两次没放板就发车）已修 = ROI 底边 0.95→0.80 + 面积路径**也要主导度≥35** + 画面裁剪 `FRAME_CROP_LINE_Y=384`；当场 30 次武装**零假报**。② **单侧垃圾读数**加两道护栏（单侧也过跳变门限、"回中位保速"加 1.2s 时限）。③ **★ 车停不下来（事故级）**：PCA9685 一直输出最后一次脉宽，相机 UVC 卡死/进程被杀时车会带着油门前冲、Ctrl+C 无效 → 新增**独立进程看门狗** `scripts/esc_watchdog.py`（1s 不喂心跳强写 1500us）+ 读帧挪 daemon 线程（卡死不再阻塞主循环）。④ **增益实测**：亮光下 `kp 0.10 + kd 0.50 @ 1585` 最稳、**kd ≥0.65 会 D 过载**、**暗光 16.6fps 是独立退化因素**。⑤ 日志增强：`session.json`（参数+停机原因）、`lane_ab_summary.py` / `cam_cv2_fps.py` / `car_test_sweep.sh`；现场单 `dev/doc/field-lane-ab-20261015.md`。
+> 2026-10-14——**循迹重写为最终脚本**：摄像头机械固定完成、实拍素材 `train/opencv-level1/video/true_track_sub_video/2.mp4`（3573 帧 @28.9fps）到手 → 旧的一整套（`lane_ref_test.py` 实跑入口 / `lane_official.py` 官方口径离线件 / `centroid_follow.py`）**已归档**（`archive/20261014-lane-scripts/` + `dev/attic/lane-old-20261014.tar.gz`）；新入口 = **`dev/scripts/lane_final_test.py`**（单文件：脊搜索检测 + PD 控制 + 记录 + 安全；离线 `--frames/--video/--calibrate`、在线 `--no-motor/--allow-motion`），标定与全片验证报告在 `train/opencv-level1/lane_test/1014_lane_final/report.md`（全片双侧 82%、剔除末段 89%、丢失 0%、中心 p90 5.8px、单帧 10ms）。⚠️ 检测链路**不再照抄官方 Hough**（官方链路在这套素材上锁的是路面刷痕：默认 ROI 双侧率仅 25%），改法/证据见报告。`vision_main` 这条 A 路径仍用 `lane_ref.py`（本轮不动）。旧记录：2026-10-12——①**图传全链复核**：车端两路推流 `ss` 实证 ESTAB→自建 `121.40.149.155`、官方 82.157.204.126 零流量；**`cam_car0027` 是流名、从未停用**（09-15 停的是官方通道；`ffmpeg-stream*` 为 enabled——"只 stop 不 disable"会随重启复活）；新网页入口 `https://car1.liyekai380.dpdns.org/`（实测后端 cam_car0027 有流）。②**双摄身份 VID:PID 更正**：`/dev/video0`=32e4:0234「Global Shutter Camera」、`/dev/video2`=2993:0858「icspring camera」（与旧记载相反，云台归属待 `cam-identify.py` 复核）。③**2026-10-13 镜头压低**：现场档改 ROI 0.15~0.75 / 前瞻带 0.17~0.26、新增贴边容差 `LANE_PAIR_EDGE_TOL_PX=40`（旧档在车道占满画面时会全盲、自检不发车）——细节见 `doc/开发文档.md` §2.2；④**巡线下摄真帧率随光照 9~30fps**（亮环境实测 29.8、暗环境 AE 长曝光掉到 9~16；"15fps"是暗环境真实值）。**循迹控制律已按实测帧率折算**（2026-10-12）：增益/窗口的登记口径 = 15fps（现场整定帧率），运行时时按实测 dt 折算成连续时间形式（`dev/control/rate.py` + `PidRef.step(e, dt)`），所以**换帧率不用重标 kp/kd**；现场 A/B 表继续按 15fps 口径写数字。2026-10-11 记录：巡线**前瞻带根治**：下摄平视角下真车道线是虚线、在 y≈195~205 就从画面左右边缘出去 → 自动前瞻带加"不贴边"余量后落到 y≈120~168，自检可发车已复验；`kd` 折算方向修正、`prime()` 防踢腿。现场命令单已删除（2026-10-15；新的循迹现场清单见 `lane_test/1014_lane_final/report.md` §6）。其余同 v11：**模型轨 = 红绿灯专属 3 类 light3cls，8 类契约与 4cls 全部废弃/退役，其余元素全 OpenCV**；RKNN 转换移交队友。**doc 已重构：开发相关内容只信 `doc/开发文档.md`，旧文档进 `doc/attic/` 只读不维护**）
 
 ---
 
@@ -34,6 +35,13 @@
 5. 禁止在信号回调里做阻塞操作（sleep、网络请求）。
 6. 软件里**不得写死**能让车"上电即冲出去"的逻辑。发车必须是**边沿触发**（见 `dev/vision/start_gate.py`）：
    "先确认有遮挡 → 再等遮挡消失"的跳变才算发车信号，**绝不能用"当前无遮挡"直接发车**。
+7. **★ 任何"软件停车"都必须有一条不依赖主控进程的退路**（2026-10-15 事故教训）：PCA9685 会**一直输出最后一次
+   写进去的脉宽** —— 主控卡死/被杀，车就带着油门继续跑，且 Ctrl+C 只是给主循环设标志、此时无效。
+   所以动电机的运行**必须**有独立看门狗在位（`scripts/esc_watchdog.py`，`lane_final_test.py --allow-motion`
+   会自动拉起；**跑前确认日志里有「电调看门狗已拉起」**），并且操作员**手边随时能断电**。
+8. **车不停时的处置顺序**：① **直接断电**（唯一覆盖"总线/驱动板本身坏了"的手段）；② `car-mode.sh estop`；
+   ③ Ctrl+C（只管我们的脚本，脚本卡死时无效）。**别把手机/网页停在摇杆页**：我们的脚本退出后会恢复
+   opi-control，那是官方手动驾驶服务，摇杆的输入会直接让车动。
 
 ### 1.2 车端环境（官方资产不可破坏）
 
@@ -303,6 +311,7 @@ StartGateState(blocked: bool, armed: bool, released: bool, blue_ratio: float, ti
 
 | 坑 | 后果 / 正确做法 |
 |---|---|
+| **以为"程序活着"就有刹车** | **PCA9685 保持最后一次脉宽**：主控卡死（相机 UVC 卡死让 `cap.read()` 无限阻塞）或进程被杀 → 车带着最后的油门一直跑、**Ctrl+C 无效**（信号只设标志），现场两次都要断电。修法：独立进程看门狗（`esc_watchdog.py`，1s 不喂心跳强写 1500us）+ 读帧 daemon 线程（帧龄超时即退出）；**跑前确认日志有"电调看门狗已拉起"，车不停先断电** |
 | **以为安全组被"覆盖"了** | 端口从某些网络连不上，先分清是**安全组**还是**你本地网络**：换个观测点（小车本身）测同一端口。2026-09-16 实测：SG 一直正常，是校园网出口封了 22/2222 这类 SSH 端口 |
 | 用团队自己写的 qmicli 脚本给 SIM8262E-M2 拨号 | 该模组时序特殊，手写 qmicli 容易 `CID allocation failed`；**先试 APN 轮询（`car-net.sh cellular up`），失败再用厂商 `simcom-cm`，最后 `cellular recover` 做 USB 硬复位** |
 | **以为模组坏了/拨号脚本有问题，其实是网卡被改名** | systemd 会把 `wwan0` 改成 `wwx<MAC>`，所有写死 `wwan0` 的脚本（含厂商二进制）全部失效。已修：脚本运行时自动探测 + `/etc/systemd/network/10-wwan0.link` 固定名字。排查：`dmesg \| grep -E 'qmi\|wwan' \| tail` |

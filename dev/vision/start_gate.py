@@ -13,6 +13,17 @@
   ② 蓝色主导度 mean(clip(B-max(R,G),0,255)) —— 对曝光/白平衡漂移比 HSV 硬阈值稳
   ③ 画面细节（拉普拉斯方差）骤降     —— 板贴到镜头前时大面积失焦，默认关闭
 阈值都在 config/settings.py 的 START_* 里，现场可调。
+
+★ 2026-10-15 现场事故与判据修订（B：面积路径必须配主导度）
+--------------------------------------------------------
+固定机位、下摄压得不够低时，**车自己车盖的上沿**会落进 ROI：它是一圈**暗蓝灰**像素
+（2026-10-15 实拍实测 HSV≈(101~105, 87~91, 87~91)、BGR≈(87,72,56)，位于 ROI 底部条带），
+恰好同时过 HSV 的 S≥80/V≥60 → 形成连通域、面积 0.059~0.135，**压着面积阈值 0.06 来回抖**
+→ "3 帧有板 + 5 帧无板"在抖动里凑齐 → 两次**没放板就发车**（113344 / 122522）。
+真板与它天然可分：**主导度 98~137 vs 12~18**（真板是亮饱和蓝，S≈220 V≈250）。
+所以判据①的面积路径改成**也要主导度达标**，只给"面积大到不可能是边缘/杂物"（≥ `大板阈值`）
+留一条单独成立的口子。配合 ROI 底边抬到 0.80（车盖不入 ROI）双保险。
+离线验证（当天 8 张真板帧 + 25 张车盖帧）：真板 8/8 仍判"有板"、车盖 25→0 误判。
 """
 from __future__ import annotations
 
@@ -137,6 +148,7 @@ class StartGate:
                  roi: Optional[Tuple[float, float, float, float]] = None,
                  area_thresh: Optional[float] = None,
                  area_thresh_low: Optional[float] = None,
+                 area_thresh_big: Optional[float] = None,
                  dominance_thresh: Optional[float] = None,
                  arm_frames: Optional[int] = None,
                  release_frames: Optional[int] = None,
@@ -149,6 +161,8 @@ class StartGate:
         self.area_thresh = (settings.START_BLUE_AREA_THRESH if area_thresh is None else area_thresh)
         self.area_thresh_low = (settings.START_BLUE_AREA_THRESH_LOW
                                 if area_thresh_low is None else area_thresh_low)
+        self.area_thresh_big = (settings.START_BLUE_AREA_THRESH_BIG
+                                if area_thresh_big is None else area_thresh_big)
         self.dominance_thresh = (settings.START_BLUE_DOMINANCE_THRESH
                                  if dominance_thresh is None else dominance_thresh)
         self.arm_frames = settings.START_ARM_FRAMES if arm_frames is None else arm_frames
@@ -180,8 +194,12 @@ class StartGate:
         self._reset_counters()
 
     def _decide_blocked(self, m: BlueMetrics) -> bool:
-        blocked = (m.area_ratio >= self.area_thresh) or \
-                  (m.dominance >= self.dominance_thresh and m.area_ratio >= self.area_thresh_low)
+        # 判据①（面积）**同时**要求主导度达标（2026-10-15 修订，见模块 docstring 的 B）：
+        # 只靠面积会把"暗蓝灰的车盖/车身边缘"当板（实测面积 0.059~0.135、主导度仅 12~18）。
+        # 面积大到不可能是边缘/杂物时（≥area_thresh_big）可单独成立；判据②保留原语义。
+        blocked = ((m.area_ratio >= self.area_thresh and m.dominance >= self.dominance_thresh)
+                   or (m.area_ratio >= self.area_thresh_big)
+                   or (m.dominance >= self.dominance_thresh and m.area_ratio >= self.area_thresh_low))
         if not blocked and self.use_detail and self._detail_baseline:
             # 贴脸失焦：细节相对基线骤降，且有一点蓝色
             if (m.detail <= self._detail_baseline * (1.0 - self.detail_drop_ratio)
@@ -217,7 +235,8 @@ class StartGate:
                 if self.verbose and (now - self._last_report) >= self.report_every_s:
                     self._last_report = now
                     print(f"[START_GATE] 等待蓝板… {m.summary} "
-                          f"（阈值 面积≥{self.area_thresh:.3f} 或 主导度≥{self.dominance_thresh:.1f}）")
+                          f"（阈值 面积≥{self.area_thresh:.3f}且主导度≥{self.dominance_thresh:.1f}"
+                          f"，或面积≥{self.area_thresh_big:.2f}）")
         elif not self._released:
             if blocked:
                 self._clear_frames = 0
@@ -232,8 +251,9 @@ class StartGate:
         if timed_out and not self._warned:
             self._warned = True
             print(f"[START_GATE] ⚠️ {self.timeout_s:.0f}s 内未检测到蓝板：{m.summary}\n"
-                  f"            检查：板是否在视野内 / 阈值 START_BLUE_AREA_THRESH={self.area_thresh:.3f}、"
-                  f"START_BLUE_DOMINANCE_THRESH={self.dominance_thresh:.1f} —— 保守起见不自动发车")
+                  f"            检查：板是否在视野内 / 阈值 START_BLUE_AREA_THRESH={self.area_thresh:.3f}"
+                  f"（需同时满足 START_BLUE_DOMINANCE_THRESH={self.dominance_thresh:.1f}）、"
+                  f"START_BLUE_AREA_THRESH_BIG={self.area_thresh_big:.2f} —— 保守起见不自动发车")
 
         return StartGateState(blocked=blocked, armed=self._armed, released=self._released,
                               metrics=m, frames_blocked=self._blocked_frames,

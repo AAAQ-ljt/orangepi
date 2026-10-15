@@ -104,6 +104,38 @@ def test_single_side_seed_before_any_pair() -> None:
     assert abs(r.half_w - lft.HALF_W_SEED) < 1e-6
 
 
+def test_single_side_jump_is_rejected() -> None:
+    """单侧帧也要过时域门限（2026-10-15 事故回归）。
+
+    实测场景：车出线后唯一那条线"锁到别的结构上"，x@y_ref 一跳 220px（+163 → −58），
+    q=0.55 照样算有效 → single_hold 保速直冲。这里的合成版：
+      · 先双侧（左线 x@100=60）→ 记住该侧；
+      · 左线跳到 260（+200px）→ 必须**丢本帧读数**（invalid + tag）；
+      · 小幅移动（60 → 80）→ 必须照收（别把正常读数误杀）。
+    """
+    det = _mk_det()
+    for _ in range(4):                                             # 喂够双侧帧让半宽先验"实测"
+        r0 = det.detect(_lane_frame(xl=60, xr=600))
+    assert r0.both_sides
+    r1 = det.detect(_lane_frame(xl=260, xr=600, draw_r=False))     # 只剩左线且跳 +200px
+    assert not r1.valid, f"单侧跳 200px 应被丢：c={r1.center_x} tag={r1.tag}"
+    assert "1side-jump-L" in r1.tag, r1.tag
+    assert r1.center_x is None and r1.left_x is None
+    r2 = det.detect(_lane_frame(xl=80, xr=600, draw_r=False))      # 小幅移动（+20px）
+    assert r2.valid and "1side-width" in r2.tag, f"小幅移动必须照收：{r2.tag}"
+    assert abs(r2.left_x - 80.0) < 8.0, r2.left_x
+
+
+def test_single_side_jump_reject_resets_with_prior() -> None:
+    """被拒的单侧帧不得污染参照；重新出现双侧后门限从新值起算。"""
+    det = _mk_det()
+    det.detect(_lane_frame(xl=60, xr=600))
+    det.detect(_lane_frame(xl=260, xr=600, draw_r=False))          # 被拒
+    det.detect(_lane_frame(xl=60, xr=600))                         # 双侧回到 60/600
+    r = det.detect(_lane_frame(xl=70, xr=600, draw_r=False))       # 相对 60 只跳 10px
+    assert r.valid, f"参照应仍是 60（被拒帧不入记忆），实得 tag={r.tag}"
+
+
 def test_no_lines_is_lost() -> None:
     det = _mk_det()
     r = det.detect(_blank_frame())
@@ -227,6 +259,52 @@ def test_runner_single_hold_straight_and_fast() -> None:
     assert co.phase == "single"
     assert abs(co.angle - 90.0) < 1e-6, "单侧帧必须回中位直行（single-hold 默认开）"
     assert co.out_us == run.single_speed_us, "单侧帧保速"
+    assert "已" in co.note, f"单侧帧 note 应带持续时长（复盘用）：{co.note}"
+
+
+def _single_reading(center: float = 600.0) -> Reading:
+    return Reading(center_x=center, error=center - 330.0, left_x=330.0, right_x=None,
+                   right_k=None, left_k=-0.5, score_l=20.0, n_l=60, n_r=0, both_sides=False,
+                   half_w=270.0, width_measured=True, quality=lft.Q_SINGLE_MEASURED,
+                   tag="1side-width")
+
+
+def test_runner_single_timeout_stops() -> None:
+    """单侧连续超时 → 按丢线停车（2026-10-15 事故回归："出线后回中位保速直冲"）。"""
+    run = _runner(single_max_s=0.5, hold_s=0.3)
+    run.step(0.0, _both_reading(), allowed=True)
+    co1 = run.step(0.1, _single_reading(), allowed=True)
+    assert co1.phase == "single" and co1.out_us == run.single_speed_us
+    co2 = run.step(0.4, _single_reading(), allowed=True)          # 0.3s < 0.5s：还在时限内
+    assert co2.phase == "single" and co2.out_us == run.single_speed_us
+    co3 = run.step(0.65, _single_reading(), allowed=True)         # 0.55s ≥ 0.5s：停
+    assert co3.phase == "lost", f"单侧超时应按丢线停车，实得 {co3.phase}"
+    assert co3.out_us == lft.NEUTRAL_US and run.stopped
+    # 恢复：连续 5 帧有效（双侧）→ 重新跟线
+    for i in range(5):
+        co4 = run.step(0.7 + i * 0.05, _both_reading(), allowed=True)
+    assert not run.stopped and co4.phase in ("track", "single", "hold")
+
+
+def test_runner_single_timer_resets_on_both_sides() -> None:
+    """单侧计时只统计**连续**单侧：中途回到双侧就清零（别把零星单侧攒成超时）。"""
+    run = _runner(single_max_s=0.5, hold_s=0.3)
+    run.step(0.0, _both_reading(), allowed=True)
+    run.step(0.1, _single_reading(), allowed=True)
+    run.step(0.3, _single_reading(), allowed=True)                # 0.2s
+    run.step(0.4, _both_reading(), allowed=True)                  # 双侧 → 清零
+    co = run.step(0.5, _single_reading(), allowed=True)
+    assert co.phase == "single" and not run.stopped, "双侧帧应把单侧计时清零"
+
+
+def test_runner_single_timeout_can_be_disabled() -> None:
+    """--single-max-s 0 = 关（老行为：一直回中位保速）。"""
+    run = _runner(single_max_s=0.0, hold_s=0.3)
+    run.step(0.0, _both_reading(), allowed=True)
+    co = None
+    for i in range(10):
+        co = run.step(0.1 + i * 0.2, _single_reading(), allowed=True)
+    assert co.phase == "single" and not run.stopped, "0 应关闭时限"
 
 
 def test_runner_weak_pair_cap() -> None:

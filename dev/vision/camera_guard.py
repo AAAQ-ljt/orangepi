@@ -26,7 +26,9 @@ import contextlib
 import os
 import subprocess
 import time
-from typing import Iterable, Iterator, List
+from typing import Iterable, Iterator, List, Optional
+
+from config import settings
 
 FFMPEG_SERVICES: List[str] = [
     "ffmpeg-stream.service",
@@ -125,6 +127,32 @@ def start_ffmpeg(services: Iterable[str] = FFMPEG_SERVICES) -> None:
     """恢复推流服务。"""
     for svc in services:
         _systemctl("start", svc)
+
+
+# ------------------------------------------------------------------ 画面裁剪
+def crop_frame(frame, line_y: Optional[int] = None):
+    """裁掉画面底部（车自己的车盖）：**保留 y < line_y 的行**，返回顶部切片。
+
+    为什么要有它（2026-10-15 现场实测，logs/lane_20261015_*）
+    --------------------------------------------------------
+    固定机位下画面底部是**车自己的车盖**：它的上沿（实测 y≈415~463、过渡带最低 y≈392）
+    在发车闸门的 ROI 里形成"暗蓝灰"连通域（HSV≈(101~105, 87~91, 87~91)），面积 0.059~0.135
+    压着 0.06 阈值抖动 → 两次"没放板就发车"。它同样是任何亮/暗结构检测的污染源。
+    裁掉 = 从所有消费方（闸门/检测/存图）一次性拆掉这类污染，比在每个消费方里各写一条
+    "排除底部"更省事、也不会漏。
+
+    `line_y=None` 取 `settings.FRAME_CROP_LINE_Y`；≤0 或 ≥ 画面高（小图/配置离谱）→ 原样返回。
+    裁剪只切底部 —— 图像原点仍是左上角，所有"以 y 为坐标"的检测档参数（ROI/前瞻带/
+    y_ref）**完全不受影响**（2026-10-15 实拍 12/12 帧读数逐位一致）。
+    """
+    if line_y is None:
+        line_y = getattr(settings, "FRAME_CROP_LINE_Y", 0)
+    line_y = int(line_y or 0)
+    if line_y <= 0 or frame is None:
+        return frame
+    if line_y >= frame.shape[0]:       # 小图/配置离谱：不裁，别把画面裁没
+        return frame
+    return frame[:line_y]
 
 
 def open_camera(index: int, width: int = 640, height: int = 480,

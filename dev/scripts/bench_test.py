@@ -66,7 +66,7 @@ from scripts.bench_common import NEUTRAL_US, MotorSession, install_signal_guard
 from vision.camera_guard import camera_exclusive, open_camera
 
 # 扫线模块：2026-09-19 起两条旧实现（lane_scan/lane_hough）已归档到 dev/attic/，
-# 循迹改用 scripts/lane_ref_test.py（参考实现版、独立自包含）。这里做成可选导入：
+# 循迹用 scripts/lane_final_test.py（最终版、单文件自包含）。这里做成可选导入：
 # 没有扫线模块时，--no-lane 直行档与蓝板档照常可用，只有循迹档会禁用。
 try:
     from vision.lane_scan import LaneScanner          # noqa: F401  （旧版，若还在就用）
@@ -261,7 +261,7 @@ def main() -> int:
     # （2026-09-21 实验室实测：--steer-test 被这一条挡掉，白跑一次）
     need_lane = not (args.no_lane or args.steer_test or args.calibrate or args.no_motor)
     if not _HAS_LANE_SCAN and need_lane:
-        print("[BENCH] 扫线模块已移除：循迹档不可用。请用 scripts/lane_ref_test.py 做循迹测试，"
+        print("[BENCH] 扫线模块已移除：循迹档不可用。请用 scripts/lane_final_test.py 做循迹测试，"
               "或加 --no-lane 只测蓝板/直行。")
         return 2
     scanner = LaneScanner(target_x=args.target_x) if _HAS_LANE_SCAN else None
@@ -307,7 +307,7 @@ def main() -> int:
                     continue
                 if scanner is None:
                     print("[BENCH] 标定需要扫线模块，但它已归档（lane_scan 不在 vision/ 下）。")
-                    print("[BENCH] 请改用 scripts/lane_ref_test.py 的起步前自检标定目标点，")
+                    print("[BENCH] 请改用 scripts/lane_final_test.py --calibrate 标定目标点，")
                     print("[BENCH] 或先恢复 vision/lane_scan.py 再跑 --calibrate。")
                     return 2
                 obs = scanner.scan(frame)
@@ -380,7 +380,7 @@ def main() -> int:
                     time.sleep(1.5)
                 print("[STEER-TEST] 结束。把上面看到的方向写进 /root/dev/config/site.yaml 的 steer_sign："
                       "角度大=左转 → -1；角度大=右转 → +1")
-                print("[STEER-TEST] （lane_ref_test.py 会读同一个值；也可用 --steer-sign 临时覆盖）")
+                print("[STEER-TEST] （lane_final_test.py 会读同一个值；也可用 --steer-sign 临时覆盖）")
                 return 0
             with camera_exclusive():
                 cap = open_camera(args.camera, args.width, args.height)

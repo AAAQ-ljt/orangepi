@@ -27,6 +27,16 @@ import numpy as np
 from config import settings
 from control.lane_control import (BigErrorGuard, LossGuard, PidRef, adaptive_pulse, floor_pulse)
 from control.filters import ErrorFilter
+# ---------------------------------------------------------------- 假图几何（与现场标定解耦）
+# 本文件的假图把车道线画在 y 0.30~0.60H 上，所以**显式**把 ROI/前瞻带钉在这段几何上：
+# 现场换镜头/改 site.yaml 时，算法用例不该集体翻红（标定对错由 test_lane_ref_run 的
+# 端到端与操场自检负责）。2026-10-13：镜头压低后现场档变 0.15~0.75 / 前瞻 0.17~0.26，
+# 与本文件的假图几何不同 —— 那才是这次要在这里钉死的原因。
+settings.LANE_ROI_TOP_RATIO = 0.35
+settings.LANE_ROI_BOTTOM_MARGIN = 200
+settings.LANE_LOOK_TOP_RATIO = 0.35
+settings.LANE_LOOK_BOTTOM_RATIO = 0.48
+
 from vision.lane_ref import (LaneParams, LaneRefDetector, WidthPrior, auto_look_band,
                              sweep_bands)
 
@@ -161,8 +171,9 @@ def test_reference_band_is_always_a_candidate():
 def test_gains_switch_basis():
     """PID 增益的口径：参考数字是按 320 宽整定的，我们的误差是 640 宽像素。
 
-    literal = 抄 0.15/0.01/0.12，ki 按帧率折算 ×2（积分收敛），kd 不折算（现场 A/B）；
-    width = 按画面宽度换算后再折算（640 → kp 0.075）。
+    literal = 抄 0.15/0.01/0.12 的 **15fps 登记口径**（ki 含现场那笔 ×2，kd 不折算）；
+    width = 按画面宽度换算后再登记（640 → kp 0.075）。
+    ★ 帧率折算**不在这里**：`PidRef.step(e, dt)` 按实测 dt 自动折（见 test_lane_rate.py）。
     """
     from control.lane_control import gains_for
     assert gains_for(640, "literal") == (0.15, 0.02, 0.12)
@@ -249,50 +260,6 @@ def test_auto_look_band_uses_densest_contiguous_segment():
     assert n >= 100, f"合成线上最长连续段（行数）应很长，实际 {n}"
     y_lo = int(top * H); y_hi = int(bottom * H)
     assert 120 <= y_lo <= 320 and 160 <= y_hi <= 380, f"前瞻带 {y_lo}~{y_hi} 偏出线区"
-
-
-def test_preflight_refuses_jittery_target():
-    """第二道闸门：连续支持够（run_max ≥ 20）但**静止中心跨距 > 25px** → 也不采纳目标点。
-
-    2026-09-22 实测（191511/191707/191804）：跨距 79/117/120/100px 时提示"不采纳"，
-    但目标点 352.3/389.7/260.7/344.8 **照样被用并写回 site.yaml** —— 顺序 bug：
-    `configured` 在 `params.target_ratio` 被覆盖**之后**才取值，还原等于没还原。
-    """
-    import types
-
-    import scripts.lane_ref_test as lt
-    frames = [_lane_image()] * 10
-    args = types.SimpleNamespace(auto_roi=True, auto_look=False, auto_target=True,
-                                 min_quality=0.28, save_site=False)
-    # 扫描给"强证据"，但 10 帧里检测器返回的中心按帧号在 300~450 间跳（跨距 150px）
-    from vision import lane_ref as lr2
-    _orig_detect = lr2.LaneRefDetector.detect
-
-    def fake_detect(self, frame, width_prior=None):
-        r = _orig_detect(self, frame, width_prior)
-        r.center_x = 300.0 + (fake_detect.call_count % 4) * 50.0
-        fake_detect.call_count += 1
-        r.error = r.center_x - 375.0
-        r.quality = 1.0
-        return r
-    fake_detect.call_count = 0
-    strength = {"roi_top_ratio": 0.30, "roi_bottom_ratio": 0.65, "y_range": (144, 312),
-                "paired_frames": 10, "n_frames": 10, "run_max": 60.0, "support_frac": 0.3,
-                "spread_px": 150.0, "q_med": 1.0, "segs_med": 4.0, "centers": []}
-    from vision import lane_ref as lr2
-    orig_sweep, orig_detect = lt.sweep_bands, lr2.LaneRefDetector.detect
-    try:
-        lr2.LaneRefDetector.detect = fake_detect
-        lt.sweep_bands = lambda fr, p, **kw: [dict(strength)]
-        base = LaneParams.from_settings()
-        p_out, t_out, _ok = lt._preflight(frames, args, LaneParams.from_settings())
-        assert t_out is None, f"跨距大时不采纳目标点，实际 {t_out}"
-        assert abs(p_out.target_ratio - base.target_ratio) < 1e-9,             "params.target_ratio 必须还原（否则调用方会拿自检值当配置值）"
-    finally:
-        lr2.LaneRefDetector.detect = orig_detect
-        lt.sweep_bands = orig_sweep
-
-
 def test_run_max_distinguishes_real_line_from_fragments():
     """『最长连续支持行』要能把**一整条真线**和**零散碎边**分开。
 
@@ -315,41 +282,6 @@ def test_run_max_distinguishes_real_line_from_fragments():
     _h2, st2 = rows_with_support(blank, (-1.0, 300.0), (1.0, 300.0), 0, H, step=4,
                                  min_rows=2, want_stats=True)
     assert st2["run_max"] == 0 and st2["rows"] == 0
-
-
-def test_preflight_refuses_weak_evidence():
-    """自检证据弱（最长连续支持 < 20 行）时**不能采纳**自检出的 ROI/目标点。
-
-    2026-09-22 落地实测两次踩到：车摆偏时自检把目标标成 417/291（真值约 341），
-    车照着错目标跑；而且第一次修的时候把 `weak = True` 只写进了 else 分支 ——
-    警告打印了、目标点照样被采纳并写回 site.yaml。这条测试盯的就是那个分支。
-    """
-    import types
-
-    import scripts.lane_ref_test as lt
-    frames = [_lane_image()] * 5
-    args = types.SimpleNamespace(auto_roi=True, auto_look=False, auto_target=True,
-                                 min_quality=0.28, save_site=False)
-    base = LaneParams.from_settings()
-    row = {"roi_top_ratio": 0.30, "roi_bottom_ratio": 0.65, "y_range": (144, 312),
-           "paired_frames": 10, "n_frames": 10, "run_max": 5.0, "support_frac": 0.02,
-           "spread_px": 10.0, "q_med": 0.5, "segs_med": 2.0, "centers": []}
-    orig = lt.sweep_bands
-    try:
-        lt.sweep_bands = lambda fr, p, **kw: [dict(row)]
-        p_weak, t_weak, ok_weak = lt._preflight(frames, args, LaneParams.from_settings())
-        assert t_weak is None, f"证据弱时不该采纳自检目标点，实际 {t_weak}"
-        assert not ok_weak, "证据弱时 station_ok 必须为 False（否则车会发车）"
-        assert abs(p_weak.roi_top_ratio - base.roi_top_ratio) < 1e-9,             "证据弱时不该采纳自检的 ROI"
-        lt.sweep_bands = lambda fr, p, **kw: [dict(row, run_max=60.0, support_frac=0.3,
-                                                   q_med=1.0)]
-        _p_ok, t_ok, ok_good = lt._preflight(frames, args, LaneParams.from_settings())
-        assert t_ok is not None, "证据够时必须给出目标点"
-        assert ok_good, "证据够时 station_ok 必须为 True"
-    finally:
-        lt.sweep_bands = orig
-
-
 # ---------------------------------------------------------------- 5 PID / 速度
 def test_pid_matches_reference_convention():
     """转向符号与 settings.STEER_SIGN 同口径：
@@ -388,11 +320,13 @@ def test_kd_derivative_is_clamped():
 
 def test_weak_pair_steer_cap():
     """单侧/弱对帧的舵角要额外限幅（否则读数一跳 100px，kp+kd 就把舵打满）。"""
-    from scripts.lane_ref_test import apply_steer_cap
-    # 正常双侧（两侧都 ≥3 段）→ 不限幅
-    assert apply_steer_cap(86.5, 100.0, True, 5, 4) == 100.0
-    # 弱对（一侧 2 段）→ 掐到 ±10°
-    assert abs(apply_steer_cap(86.5, 100.0, True, 2, 5) - 86.5) <= 10.0 + 1e-9
+    from scripts.lane_final_test import apply_steer_cap
+    # 正常双侧（两侧采样点都够 40）→ 不限幅
+    assert apply_steer_cap(86.5, 100.0, True, 60, 55) == 100.0
+    # 弱对（一侧只有 20 点）→ 掐到 ±10°
+    assert abs(apply_steer_cap(86.5, 100.0, True, 20, 60) - 86.5) <= 10.0 + 1e-9
+    # 单侧兜底帧 → 掐到 ±5°
+    assert abs(apply_steer_cap(86.5, 140.0, False, 60, 0) - 86.5) <= 5.0 + 1e-9
     assert abs(apply_steer_cap(86.5, 60.0, True, 5, 1) - 86.5) <= 10.0 + 1e-9
     # 单侧 → 掐到 ±5°
     assert abs(apply_steer_cap(86.5, 100.0, False, 3, 0) - 86.5) <= 5.0 + 1e-9
@@ -444,13 +378,17 @@ def test_oscillation_guard_detects_s_wave():
 
     2026-09-23 操场实测：S 弯时舵机 75°↔105°（限幅）来回甩，误差 ±100~300 翻符号，
     连续计时型跑偏保护永远凑不满 → 必须用"摆幅次数"直接抓。
+
+    ★ 2026-10-12：判据前先要攒够**时间跨度**（窗口的 1/4 = 0.5s，见
+    `OscillationGuard.MIN_SPAN_FRAC`）—— 帧率翻倍时"4 帧"只有 0.13s，
+    只看帧数等于高帧率下提前判失控。所以这里的序列按 10fps 采到 0.7s 才够。
     """
     from control.lane_control import OscillationGuard
     # 实测 S 弯的幅度就是 ±15°（限幅值），所以 amp 必须 < 15 才能抓到它
     g = OscillationGuard(window_s=2.0, flips=3, amp_deg=12.0)
-    # 真画龙：75/105/75/105 来回
+    # 真画龙：75/105/75/105 来回（0.1s 一步 → 7 步 = 0.7s，够时间跨度门槛）
     t = 0.0
-    seq = [75.0, 105.0, 75.0, 105.0, 75.0]
+    seq = [75.0, 105.0, 75.0, 105.0, 75.0, 105.0, 75.0, 105.0]
     fired = False
     for a in seq:
         t += 0.1
@@ -466,6 +404,26 @@ def test_oscillation_guard_detects_s_wave():
     g3 = OscillationGuard(window_s=2.0, flips=3, amp_deg=18.0)
     for a in (80.0, 100.0, 90.0, 90.0, 90.0):
         assert not g3.update(t, a)
+
+
+def test_oscillation_guard_needs_time_span_not_sample_count():
+    """★ 2026-10-12 帧率回归：30fps 下"样本够但时间跨度不足"不许判画龙。
+
+    老写法只看样本数（≥4 帧）：30fps 下 4 帧只有 0.13s —— 帧率翻倍等于把
+    "观测窗口"缩短一半，高帧率时会提前判失控。新写法要求窗口的 1/4（0.5s）。
+    """
+    from control.lane_control import OscillationGuard
+    g = OscillationGuard(window_s=2.0, flips=3, amp_deg=12.0)
+    # 30fps 的剧烈来回：5 帧只有 0.13s 跨度 → 证据不足，不许触发
+    for i, a in enumerate([75.0, 105.0, 75.0, 105.0, 75.0]):
+        assert not g.update((i + 1) / 30.0, a), "0.13s 的观测不足以判画龙"
+    # 同样的摆动持续到 0.5s 以上 → 该触发就触发（别把保护一起关掉）
+    fired = False
+    for i in range(5, 25):
+        if g.update((i + 1) / 30.0, 75.0 if i % 2 else 105.0):
+            fired = True
+            break
+    assert fired, "攒够 0.5s 后必须触发（保护不能被帧率修正关掉）"
 
 
 def test_big_error_guard_fires_on_oscillation_burst():
@@ -529,14 +487,17 @@ def test_big_error_guard_needs_sustained_error():
 
 
 # ---------------------------------------------------------------- 8~9 自动选带 / 前瞻带
-def test_paired_rejects_out_of_frame_lines():
-    """线外推出画面（贴边段）的配对判据：y_ref 处必须落在画面内（留 30px 余量）。
+def test_paired_edge_tolerance():
+    """配对"贴边/出画"判据：超容差拒绝、容差内放行（2026-10-13 起可配）。
 
-    背景（10-11 图像复核更正）：这不是"幻影对"——就是真车道线，但下摄视角太平，
-    真线在 y≈195~205 从画面左右边缘出去（真值 x≈21/643），贴边段拟合截距噪声把
-    643 放大成 686。该判据是**兜底**：真读数是拟合外推、且截距噪声最大的一类输入，
-    不该越过闸门；正确的前瞻带上移由 rows_with_support 的"不贴边"余量负责（自动
-    前瞻带会自己避开这段）。此测试锁住兜底行为。
+    演变：
+      · 2026-10-11：硬编码"两条线必须留在画面内 30px"。当时下摄太平，真线在 y≈195~205
+        就从左右边缘出去（真值 x≈21/643），贴边段的拟合截距噪声最大（643 读成 686）——
+        那道闸门是为了不把这种外推值当可信读数。
+      · 2026-10-13：镜头压低后**车道比画面宽**，真线几何上就在画面外（实测左线 x 最小 −16），
+        硬闸门把 78% 的帧全拦了、预检自检跟着过不去。改成 `LANE_PAIR_EDGE_TOL_PX`：
+        正值 = 允许出画这么多像素（现场档 40），负值 = 旧口径（必须在画面内 |值|px）。
+    本测试锁住两种口径，避免"放宽"被改回硬闸门或反过来（真外推垃圾放进来）。
     """
     det = LaneRefDetector()
 
@@ -547,8 +508,18 @@ def test_paired_rejects_out_of_frame_lines():
 
     y_ref = 199.0
     ghost_l = line_through(30, 199, 150, 400)      # 贴左边框
-    ghost_r = line_through(686, 199, 800, 400)     # 画面外（>640）
-    assert not det._paired_ok(ghost_l, ghost_r, y_ref, 640), "右线在画面外 → 必须判不可信"
+    ghost_r = line_through(660, 199, 780, 400)     # 出画 ~20px（容差 40 以内）
+    # ① 现场档（tol=40）：这类"贴边/小幅出画"的帧必须**放行**（否则车端全盲，见上）
+    assert det._paired_ok(ghost_l, ghost_r, y_ref, 640),         "现场档 tol=40 下，右线出画 ~20px 应当放行（放宽前的硬闸门是 2026-10-13 的病根）"
+    # ② 但**大幅外推**仍必须拒（闸门的原始目的：别把外推垃圾当真读数）
+    far_r = line_through(760, 199, 900, 400)       # 出画 120px
+    assert not det._paired_ok(ghost_l, far_r, y_ref, 640), "出画 120px 超过容差 → 必须拒"
+    # ③ 旧口径（tol=-30）：线必须留在画面内 30px —— 贴边即拒（平视角素材延续这套）
+    from vision.lane_ref import LaneParams
+    old_det = LaneRefDetector(LaneParams(**{**LaneParams.from_settings().__dict__,
+                                           "pair_edge_tol_px": -30.0}))
+    assert not old_det._paired_ok(ghost_l, ghost_r, y_ref, 640), \
+        "旧口径（tol<0）下贴边帧仍要拒"
     ok_l = line_through(200, 199, 220, 400)
     ok_r = line_through(430, 199, 470, 400)
     assert det._paired_ok(ok_l, ok_r, y_ref, 640), "画面内的真线对应放行"
@@ -596,7 +567,7 @@ def test_visible_range_ok_when_lines_reach_lower_half():
 def test_csv_header_has_filtered_error_and_target():
     """CSV 必须落"滤波后误差 / 目标点 / 质量 / 单双侧"——上一版缺这几列，
     复盘时无法区分"检测抖动"与"滤波平滑"（《循迹脚本交接.md》§6 缺陷 7）。"""
-    from scripts.lane_ref_test import CSV_HEADER
+    from scripts.lane_final_test import CSV_HEADER
     for col in ("error_px", "error_filt", "target_px", "quality", "both_sides",
                 "half_w", "since_valid_s"):
         assert col in CSV_HEADER, f"CSV 缺少列 {col}"
@@ -605,7 +576,7 @@ def test_csv_header_has_filtered_error_and_target():
 def test_error_filter_unit_matches_pixels():
     """滤波离群阈值必须按**像素**给（上一版把 settings 的"误差单位"当像素用，
     15px 就把任何正常变化判成离群 → 滤波后误差长期卡在旧值、车不响应）。"""
-    from scripts.lane_ref_test import MIN_QUALITY0
+    from scripts.lane_final_test import MIN_QUALITY0
     outlier_px = float(settings.ERROR_FILTER_OUTLIER) * float(settings.LANE_ERROR_SCALE)
     assert outlier_px >= 40.0, f"像素口径的离群阈值不该是 {outlier_px}"
     f = ErrorFilter(5, outlier_px)
@@ -613,16 +584,51 @@ def test_error_filter_unit_matches_pixels():
     f.update(30.0)      # 30px 的变化在赛道上很常见，绝不能被当离群点丢掉
     assert abs(f.last - 20.0) < 1e-6, f"30px 的正常变化被当成离群丢掉了：{f.last}"
     assert 0.0 < MIN_QUALITY0 < 0.55, "仲裁阈值应落在『种子半宽』与『实测半宽』两档之间"
+def test_jump_reject_persistent_phantom_and_true_line_recovery():
+    """时域不一致拒绝的对抗序列（2026-10-11 审查 P1-1/P1-2 的回归网）。
 
+    真对×3 → 外侧幻影×2 → 真线回归。要求：
+      幻影帧 1/2 **都**被拒（both_sides=False，tag 带 jump-reject）——reject 不得清
+      `_prev_pair`，否则幻影第二帧起无检查以 q=1.00 通过、真线回归反被误杀；
+      真线帧被重新接受（q=1.00）；半宽先验不被幻影污染。
+    场景构造照审查复现脚本（外侧幻影：look 行 x≈166，帧间跳 ~78px，宽度闸门放行）。
+    """
+    W, H = 640, 480
+    slope, y_ref, y_top, y_bot = 0.972, int(H * 0.60), int(H * 0.30), int(H * 0.60)
 
-def test_annotate_smoke():
-    """叠加图函数要被真实调用（本车没有 X 服务器，存图是唯一的事后看图途径）。"""
-    from scripts.lane_ref_test import annotate
-    det = LaneRefDetector()
-    img = _lane_image()
-    r = det.detect(img)
-    vis = annotate(img, r, det.p, "track", "esc=1560")
-    assert vis.shape == img.shape and vis.dtype == img.dtype
+    def lane(left_x_ref=None, right_x_ref=None):
+        frame = np.zeros((H, W, 3), dtype=np.uint8)
+        frame[:, :, 2], frame[:, :, 1], frame[:, :, 0] = 120, 45, 35
+
+        def draw(x_at_ref, sign):
+            for y in range(y_top, y_bot):
+                x = int(round(x_at_ref - sign * slope * (y - y_ref)))
+                frame[y, max(0, x - 4):x + 5] = 225
+
+        if left_x_ref is not None:
+            draw(left_x_ref, +1)
+        if right_x_ref is not None:
+            draw(right_x_ref, -1)
+        return frame
+
+    real_l, real_r, phantom_l = 160.0, 590.0, 80.0
+    det = LaneRefDetector(LaneParams())
+    warm = None
+    for _ in range(3):
+        warm = det.detect(lane(real_l, real_r))
+    half_w_before = det.width_prior.value
+
+    out = [det.detect(lane(phantom_l, real_r)) for _ in range(2)]
+    for i, r in enumerate(out, 1):
+        assert not r.both_sides, f"幻影帧{i} 以双侧身份通过（tag={r.tag!r}）"
+        assert "jump-reject" in r.tag, f"幻影帧{i} 的 tag 看不到拒绝标记：{r.tag!r}"
+    r_true = det.detect(lane(real_l, real_r))
+    assert r_true.both_sides and r_true.quality >= 0.99, \
+        f"真线回归被误杀成单侧：both={r_true.both_sides} q={r_true.quality}"
+    # 恢复基准 = 暖机时的读数（前瞻带行的实测值 ≠ 画线名义值，别拿名义值比）
+    assert abs(r_true.left_x - warm.left_x) < 10 and abs(r_true.right_x - warm.right_x) < 10, \
+        f"真线帧读数没回到暖机状态：{r_true.left_x}/{r_true.right_x} vs {warm.left_x}/{warm.right_x}"
+    assert abs(det.width_prior.value - half_w_before) < 2.0, "半宽先验被幻影对污染"
 
 
 if __name__ == "__main__":

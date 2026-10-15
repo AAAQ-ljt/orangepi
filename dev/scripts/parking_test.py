@@ -204,6 +204,12 @@ def main() -> int:
     rc = 0
     csv_fh = None
     if args.save_dir:
+        if not os.path.isabs(args.save_dir):
+            # 相对名字统一落进 logs/（与 lane_ref_test 同款；2026-10-11 晚：
+            # 从 /root 起跑时相对 --save-dir 会落到 /root/ 下，散在 logs 之外）
+            base = ("/root/dev/logs" if os.path.isdir("/root/dev/logs")
+                    else os.path.join(os.getcwd(), "logs"))
+            args.save_dir = os.path.join(base, args.save_dir)
         Path(args.save_dir).mkdir(parents=True, exist_ok=True)
         csv_fh = open(os.path.join(args.save_dir, "run.csv"), "w", encoding="utf-8")
         csv_fh.write("t,phase,center_x,quality,side,mid_x,span,board_x,board_w,angle,esc_us\n")

@@ -13,6 +13,13 @@
 +58~+164px，而滤波后一直卡在 −29.6/+3.0 —— 车实际上偏了十几厘米，控制器却以为只有几像素，
 **跑偏保护（读的也是滤波值）也因此不触发**。
 修法：连续被拒 `max_rejects` 次就认定"世界真的变了"（不是抖动）→ 清窗口、接受新值。
+
+★ 2026-10-12 帧率口径
+----------------------
+窗口 5 帧 / 拒收 4 帧是 **15fps 口径**（现场整定时的帧率，0.33s / 0.27s）。
+下摄帧率是会变的（亮 ≈30fps、暗 9~16fps），所以调用方可以 `set_fps(实测帧率)`
+把窗口折成"秒级语义不变"的帧数（30fps → 窗口 10 帧 / 拒收 8 帧）；不调就保持
+帧数语义（老行为）。折算规则见 `control/rate.py`。
 """
 from __future__ import annotations
 
@@ -22,20 +29,42 @@ from typing import Deque, Optional
 import numpy as np
 
 from config import settings
+from control.rate import REF_FPS, frames_at
 
 
 class ErrorFilter:
     """滑动窗口误差滤波器（有状态）。"""
 
     def __init__(self, window: int = None, outlier: float = None,
-                 max_rejects: int = None):
-        self.window = int(settings.ERROR_FILTER_WINDOW if window is None else window)
+                 max_rejects: int = None, fps: float = None):
+        self.base_window = int(settings.ERROR_FILTER_WINDOW if window is None else window)
+        self.base_max_rejects = int(getattr(settings, "ERROR_FILTER_MAX_REJECTS", 4)
+                                   if max_rejects is None else max_rejects)
         self.outlier = float(settings.ERROR_FILTER_OUTLIER if outlier is None else outlier)
-        self.max_rejects = int(getattr(settings, "ERROR_FILTER_MAX_REJECTS", 4)
-                               if max_rejects is None else max_rejects)
+        # 当前生效值（默认 = 登记口径原值；set_fps 会按实测帧率折算）
+        self.window = self.base_window
+        self.max_rejects = self.base_max_rejects
+        self.fps: Optional[float] = None
         self._history: Deque[float] = deque(maxlen=self.window)
         self._last: Optional[float] = None
         self._rejects = 0
+        if fps:
+            self.set_fps(fps)
+
+    def set_fps(self, fps: float) -> None:
+        """按实测帧率折算窗口/拒收次数（保持 15fps 登记口径的**秒级**语义）。
+
+        折算结果没变时直接返回 —— 可以放心在控制循环里每帧调用。
+        """
+        scale = float(fps) / REF_FPS
+        w = frames_at(self.base_window, scale, lo=3, hi=60)
+        r = frames_at(self.base_max_rejects, scale, lo=1, hi=30)
+        if w == self.window and r == self.max_rejects:
+            return
+        self.window, self.max_rejects = w, r
+        self.fps = float(fps)
+        if self._history.maxlen != w:          # deque.maxlen 只读 → 用现有内容重建
+            self._history = deque(self._history, maxlen=w)
 
     def reset(self) -> None:
         """切换状态 / 重新起步时必须调用（官方漏了这条，代价是切状态时输出踢腿）。"""

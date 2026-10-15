@@ -100,7 +100,7 @@ def main() -> int:
 
     if not _HAS_LANE_MODULES:  # 本工具的核心就是扫线掩膜预览，模块没了就别起
         print("[DEBUG] 扫线通道已归档：本工具暂不可用，循迹请用 "
-              "dev/scripts/lane_ref_test.py，看画面请用 diag/lane_probe.py")
+              "dev/scripts/lane_final_test.py / diag/lane_probe.py")
         return 1
     scanner = HoughLaneScanner() if args.lane_method == "hough" else LaneScanner()
     gate = StartGate(verbose=False)

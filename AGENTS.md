@@ -2,14 +2,14 @@
 
 > 本文件是**所有 AI 助手（ZCode / Claude / 其他 agent）在本仓库工作时的第一读物**，等价于团队开发规范。
 > 人类队员也请先读这一份。原始的长版规范已合并进本文件（`doc/开发规范.md` 已删除）。
-> 最后更新：2026-10-11（巡线**前瞻带根治**：下摄平视角下真车道线是虚线、在 y≈195~205 就从画面左右边缘出去 → 自动前瞻带加"不贴边"余量后落到 y≈120~168，自检可发车已复验；`kd` 折算方向修正、`prime()` 防踢腿。现场**命令**见 `doc/操场指令-2026-10-11.md`。其余同 v11：**模型轨 = 红绿灯专属 3 类 light3cls，8 类契约与 4cls 全部废弃/退役，其余元素全 OpenCV**；RKNN 转换移交队友。**doc 已重构：开发相关内容只信 `doc/开发文档.md`，旧文档进 `doc/attic/` 只读不维护**）
+> 最后更新：2026-10-14——**循迹重写为最终脚本**：摄像头机械固定完成、实拍素材 `train/opencv-level1/video/true_track_sub_video/2.mp4`（3573 帧 @28.9fps）到手 → 旧的一整套（`lane_ref_test.py` 实跑入口 / `lane_official.py` 官方口径离线件 / `centroid_follow.py`）**已归档**（`archive/20261014-lane-scripts/` + `dev/attic/lane-old-20261014.tar.gz`）；新入口 = **`dev/scripts/lane_final_test.py`**（单文件：脊搜索检测 + PD 控制 + 记录 + 安全；离线 `--frames/--video/--calibrate`、在线 `--no-motor/--allow-motion`），标定与全片验证报告在 `train/opencv-level1/lane_test/1014_lane_final/report.md`（全片双侧 82%、剔除末段 89%、丢失 0%、中心 p90 5.8px、单帧 10ms）。⚠️ 检测链路**不再照抄官方 Hough**（官方链路在这套素材上锁的是路面刷痕：默认 ROI 双侧率仅 25%），改法/证据见报告。`vision_main` 这条 A 路径仍用 `lane_ref.py`（本轮不动）。旧记录：2026-10-12——①**图传全链复核**：车端两路推流 `ss` 实证 ESTAB→自建 `121.40.149.155`、官方 82.157.204.126 零流量；**`cam_car0027` 是流名、从未停用**（09-15 停的是官方通道；`ffmpeg-stream*` 为 enabled——"只 stop 不 disable"会随重启复活）；新网页入口 `https://car1.liyekai380.dpdns.org/`（实测后端 cam_car0027 有流）。②**双摄身份 VID:PID 更正**：`/dev/video0`=32e4:0234「Global Shutter Camera」、`/dev/video2`=2993:0858「icspring camera」（与旧记载相反，云台归属待 `cam-identify.py` 复核）。③**2026-10-13 镜头压低**：现场档改 ROI 0.15~0.75 / 前瞻带 0.17~0.26、新增贴边容差 `LANE_PAIR_EDGE_TOL_PX=40`（旧档在车道占满画面时会全盲、自检不发车）——细节见 `doc/开发文档.md` §2.2；④**巡线下摄真帧率随光照 9~30fps**（亮环境实测 29.8、暗环境 AE 长曝光掉到 9~16；"15fps"是暗环境真实值）。**循迹控制律已按实测帧率折算**（2026-10-12）：增益/窗口的登记口径 = 15fps（现场整定帧率），运行时时按实测 dt 折算成连续时间形式（`dev/control/rate.py` + `PidRef.step(e, dt)`），所以**换帧率不用重标 kp/kd**；现场 A/B 表继续按 15fps 口径写数字。2026-10-11 记录：巡线**前瞻带根治**：下摄平视角下真车道线是虚线、在 y≈195~205 就从画面左右边缘出去 → 自动前瞻带加"不贴边"余量后落到 y≈120~168，自检可发车已复验；`kd` 折算方向修正、`prime()` 防踢腿。现场**命令**见 `doc/操场指令-2026-10-11.md`。其余同 v11：**模型轨 = 红绿灯专属 3 类 light3cls，8 类契约与 4cls 全部废弃/退役，其余元素全 OpenCV**；RKNN 转换移交队友。**doc 已重构：开发相关内容只信 `doc/开发文档.md`，旧文档进 `doc/attic/` 只读不维护**）
 
 ---
 
 ## 0. 三十秒背景
 
 **项目**：2026 全国大学生智能汽车竞赛 · 室外 5G 远程驾驶无人车赛。
-**硬件**：Orange Pi 5（RK3588S）+ XT-NetRC 阿克曼底盘 + PCA9685 + 双摄（**两路都是 USB**：`/dev/video0`=icspring **云台主摄** / `/dev/video2`=Global Shutter **下摄副摄，巡线用**）+ SIM8200 5G。
+**硬件**：Orange Pi 5（RK3588S）+ XT-NetRC 阿克曼底盘 + PCA9685 + 双摄（**两路都是 USB**；2026-10-12 VID:PID 实测：`/dev/video0`=32e4:0234「Global Shutter Camera」模组 / `/dev/video2`=2993:0858「icspring camera」模组＝**下摄副摄，巡线用**——与旧记载相反，云台归属待 `cam-identify.py` 复核）+ SIM8200 5G。
 **目标**：**完赛，并尽量快**。规则里"停车超 20s 不动 = 比赛失败"，"停错车位/无轮入区 +100s"，"撞锥 +20s"，"压线 +10s/次"——所以**可靠性优先于速度**。
 **当前阶段**：发车（P0-2）、巡线（P1-1，受视角限制不作为完赛路径依赖；10-11 前瞻带根治后自检可发车）、日志降频与语音非阻塞（P1-5）、锥桶 HSV 检测与 S 型绕行（P1-3 部分）已落地；**当前硬阻塞 = 红绿灯 3 类（off/red/green）标注与补拍 + 操场现场标定**（HSV 主通道 W3 即可通路，模型作为第二校验通道，见 `doc/补拍清单.md`）。**10-11 操场全流程测试：`doc/操场执行单-2026-10-11.md`（纯命令版 `doc/操场指令-2026-10-11.md`）**。
 
@@ -72,7 +72,7 @@
 | **P0-2** | **修发车逻辑**：边沿触发 + 去抖 + 超时兜底（`start_gate.py` + FSM + 协议） | ✅ 已完成（剩现场标定 `START_BLUE_*`，见 `doc/操场执行单-2026-10-11.md`） |
 | **P0-3** | 采购光电传感器（≥1m、阈值可调） | ⬜ 需人工 |
 | **P0-4** | 现场几何实测（赛道宽、停车区黄线、斑马线 30cm 停区、是否有编码器、红灯长等 vs 20s 判失败） | 🟡 10-10 操场执行（含官方口径核对） |
-| **P1-1** | 扫线 + 误差滤波 + PID（`lane_ref.py` / `filters.py` / `lane_control.py`，入口 `scripts/lane_ref_test.py`；质心法 `centroid_follow.py` 已淘汰留对照） | ✅ 代码级完成；**唯一方案 = ④ 边缘法**（②③ 10-10 实测淘汰）；10-11 前瞻带根治（自动带避贴边段 y≈120~168）已复验可发车；现场整定 kd A/B |
+| **P1-1** | 扫线 + 误差滤波 + PID（**入口 `scripts/lane_final_test.py`**（2026-10-14 最终版：脊搜索检测 + PD + 记录 + 安全，单文件自包含）；旧 `lane_ref_test.py` / `lane_official.py` / `centroid_follow.py` **已归档**；A 路径检测器 `lane_ref.py` 仍在用） | ✅ 代码级完成 + 1014 素材全片验证（双侧 82%/剔除末段 89%/丢失 0%/中心 p90 5.8px/单帧 10ms，报告 `lane_test/1014_lane_final/report.md`）；现场待办：静止自检标定 target_x + 实跑复验 |
 | **P1-2** | 距离估计与减速停准（框底边 → 地面坐标 → 速度曲线） | ⬜ |
 | **P1-3** | FSM 主体重构（斑马线 10s、红绿灯光电、锥桶绕行、停车五阶段） | 🟡 锥桶部分已落地（`cone_detect` hsv + S 型绕行）；斑马线/灯/停车待接 |
 | **P1-4** | 停车：蓝板接地点 + IPM 判左右 → 五阶段入库 | ⬜ |
@@ -153,22 +153,24 @@ cd dev && export PYTHONPATH=.
 
 # 单测（纯函数 + __main__ 风格，不需要 pytest）—— 直接全部跑一遍
 for t in tests/test_*.py; do "$PY" "$t" || echo "FAIL $t"; done
-# 当前 19 个文件：filters/pid/lane_arbiter/protocol/start_gate/control/elements/site_config/
-#   camera_guard/rknn_detector/bench_logic/lane_ref/lane_ref_run/color_elements/cone_detect/
-#   imu/parking_logic/vision_replay + integration
+# 当前 21 个文件：filters/pid/lane_arbiter/protocol/start_gate/control/elements/site_config/
+#   camera_guard/rknn_detector/bench_logic/lane_ref/lane_final/lane_final_run/color_elements/
+#   cone_detect/imu/parking_logic/lane_rate/vision_replay + integration
+#   （lane_official / lane_ref_run 随旧脚本归档，2026-10-14）
 "$PY" tests/test_integration.py        # 端到端：起控制端 + UDP 打假数据（dry-run）
 "$PY" tests/test_lane_ref_run.py       # 循迹：假摄像头跑完整状态机（自检→发车→跟线→丢线停车）
 
 # 视觉单模块自测（不需要摄像头/模型）
 "$PY" vision/vision_main.py --test-image 某张赛道图.jpg   # 打印 lane / start gate 判据
-"$PY" scripts/lane_ref_test.py --image 某张赛道图.jpg     # 循迹检测器单图读数 + 镜头朝向体检
+"$PY" scripts/lane_final_test.py --image 某张赛道图.jpg    # 最终循迹脚本单图读数
+"$PY" scripts/lane_final_test.py --frames ../train/opencv-level1/video/frames/2 --calibrate  # 素材标定档
 "$PY" main.py --port 5000                                 # dry-run 控制端
 ```
 
 - 所有新模块**必须能在没有摄像头、没有 PCA9685、没有模型的机器上 import 并测试**（用 mock 与合成图）。
 - 测试文件命名 `test_*.py`，用断言 + `if __name__ == "__main__"` 直接跑，别引入新的测试框架依赖。
-- 提交前**必须**跑通 `tests/test_*.py` 全部文件（当前 19 个）；高风险运动代码（循迹、台架、
-  退出路径）除了纯函数测试，还要有"假硬件跑完整流程"的集成测试（照 `tests/test_lane_ref_run.py`）。
+- 提交前**必须**跑通 `tests/test_*.py` 全部文件（当前 21 个）；高风险运动代码（循迹、台架、
+  退出路径）除了纯函数测试，还要有"假硬件跑完整流程"的集成测试（照 `tests/test_lane_final_run.py`）。
 
 ### 4.2 连车（免交互）
 
@@ -312,11 +314,12 @@ StartGateState(blocked: bool, armed: bool, released: bool, blue_ratio: float, ti
 | 同时让蜂窝和 WiFi 都自动连 | 两条默认路由互抢，表现为"时通时断"；用 `car-net.sh policy` 保证**只占一条上行**（蜂窝 100 < WiFi 600） |
 | 换服务器时只改了一处 | 推流地址与 frp 隧道地址是两套配置，容易半切换；统一改 `car-net.conf` 后 `car-net.sh apply` |
 | **Git Bash 会把 `/root/xxx` 这类参数转成 Windows 路径** | 远端收到的是 `C:/Program Files/Git/root/...`，报 `No such file`。传绝对路径时加 **`MSYS_NO_PATHCONV=1`**；`ssh_put/ssh_get/serial_push/ssh_sync` 已内置自动纠正（`scripts/remote_path.py`） |
-| 摄像头 index 搞反（会把云台画面当赛道） | **实测确认（2026-09-16）**：`/dev/video0`(index 0) = icspring = **主摄＝云台摄像头**（推流 `cam_car0027`，红绿灯环节看灯）；`/dev/video2`(index 2) = Global Shutter = **副摄＝下摄**（推流 `cam_car0027_sub`，**巡线扫线用它**）。自动驾驶默认 `--camera 2`；不确定时跑 `dev/scripts/cam-identify.py` 复验 |
-| 以为摄像头能跑 30fps | 实测 640×480 只有 **~15fps**（驱动谎报 30）。视觉进程 14 FPS 是摄像头限制，不是我们的代码慢 |
+| 摄像头 index 搞反（会把云台画面当赛道） | **2026-10-12 VID:PID 实测变更**：`/dev/video0`=32e4:0234「Global Shutter Camera」、`/dev/video2`=2993:0858「icspring camera」——**与 2026-09-16 记载相反**（模组疑似换位/枚举变动），**云台归属跑 `dev/scripts/cam-identify.py` 复核后定稿**。功能口径不变：巡线固定 `--camera 2`（video2）。⚠️ UVC 设备号不跨重插稳定 → 建议 udev 按 USB 口（7-1.3/7-1.4）固定设备名 |
+| 以为摄像头能跑 30fps | **2026-10-12 实测更正**：主推流那路真 30fps；**巡线下摄在暗环境真实出帧率只有 9~18fps**（同一颗亮环境跑满 30；cv2 与裸 ffmpeg 读数一致 → 瓶颈不在代码/读取方式）；且 ffmpeg 推流的"30fps"里可能混**编码器复制帧**（当天实测 39%，主摄 0%）——**别拿"流到达 30 帧"当传感帧率**；控制台 15 帧=下摄真实出帧率。**控制律已按实测帧率折算**（登记口径 15fps，见 `dev/control/rate.py`）：帧率从 15 变到 30 不再需要重标增益 |
+| 以为 `cam_car0027` 已停 / 官方服务器还在推流 | **2026-10-12 全链复核**：车端双路推流 `ss -tnp` 实证 ESTAB→自建 `121.40.149.155:8554`，官方 `82.157.204.126` 零连接（`frpc.service` 09-15 起 disabled）。`cam_car0027` 是**流名**（沿用官方命名风格）——09-15 换的是**服务器地址**，流名没改、一直在用；`ffmpeg-stream*` 单元 **enabled（开机自启）**，**只 stop 不 disable 的"停"会随重启复活**（2026-10-12 开机即被 systemd 自动拉起）。新网页入口 `https://car1.liyekai380.dpdns.org/`（实测其后端 `cam_car0027` 有流）——**要停流先确认新图传不依赖它**；改 systemd 需队长确认 |
 | **下摄"看着赛道"就以为白线在画面里** | 2026-09-19 抓图实锤：下摄俯仰角太**平**（几乎水平看出去）时，画面里只有赛道中段 + 塑料膜褶皱反光，两条白线贴在**画面左右外沿/画面外** → 扫线无论如何都锁不到线（实测：左 18 行、右 8 行碎片，conf 0）。**先看画面再调参数**：`sudo python3 scripts/diag/lane_probe.py --camera 2 --frames 6`（终端直接给结论 + 叠加图），把两条白线调进画面下半部再谈阈值 |
 | 以为「云台压下去」就能拿到俯视视角（**巡线固定用下摄 video2，云台不参与巡线**） | 2026-09-19 实测**云台俯仰行程不够**：`--sweep-tilt` 扫了 40°~140° 共 9 档，最好的一档（tilt=105°）conf 也只有 0.24（可用要 ≥0.4），画面依旧是"顺着赛道看"。**下摄视角拿不到"俯视车道"，白线循迹受视角硬约束** —— 但 09-21 Canny+Hough 重构后实车可锁线（09-23 操场可跟线，S 弯画龙已上三护栏：单侧限幅/弱对限幅/画龙检测）；10-10 现场选型定案：**④ 边缘法唯一**（②③ 质心法反光拉偏，淘汰）；**不作为完赛路径依赖**（直道开环 + 元素检测触发即可完赛） |
-| **把前瞻带 / ROI 设在线"贴边出画"的那一段** | 下摄平视角下真车道线是**虚线**、在 y≈195~205 就从画面左右边缘出去（该行真值 x≈21/643）→ 贴边段拟合截距噪声最大（643 被读成 686、中点偏 ~29px）且频繁丢单侧。已根治：`rows_with_support` 加"不贴边 30px"余量让**自动前瞻带避开该段（落到 y≈120~168）**；**到场先看图验线对**（`lane_ref_test --no-motor`，见 `doc/操场指令-2026-10-11.md` §1），别把带子按回贴边区 |
+| **把前瞻带 / ROI 设在线"贴边出画"的那一段** | 下摄平视角下真车道线是**虚线**、在 y≈195~205 就从画面左右边缘出去（该行真值 x≈21/643）→ 贴边段拟合截距噪声最大（643 被读成 686、中点偏 ~29px）且频繁丢单侧。已根治：`rows_with_support` 加"不贴边 30px"余量让**自动前瞻带避开该段（落到 y≈120~168）**；**到场先看图验线对**（旧入口 `lane_ref_test --no-motor`，见 `doc/操场指令-2026-10-11.md` §1；2026-10-14 起新入口 `lane_final_test.py --no-motor`，标定档与证据见 `train/opencv-level1/lane_test/1014_lane_final/report.md`），别把带子按回贴边区 |
 | 把"扫线循迹"当成完赛的必要条件 | **不是**。规则只罚"压线 +10s/次"，而赛道是直道：直线用**固定舵角 + 中位微调**（`site.yaml` 里改 `servo_center_angle`）就能不压线；变道/绕锥/入库可以按官方上届的做法**开环（时间/距离触发）**，停车与斑马线用**元素检测**触发。别让一个拿不到视角的功能卡死整个进度 |
 | 凭注释/二手结论判断"参考实现怎么做的" | **必须查原码**。2026-09-21 查 `oldCode/src/vision/vision.cpp::picture()` 才发现"参考实现单侧丢线不给中心"**是错的**——它对丢线的一侧直接代画面边界（`l=0` / `r=frame.cols`），读数照样给中心；照错结论改出来的"单侧就丢帧"让车一丢线就停（详见 `doc/开发文档.md` §2.2/§6.4） |
 | 把 `settings` 里的阈值直接喂给另一个模块 | **先核单位**。`ERROR_FILTER_OUTLIER=15` 的单位是"误差单位（1 单位 = 4px）"，而循迹脚本的误差是**像素** → 直接传 15 会把任何 >15px 的正常变化当离群点丢掉、滤波后误差长期冻在旧值（正确值 60px，2026-09-21 修） |

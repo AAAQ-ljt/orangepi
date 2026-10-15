@@ -2,12 +2,14 @@
 
 本目录用于存放采集到的图片/视频，所有输出强制保存在本目录内。
 
-## 摄像头角色（2026-09-16 实测确认）
+## 摄像头角色（2026-10-12 定案：网页动云台 + 两路推流逐帧差实测；模组按 VID:PID）
 
 | 脚本 | 设备 | 角色 |
 |---|---|---|
-| `camera0.sh` | `/dev/video0`（icspring） | **主摄 ＝ 云台摄像头**（红绿灯环节抬头看灯；推流 `cam_car0027`） |
-| `camera2.sh` | `/dev/video2`（Global Shutter） | **副摄 ＝ 下摄**（朝向赛道地面，**巡线扫线用**；推流 `cam_car0027_sub`） |
+| `camera0.sh` | `/dev/video0`（32e4:0234「Global Shutter Camera」） | **主摄 ＝ 云台摄像头**（画面随云台动；推流 `cam_car0027`，带音频，真 30fps） |
+| `camera2.sh` | `/dev/video2`（2993:0858「icspring camera」） | **副摄 ＝ 下摄**（朝向赛道地面，**巡线扫线用**；推流 `cam_car0027_sub`；暗光下真帧率 9~18fps） |
+
+> ⚠️ 注意：**模组品牌与 AGENTS.md 旧记载相反**（AGENTS.md 写的 video0=icspring / video2=GS 是品牌记反了）；**角色没变**（video0=云台主摄、video2=下摄）。巡线固定 `--camera 2` 不用改。复核方法：`dev/scripts/diag/cam_role_probe.py`（不停推流服务，用户在网页动云台即可对比）。
 
 > ⚠️ 采集训练数据时，**扫线/赛道类数据用 `camera2.sh`**（下摄视角，与部署时视觉输入一致）。
 

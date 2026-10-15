@@ -46,6 +46,7 @@ import cv2
 import numpy as np
 
 from config import settings
+from control.rate import REF_FPS, frames_at
 
 # ---------------------------------------------------------------- 参考实现常量
 CANNY_LOW0, CANNY_HIGH0 = 60, 140            # oldCode/src/config/config.cpp: MIN_YU/MAX_YU
@@ -58,6 +59,22 @@ CANNY_HIGH_MIN, CANNY_HIGH_MAX = 40.0, 320.0
 HOUGH_THETA_RAD = math.pi / 180.0 * 3.0
 HOUGH_THRESH, HOUGH_MIN_LEN, HOUGH_MAX_GAP = 50, 30, 5
 SLOPE_ABS_MIN, SLOPE_ABS_MAX = 0.25, 2.0     # |dy/dx| 物理范围
+# 时域不一致拒绝（2026-10-11 操场 6 趟实测加）：假特征（影子边缘/邻道线串扰）的指纹是
+# **只跳一侧**（帧间 70~200px）而另一侧稳如钉（≤17px）；真场景运动时左右线相干同移。
+# 命中 → 丢弃跳的那侧走单侧兜底（回中保速），绝不把假对当"双侧"拿去打舵
+# （当天 110630 趟 e 被甩到 ±100px 蛇行；跨 6 趟仿真：好趟 0 误伤、问题趟 8 处全命中）。
+PAIR_JUMP_REJECT_PX = 60.0   # 一侧帧间跳变超过它 = 假特征嫌疑
+PAIR_COHERENT_PX = 25.0      # 且另一侧同时移动不超过它 = "只跳了一侧"成立
+
+
+def _add_tag(reading: LaneReading, t: str) -> None:
+    """叠加标签（保留已有 tag）。
+
+    2026-10-11 审查 P1-2：单侧兜底各分支原来是直接赋值，reject 帧落进去后
+    `jump-reject` 100% 被 `1side-width` 等吃掉——CSV/叠加图上永远看不到拒绝发生过，
+    验证结论无法从落盘数据复核。全库 tag 赋值一律走这里。
+    """
+    reading.tag = f"{reading.tag}|{t}" if reading.tag else t
 
 # 置信度（quality）档位：数值本身经 CSV 落盘，可直接用实测数据复核
 Q_BOTH = 1.0              # 两侧都成对
@@ -68,6 +85,25 @@ Q_BORDER = 0.35           # 单侧 + 参考实现的"代画面边界"（能用�
 # "支持度"（线段够不够多）的满分线：**单侧只有一条线的线段，不能按双侧的条数要求它**
 Q_SUPPORT_FULL = 6        # 双侧：两侧线段合计到这个数记满分
 Q_SUPPORT_FULL_SINGLE = 3  # 单侧：一侧线段到这个数就记满分
+
+# ★ 配对"贴边/出画"容差（2026-10-13）：>0 = 允许线在画面外这么多像素；<0 = 旧口径
+#   （必须在画面内 |值| px）。镜头压低后车道比画面宽，真线**几何上就在画面外**，旧的硬编码
+#   30px"必须在画面内"把 78% 的帧全拦了（预检自检也跟着过不去）。官方两套实现都没有这道判据。
+PAIR_EDGE_TOL_PX = float(getattr(settings, "LANE_PAIR_EDGE_TOL_PX", 40.0))
+
+
+def edge_inside(x: float, w: int, tol: float = None) -> bool:
+    """贴边判据（配对 / 支持行统计共用，保证两处口径一致）。
+
+    tol ≥ 0：允许线在画面外 tol px 以内（新镜头的常态：车道占满整幅，真线就贴着/越过边缘）；
+    tol < 0：旧口径（2026-10-11 起）——线必须留在画面内 |tol| px，贴边段不算数。
+    """
+    t = PAIR_EDGE_TOL_PX if tol is None else float(tol)
+    if t >= 0:
+        return (-t) <= x <= (w - 1) + t
+    m = -t
+    return m <= x <= w - m
+
 
 # 半宽先验的物理范围（全宽 120~700px ← settings.LANE_PAIR_W_MIN/MAX_PX 的一半）
 HALF_W_SEED_PX = float(getattr(settings, "LANE_HOUGH_HALF_W_DEFAULT_PX", 240.0))  # 种子值
@@ -101,6 +137,7 @@ class LaneParams:
     half_w_seed: float = HALF_W_SEED_PX
     pair_w_min: float = float(settings.LANE_PAIR_W_MIN_PX)
     pair_w_max: float = float(settings.LANE_PAIR_W_MAX_PX)
+    pair_edge_tol_px: float = PAIR_EDGE_TOL_PX   # 贴边/出画容差（见模块头注释）
 
     @classmethod
     def from_settings(cls, **overrides) -> "LaneParams":
@@ -110,7 +147,11 @@ class LaneParams:
         以后的主程序读的是同一个来源（旧版两套 ROI 是缺陷 #6）。
         """
         p = cls(roi_top_ratio=float(settings.LANE_ROI_TOP_RATIO),
-                roi_bottom_ratio=1.0 - float(settings.LANE_ROI_BOTTOM_MARGIN) / float(settings.IMG_H))
+                roi_bottom_ratio=1.0 - float(settings.LANE_ROI_BOTTOM_MARGIN) / float(settings.IMG_H),
+                # ★ 2026-10-13：前瞻带也能从 site.yaml 记（自检选出来的那一段），
+                #   没标定过就是类默认 0.35~0.48（行为与之前一致）。
+                look_top_ratio=float(getattr(settings, "LANE_LOOK_TOP_RATIO", 0.35)),
+                look_bottom_ratio=float(getattr(settings, "LANE_LOOK_BOTTOM_RATIO", 0.48)))
         for key, value in overrides.items():
             if value is not None:
                 setattr(p, key, value)
@@ -219,7 +260,11 @@ def look_bounds(h: int, p: LaneParams) -> Tuple[int, int]:
 class LaneRefDetector:
     """按 oldCode `picture()` 实现的车道检测（纯 CV，不依赖模型）。"""
 
-    def __init__(self, params: Optional[LaneParams] = None, **overrides) -> None:
+    def __init__(self, params: Optional[LaneParams] = None, fps: float = None,
+                 **overrides) -> None:
+        """`fps`：实测帧率（可选）。给了就把半宽先验窗口按帧率折算，保持**秒级**语义
+        （登记口径 15fps 的 15 帧 = 1.0s；30fps → 30 帧）—— 见 `control/rate.py`。
+        不给 = 帧数语义（老行为）。检测本身是逐帧无状态的，只有半宽窗口带时间尺度。"""
         if params is None:
             params = LaneParams.from_settings(**overrides)
         else:
@@ -227,9 +272,14 @@ class LaneRefDetector:
                 if value is not None:
                     setattr(params, key, value)
         self.p = params
-        self.width_prior = WidthPrior(params.half_w_seed)
+        self.width_prior = WidthPrior(params.half_w_seed,
+                                      window=frames_at(HALF_W_WINDOW,
+                                                       (float(fps) / REF_FPS) if fps else 1.0,
+                                                       lo=3, hi=90))
         self.canny_low = float(CANNY_LOW0)
         self.canny_high = float(CANNY_HIGH0)
+        # 上一帧被接受的 (left_x, right_x)，供时域不一致拒绝用；只在接受成对时更新
+        self._prev_pair: Optional[Tuple[float, float]] = None
 
     # 兼容旧调用（`det.target_ratio = ...` / `det.roi_top_ratio` 之类）
     @property
@@ -354,10 +404,28 @@ class LaneRefDetector:
             reading.right_x = _x_at(*right, y_ref)
             reading.right_kb = right
 
+        # ★ 时域不一致拒绝：与「最近一次被信任的对」比较——只跳一侧（另一侧钉着不动）
+        #   = 假特征串扰，丢掉跳的那侧 → 落到下面的单侧兜底，绝不把假对当"双侧"打舵。
+        #   ⚠️ prev 只在成对被接受时更新，reject **不清 prev**（2026-10-11 审查 P1-1
+        #   合成帧实锤：清了 prev，持续 ≥2 帧的外侧幻影从第二帧起无检查通过、
+        #   真线回归反被误杀成单侧——特征就只剩"拦孤立单帧跳变"了）。
+        prev_pair = self._prev_pair
+        if prev_pair is not None and left is not None and right is not None:
+            dl = abs(reading.left_x - prev_pair[0])
+            dr = abs(reading.right_x - prev_pair[1])
+            if (dl > PAIR_JUMP_REJECT_PX and dr <= PAIR_COHERENT_PX) or \
+                    (dr > PAIR_JUMP_REJECT_PX and dl <= PAIR_COHERENT_PX):
+                if dl > dr:
+                    left, reading.left_x, reading.left_kb = None, None, None
+                else:
+                    right, reading.right_x, reading.right_kb = None, None, None
+                _add_tag(reading, "jump-reject")
+
         if left is not None and right is not None:
             if self._paired_ok(left, right, y_ref, w):
                 self._fill_center(reading, left, right, w, h)
                 reading.both_sides = True
+                self._prev_pair = (reading.left_x, reading.right_x)
                 reading.half_width = abs(reading.right_x - reading.left_x) * 0.5
                 reading.width_measured = prior.measured
                 if reading.half_width is not None and \
@@ -369,17 +437,17 @@ class LaneRefDetector:
                 note = (f"配对不可信（宽 {abs(rx_ - lx_):.0f}px / 闸门 "
                         f"{self.p.pair_w_min:.0f}~{self.p.pair_w_max:.0f}；"
                         f"L={lx_:.0f} R={rx_:.0f} 画面宽 {w}"
-                        f"{'｜有线段出画面' if (lx_ < 30 or rx_ > w - 30) else ''}）")
+                        f"{'｜线出画面超过容差' if not (edge_inside(lx_, w, self.p.pair_edge_tol_px) and edge_inside(rx_, w, self.p.pair_edge_tol_px)) else ''}）")
                 return self._finalize_untrusted(reading, prior, note)
             return reading
 
         if left is None and right is None:
             reading.note = "两侧都没有车道线段"
-            reading.tag = "no-seg"
+            _add_tag(reading, "no-seg")
             return reading
         if self.p.single_mode == "off":
             reading.note = "只看到一侧（single_mode=off，不给中心）"
-            reading.tag = "1side-off"
+            _add_tag(reading, "1side-off")
             return reading
 
         if self.p.single_mode == "border":
@@ -391,7 +459,7 @@ class LaneRefDetector:
                 else (reading.right_x - center)
             reading.width_measured = prior.measured
             reading.note = f"单侧兜底（参考实现 border：{'左' if left is not None else '右'}线 + 画面边界）"
-            reading.tag = "1side-border"
+            _add_tag(reading, "1side-border")
             base = Q_BORDER
         else:
             # ★ 本车方案：用半宽先验把缺的那一侧推出来（比"猜边界"更贴物理）
@@ -402,12 +470,12 @@ class LaneRefDetector:
                 else (reading.right_x - half_w)
             reading.note = (f"单侧兜底（width：{'左' if left is not None else '右'}线 + 半宽 "
                             f"{half_w:.0f}px{'实测' if prior.measured else '种子'}）")
-            reading.tag = "1side-width" if prior.measured else "1side-seed"
+            _add_tag(reading, "1side-width" if prior.measured else "1side-seed")
             base = Q_SINGLE_MEASURED if prior.measured else Q_SINGLE_SEED
         # 推出来的中心跑到画面外 → 这个先验在这帧不成立，宁可没有读数
         if not (0.0 <= center <= w - 1):
             reading.note = f"单侧兜底推出的中心出画面（{center:.0f}）"
-            reading.tag = "oor"
+            _add_tag(reading, "oor")
             return reading
         reading.center_x = float(center)
         reading.error = float(center) - w * self.p.target_ratio
@@ -425,7 +493,7 @@ class LaneRefDetector:
         reading.width_measured = prior.measured
         reading.quality = 0.0
         reading.note = note
-        reading.tag = "pair-oor"
+        _add_tag(reading, "pair-oor")
         return reading
 
     def _support_factor(self, n_segs: int, full: int = Q_SUPPORT_FULL) -> float:
@@ -436,17 +504,16 @@ class LaneRefDetector:
                    y_ref: float, w: int) -> bool:
         """成对宽度是否落进物理区间（配对宽度闸门，2026-09-19 操场实测加）。
 
-        ⚠️ 2026-10-11 补"画面内判据"（兜底；此前"锁到画面边框/幻影对"的说法经图像
-        复核**已更正**——那两条就是真车道线，只是下摄视角太平：真线在 y≈195~205 就从
-        画面左右边缘出去（该行真值 x≈21/643），贴边段的拟合截距噪声最大（643 被读成
-        686、中点偏 ~29px）。这类"读数已出画面"的外推值不该越过闸门（30px 余量）；
-        正确的前瞻带上移由 rows_with_support 的"不贴边"余量负责（自动前瞻带自己避开
-        贴边段，见 auto_look_band）。
+        ⚠️ "画面内判据"（2026-10-11 起）已改成**可配置容差**（2026-10-13）：见
+        `LaneParams.pair_edge_tol_px` / `edge_inside()` 的说明。旧口径（tol<0，线必须留在
+        画面内 30px）是为平视角"贴边出画段噪声大"准备的；镜头压低后车道比画面宽、真线几何上
+        就在画面外，那套判据会把真线全拦掉（1.mp4 实测：只放行 10%，预检自检不通过）。
+        现在 tol>0 表示"允许出画这么多像素"，噪声防线交给锚定/斜率/宽度/jump-reject。
         """
         lx = _x_at(*left, y_ref)
         rx = _x_at(*right, y_ref)
-        margin = 30.0
-        if not (margin <= lx <= w - margin and margin <= rx <= w - margin):
+        tol = float(self.p.pair_edge_tol_px)
+        if not (edge_inside(lx, w, tol) and edge_inside(rx, w, tol)):
             return False
         w_pair = rx - lx
         if w_pair <= 0:
@@ -467,7 +534,7 @@ class LaneRefDetector:
             reading.error = None
             reading.quality = 0.0
             reading.note = "前瞻带里左右线没有交点（斜率异常）"
-            reading.tag = "no-mid"
+            _add_tag(reading, "no-mid")
             return
         reading.center_x = float(np.mean(mids))
         reading.error = reading.center_x - w * self.p.target_ratio
@@ -492,7 +559,8 @@ class LaneRefDetector:
                           pick=self.p.pick, slope_min=self.p.slope_min,
                           slope_max=self.p.slope_max, single_mode="off",
                           half_w_seed=self.p.half_w_seed, pair_w_min=self.p.pair_w_min,
-                          pair_w_max=self.p.pair_w_max)
+                          pair_w_max=self.p.pair_w_max,
+                          pair_edge_tol_px=self.p.pair_edge_tol_px)
         det = LaneRefDetector(wide)          # 独立实例：别污染在线那台的 Canny/半宽状态
         r = det.detect(frame_bgr)
         if r.left_kb is None or r.right_kb is None:
@@ -500,7 +568,8 @@ class LaneRefDetector:
                     "right_x": r.right_x, "rows": 0,
                     "text": "两侧没有同时成对的直线（先看 ROI 扫描表/逐行白点图）"}
         hits = rows_with_support(frame_bgr, r.left_kb, r.right_kb,
-                                 int(0.10 * h), int(0.90 * h), step, tol_px, min_rows)
+                                 int(0.10 * h), int(0.90 * h), step, tol_px, min_rows,
+                                 edge_tol=self.p.pair_edge_tol_px)
         if not hits:
             return {"ok": False, "y_lo": None, "y_hi": None, "left_x": r.left_x,
                     "right_x": r.right_x, "rows": 0,
@@ -509,18 +578,20 @@ class LaneRefDetector:
         y_lo, y_hi = int(min(ys)), int(max(ys))
         lx = float(np.median([xl for _, xl, _ in hits]))
         rx = float(np.median([xr for _, _, xr in hits]))
+        # ★ 2026-10-13：贴边判据跟 `pair_edge_tol_px` 一致 —— 镜头压低后"车道占满整幅、
+        #   线贴着/越过边缘"是**正常**的（此时 tol>0 不报问题）；旧口径（tol<0）才要求线往里收。
         edge_bad = []
-        if lx < 40:
-            edge_bad.append(f"左线贴左边（x≈{lx:.0f}）")
-        if rx > w - 40:
-            edge_bad.append(f"右线贴右边（x≈{rx:.0f}）")
+        if not edge_inside(lx, w, self.p.pair_edge_tol_px):
+            edge_bad.append(f"左线在画面外/贴边越容差（x≈{lx:.0f}）")
+        if not edge_inside(rx, w, self.p.pair_edge_tol_px):
+            edge_bad.append(f"右线在画面外/贴边越容差（x≈{rx:.0f}）")
         edge_txt = "；".join(edge_bad) if edge_bad else f"两侧都不贴边（左 x≈{lx:.0f} / 右 x≈{rx:.0f}）"
         ok = y_hi >= 300 and not edge_bad
         if ok:
             text = f"✅ 够用：左右同时有边缘的 y 范围 {y_lo}~{y_hi}（已进画面下半部），{edge_txt}"
         else:
             why = []
-            if y_hi < 300:
+            if y_hi < 300 and not edge_bad:
                 why.append(f"只看得到远处（最低到 y={y_hi}，下半部 y≥300 没有）→ **把下摄往下压**")
             if edge_bad:
                 why.append("线贴画面边缘，车一动就会丢一侧 → 压角度/换广角让线往里收")
@@ -548,7 +619,7 @@ class LaneRefDetector:
         full_edges = cv2.Canny(cv2.GaussianBlur(gray, (5, 5), 0.5),
                                int(CANNY_LOW0), int(CANNY_HIGH0), 3)
         hits = rows_with_support(frame_bgr, left, right, 0, h, step, tol_px, min_rows,
-                                 edges=full_edges)
+                                 edges=full_edges, edge_tol=self.p.pair_edge_tol_px)
         return [y for y, _, _ in hits]
 
 
@@ -556,13 +627,13 @@ def rows_with_support(frame_bgr: np.ndarray, left_kb: Tuple[float, float],
                       right_kb: Tuple[float, float], y_from: int, y_to: int,
                       step: int = 4, tol_px: float = 6.0, min_rows: int = 2,
                       edges: Optional[np.ndarray] = None,
-                      want_stats: bool = False):
+                      want_stats: bool = False, edge_tol: Optional[float] = None):
     """逐行检查"左右两条拟合线附近是否都有边缘"，返回 [(y, x_left, x_right)]。
 
     这是"这两条线是真线还是外推出来的"的客观判据：真线在它经过的每一行附近都有边缘点。
 
     `want_stats=True` 时返回 `(rows, stats)`，stats 里多两个更抗干扰的量：
-      checked  —— "两条线都在画面内"的行数（分母：不是整幅画面，避免被无关区域稀释）
+      checked  —— 通过"贴边容差"（edge_inside）的行数（分母：不是整幅画面，避免被无关区域稀释）
       run_max  —— **最长连续支持行**（它经过的最长一段连续证据，是真线的强特征：
                    真车道线给几十行连续支持，反光/碎边只给几行零散支持）
     """
@@ -575,14 +646,14 @@ def rows_with_support(frame_bgr: np.ndarray, left_kb: Tuple[float, float],
     run: List[Tuple[int, float, float]] = []
     checked = 0
     run_max = 0
-    margin = 30.0     # ★ 10-11：贴边段不算"线在画面内"——下摄平视角下车道线在 y≈195~205
-                      #   就从左右边缘出去，贴边段的拟合截距噪声最大（实测真值 x21/643 被
-                      #   读成 30/695）。自动前瞻带/支持统计都靠这条避免选到贴边段。
+    # ★ 贴边判据走**同一个容差** `edge_inside`（2026-10-13 统一）：自动前瞻带 / 支持统计 /
+    #   配对闸门三处口径必须一致，否则会出现"带子选在这里、配对却把它当出画拦掉"的自相矛盾
+    #   （就是 2026-10-13 那次预检自检不通过的成因）。
     step = max(1, step)
     for y in range(max(0, y_from), min(h, y_to), step):
         xl, xr = _x_at(*left_kb, y), _x_at(*right_kb, y)
         ok = False
-        if margin <= xl <= w - margin and margin <= xr <= w - margin and xl < xr:
+        if edge_inside(xl, w, edge_tol) and edge_inside(xr, w, edge_tol) and xl < xr:
             checked += 1
             sl = edges[y, max(0, int(xl - tol_px)):min(w, int(xl + tol_px) + 1)]
             sr = edges[y, max(0, int(xr - tol_px)):min(w, int(xr + tol_px) + 1)]
@@ -652,7 +723,8 @@ def score_frames(det: LaneRefDetector, frames: Sequence[np.ndarray]) -> dict:
                 h = f.shape[0]
                 _hits, st = rows_with_support(f, r.left_kb, r.right_kb,
                                               int(0.05 * h), int(0.95 * h),
-                                              step=4, tol_px=6.0, min_rows=2, want_stats=True)
+                                              step=4, tol_px=6.0, min_rows=2, want_stats=True,
+                                              edge_tol=det.p.pair_edge_tol_px)
                 fr.append(st["rows"] / float(max(1, st["checked"])))
                 runs.append(st["run_max"])
     spread = (max(centers) - min(centers)) if len(centers) >= 2 else 0.0

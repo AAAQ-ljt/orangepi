@@ -21,6 +21,9 @@ oldCode/src/state_machine/*.cpp                          "看到再决策"的防
    没有任何超时兜底。我们照《具体实施方案》§3.1.4 的仲裁层设计补上：
    有读数 → 跟线；丢线 0.3~0.8s → 沿用上一次有效中心（误差按时间衰减回中位）；
    丢线超过 1~1.5s → 电调归零停车。宁可停，也不要"带着垃圾读数继续跑"。
+5. **帧率不再锁死 15**（2026-10-12）：`PidRef` 的积分/微分/平滑全部按实测 dt 折算
+   （登记口径仍是 15fps，见 `control/rate.py`）；三个护栏的"样本数门槛"改成
+   **时间跨度门槛** —— 帧率翻倍时旧写法等于"观测 0.13s 就敢判画龙/跑偏"。
 """
 from __future__ import annotations
 
@@ -28,6 +31,7 @@ from dataclasses import dataclass
 from typing import Optional, Tuple
 
 from config import settings
+from control.rate import DT_MAX, DT_MIN, REF_FPS
 
 # ---------------------------------------------------------------- 控制默认值
 # ★ 参考实现的标定基准：oldCode 的画面是 **320×240**（`launch.cpp`:
@@ -51,20 +55,19 @@ NEUTRAL_US = float(settings.ESC_STOP_US)
 
 
 def gains_for(width: int, mode: str = "literal") -> Tuple[float, float, float]:
-    """把参考实现的 PID 增益换成"我们这张画面宽度/帧率"口径。
+    """把参考实现的 PID 增益换成"我们这张画面"口径的**登记值**（15fps 口径）。
 
     mode:
-      literal —— 直接抄参考数字（0.15/0.01/0.12）再按帧率折算；
-      width   —— 按画面宽度等比换算（320/width，kp）再按帧率折算。
-    **帧率折算（2026-10-10/11 复盘，请按下面两笔账各算各的，别混）**：官方参数是 30FPS
-    环境整定的，我们的摄像头实测锁 15FPS（模组硬限制）。参考实现的 PID **没有 dt**：
-      · 积分：`Ki·Σe`，每秒累积 = Ki·FPS → 帧率减半则收敛速度减半 → **Ki 需 ×2**；
-      · 微分：`Kd·Δe/帧`，等效连续阻尼 = **Kd·dt = Kd/FPS** → 帧率减半则阻尼**加倍** →
-        照抄 0.12 在 15FPS 已是官方 30FPS 用 0.12 时的 2 倍阻尼。**要严格等效官方应 ×0.5（0.06）**；
-        但 10-10 蛇形主因已定位为前瞻带落在贴边出画段（见 lane_ref `rows_with_support`/`_paired_ok` 注释），阻尼本身是
-        现场 A/B 项：0.06（等效官方）/ 0.12（照抄）/ 0.24（强阻尼）三档实测。**本函数默认取
-        官方原值 0.12 不折算**（kd 是"手感"参数，由现场定；此前 ×2 的推导方向搞反了，已撤销）。
-      · kp：与帧率无关，不变。
+      literal —— 直接抄参考数字（0.15/0.01/0.12）；
+      width   —— 按画面宽度等比换算（320/width，kp）。
+    ★ 这里返回的是 **15fps 登记口径**的逐帧增益（= 2026-09/10 现场整定的那套数字，
+      现场 A/B 表照旧写它）；**帧率折算不在这里做** —— `PidRef.step(e, dt)` 按实测
+      dt 自动折算（见 `control/rate.py` 的说明与 `PidRef` docstring），所以：
+        15fps：ki=0.02、kd=0.12（就是下面这两个数字）
+        30fps：逐帧等效自动变成 ki=0.01、kd=0.24（**阻尼/积分动作的物理量不变**）
+      旧版把 15fps 的 ×2 硬写在 ki 里，等于把帧率锁死在 15 —— 2026-10-12 帧率放开后
+      撤掉（`doc/开发文档.md` 有这次修正的账）。
+      kp：与帧率无关，两种帧率下都是 0.15。
     """
     if mode == "width" and width > 0:
         scale = float(REF_GAIN_WIDTH) / float(width)
@@ -75,14 +78,32 @@ def gains_for(width: int, mode: str = "literal") -> Tuple[float, float, float]:
 class PidRef:
     """参考实现的 PID（像素误差口径，输出舵机**角度**，带输出平滑）。
 
-    ⚠️ 参考实现**没有 dt**：积分/微分都是"每帧一步"，所以它隐含假设控制频率固定。
-    我们的视觉 15FPS 是稳定的（摄像头限制，不是代码慢），所以照抄这个形状；
-    真要换频率，改 `--kp/--ki/--kd` 而不是在代码里偷偷加 dt（避免"看着一样其实不一样"）。
+    ★ 帧率口径（2026-10-12 重做，本类最要紧的一件事）
+    -------------------------------------------------
+    参考实现**没有 dt**：积分是"每帧累加"（`Ki·Σe`）、微分是"每帧差"（`Kd·Δe`）。
+    它的行为只在"控制频率固定"时才自洽 —— 而我们的下摄帧率**是会变的**
+    （亮环境 ≈30fps、暗环境 9~16fps，见 `doc/开发文档.md` 的帧率结论）。
+    所以本类提供两条路径：
+
+      · `step(e)`       —— **登记口径逐帧**（不带 dt）：与老代码逐位一致，
+                           留给 parking_test 这类老调用方，行为随帧率漂（老问题）；
+      · `step(e, dt)`   —— **按实测 dt 折算**：把 15fps 登记口径折成连续时间等价形式，
+                           任意帧率下物理行为一致：
+           积分项 = ki × REF_FPS × ∫e·dt     （每秒积分动作不变）
+           微分项 = kd / REF_FPS × (de/dt)   （等效连续阻尼 kd/REF_FPS 不变）
+           Δe 钳位按 px/s（= 登记口径的 ±DERIV_CLAMP_PX/帧）、平滑系数按时间常数折算。
+
+      两条路径在 dt = 1/REF_FPS 时**数学等价**（`tests/test_lane_rate.py` 有用例钉住），
+      差别只有一处：dt 路径在 `reset()` 后的第一帧不产生微分（老逐帧路径会把
+      "上一帧误差 = 0"当真、给一记假踢腿 —— 与 `prime()` 要治的是同一个病）。
+
+    ⚠️ 别在同一个实例上混用两种调用（两条路径各留各的"上一帧误差"与积分历史）。
     """
 
     def __init__(self, kp: float = KP0, ki: float = KI0, kd: float = KD0,
                  limit_deg: float = LIMIT_DEG0, smooth: float = SMOOTH0,
-                 sign: float = 1.0, center: float = 90.0) -> None:
+                 sign: float = 1.0, center: float = 90.0,
+                 ref_fps: float = REF_FPS) -> None:
         self.kp, self.ki, self.kd = float(kp), float(ki), float(kd)
         self.limit_deg = float(limit_deg)
         self.smooth = float(smooth)
@@ -90,14 +111,49 @@ class PidRef:
         # ★ 中位不再写死 90：本项目舵机 90°≠机械直行（2026-09-23 操场实测：固定 90°
         #   车自己绕大弯）。循迹必须以 settings.SERVO_CENTER_ANGLE 为中位。
         self.center = float(center)
+        self.ref_fps = float(ref_fps) or REF_FPS   # 登记口径（现场整定时的帧率）
         self.integral = 0.0
         self.last_error = 0.0
         self.last_angle: Optional[float] = None
+        self.last_dt: Optional[float] = None       # 最近一次参与控制律的 dt（日志用）
+        self._prev_dt_error: Optional[float] = None   # dt 路径专用的"上一帧误差"
+
+    # ------------------------------------------------------------ dt 口径折算
+    @property
+    def ki_per_s(self) -> float:
+        """连续时间口径的积分增益（登记值 × REF_FPS）。"""
+        return self.ki * self.ref_fps
+
+    @property
+    def kd_per_s(self) -> float:
+        """连续时间口径的微分增益（登记值 / REF_FPS）。"""
+        return self.kd / self.ref_fps
+
+    @property
+    def deriv_clamp_per_s(self) -> float:
+        """微分输入的速率钳位（px/s）：等价于登记口径的 ±DERIV_CLAMP_PX / 帧。"""
+        return DERIV_CLAMP_PX * self.ref_fps
+
+    @property
+    def integral_limit_s(self) -> float:
+        """积分钳位（px·s）：等价于登记口径的 ±INTEGRAL_LIMIT（逐帧累加）。"""
+        return INTEGRAL_LIMIT / self.ref_fps
+
+    def frame_equivalent(self, fps: float) -> Tuple[float, float]:
+        """给日志/现场用：在 fps 帧率下本实例的**逐帧等效** ki/kd。
+
+        （15fps → 就是登记值本身；30fps → ki 减半、kd 加倍。现场 A/B 表按登记口径写，
+        这一对数只是让人一眼看懂"30fps 下代码实际在用多少"。）
+        """
+        f = max(1e-6, float(fps))
+        return (self.ki * self.ref_fps / f, self.kd * f / self.ref_fps)
 
     def reset(self) -> None:
         self.integral = 0.0
         self.last_error = 0.0
         self.last_angle = None
+        self.last_dt = None
+        self._prev_dt_error = None
 
     def prime(self, error: float) -> None:
         """把上一帧误差预置为当前值：下一帧的微分项从 0 起跳。
@@ -106,13 +162,26 @@ class PidRef:
         `last_error=0` → 微分 = error−0 = 全量误差，kd 大时是一记假"踢腿"。
         """
         self.last_error = float(error)
+        self._prev_dt_error = float(error)
 
-    def step(self, error: float) -> float:
-        self.integral += float(error)
+    # ------------------------------------------------------------ 控制律
+    def step(self, error: float, dt: Optional[float] = None) -> float:
+        """一步控制律。`dt` 不给 = 登记口径逐帧（兼容老调用方）；给 dt = 按实际帧率折算。
+
+        单位：`error` 是**像素**（640 宽画面口径）；返回舵机角度（度）。
+        """
+        error = float(error)
+        if dt is None:
+            return self._step_frame(error)
+        return self._step_dt(error, float(dt))
+
+    def _step_frame(self, error: float) -> float:
+        """登记口径逐帧（= 老行为，逐位不变）。"""
+        self.integral += error
         self.integral = max(-INTEGRAL_LIMIT, min(INTEGRAL_LIMIT, self.integral))
         delta = max(-DERIV_CLAMP_PX, min(DERIV_CLAMP_PX, error - self.last_error))
         pid = self.kp * error + self.ki * self.integral + self.kd * delta
-        self.last_error = float(error)
+        self.last_error = error
         # 参考实现是 `90 - pid`；这里接上 settings.STEER_SIGN 让它和 planner 同口径：
         #   sign=+1（角度增大=右转）→ 90 + pid；sign=-1 → 90 - pid（= 参考实现原式）
         angle = self.center + self.sign * pid
@@ -123,6 +192,50 @@ class PidRef:
             angle = self.smooth * angle + (1.0 - self.smooth) * self.last_angle
             self.last_angle = angle
         return angle
+
+    def _step_dt(self, error: float, dt: float) -> float:
+        """按实测 dt 折算的控制律（任意帧率下与 15fps 登记口径物理等价）。"""
+        if not (dt > 0.0) or dt != dt:             # dt=0/NaN（时间戳坏了）→ 退回逐帧，别除零
+            return self._step_frame(error)
+        d = max(DT_MIN, min(DT_MAX, dt))
+        self.last_dt = d
+
+        # 积分（连续时间口径 + 钳位）：15fps 的 ki=0.02 在这里自动等于"每秒 0.3"
+        self.integral += error * d
+        lim = self.integral_limit_s
+        self.integral = max(-lim, min(lim, self.integral))
+
+        # 微分：先钳"速率"（px/s）再乘增益 —— 与逐帧口径的 ±20px/帧 等价
+        if self._prev_dt_error is None:
+            rate = 0.0                              # reset 后第一帧不踢腿（见类 docstring）
+        else:
+            rate = (error - self._prev_dt_error) / d
+        rate = max(-self.deriv_clamp_per_s, min(self.deriv_clamp_per_s, rate))
+        self._prev_dt_error = error
+
+        pid = self.kp * error + self.ki_per_s * self.integral + self.kd_per_s * rate
+        angle = self.center + self.sign * pid
+        angle = max(self.center - self.limit_deg, min(self.center + self.limit_deg, angle))
+        if self.last_angle is None:
+            self.last_angle = angle
+        else:
+            alpha = self._smooth_alpha(d)
+            angle = alpha * angle + (1.0 - alpha) * self.last_angle
+            self.last_angle = angle
+        return angle
+
+    def _smooth_alpha(self, dt: float) -> float:
+        """把"每帧平滑系数"折成任意 dt 下等效的系数（时间常数不变）。
+
+        登记口径下 `smooth` 是"每 1/15s 一步"的 EMA；dt 变成 1/30s 时用
+        `1−(1−smooth)^(dt·REF_FPS)` = 1−√0.3 ≈ 0.452，平滑时间常数才不变。
+        """
+        a = float(self.smooth)
+        if a >= 1.0:
+            return 1.0
+        a = max(1e-6, a)
+        n = max(1e-6, float(dt) * self.ref_fps)
+        return float(1.0 - (1.0 - a) ** n)
 
 
 def adaptive_pulse(error: float, base_us: float,
@@ -202,7 +315,13 @@ class OscillationGuard:
     2026-09-23 操场实测：误差 ±100~300 疯狂翻转，舵机 75°↔105°（限幅）来回甩，
     跑偏保护（连续计时）凑不满 → 车 S 弯直到冲出去。用"舵角大翻转次数"直接抓画龙：
     每次从"大角度一侧"翻到"另一侧"记一次，窗口内 ≥ flips 次就判失控停车。
+
+    ★ 2026-10-12：判据前的"样本够不够"从**帧数**（原来 ≥4 帧）改成**时间跨度**
+    （≥ 窗口的 1/4 = 0.5s）。帧数门槛在帧率翻倍时等于"只看了 0.13s 就敢判画龙"，
+    而现在下摄帧率是 9~30 会变的（见 `control/rate.py`）。
     """
+
+    MIN_SPAN_FRAC = 0.25      # 判定前至少要观测到窗口的这个比例（秒级语义，与帧率无关）
 
     def __init__(self, window_s: float = 2.0, flips: int = 3, amp_deg: float = 12.0) -> None:
         self.window_s = float(window_s)
@@ -220,6 +339,8 @@ class OscillationGuard:
         self._recent.append((float(now), float(angle)))
         if len(self._recent) < 4:
             return False
+        if self._recent[-1][0] - self._recent[0][0] < self.MIN_SPAN_FRAC * self.window_s:
+            return False          # 样本够但时间跨度不足 → 别急着判（防高帧率误触发）
         # 数"完整来回"：符号翻转且幅度 ≥ amp → 每次翻符号记一次翻转
         signs = []
         for _t, a in self._recent:
@@ -235,7 +356,13 @@ class BigErrorGuard:
 
     参考实现没有这一层。2026-09-21 实验室实测：误差恒在 −33px、舵机一直往左打到
     冲出跑道，226 帧里误差从没回到 0 附近 —— 没有兜底就会一直跑下去。
+
+    ★ 2026-10-12：振荡判据的"样本够不够"由帧数（原来 ≥6 帧）改成**时间跨度**
+    （≥ 统计窗口的一半）。0.6 这个占比本身与帧率无关，但"6 帧"在不同帧率下
+    对应 0.67s（9fps）~0.2s（30fps）—— 高帧率下等于没攒够证据就判，见 `control/rate.py`。
     """
+
+    TALLY_SPAN_FRAC = 0.5     # 振荡判据要观测到统计窗口的这个比例（秒级语义）
 
     def __init__(self, err_px: float = 60.0, hold_s: float = 1.5,
                  frac_window_s: float = 1.5, frac: float = 0.6) -> None:
@@ -261,7 +388,7 @@ class BigErrorGuard:
 
         ★ 2026-09-23 操场实测补"振荡判据"：S 弯时误差 ±100~300 疯狂翻符号，
         连续 1.5s ≥阈值永远凑不满 → 保护从不触发。窗口内大误差帧**占比**超阈值
-        也触发（0.6 = 约每秒 9 帧里有 6 帧都大，必是失控不是转弯）。
+        也触发（0.6 = 窗口里六成的观测都是大误差，必是失控不是转弯）。
         """
         if self.hold_s <= 0:
             return False
@@ -274,11 +401,13 @@ class BigErrorGuard:
                 self._since = float(now)
             if (float(now) - self._since) >= self.hold_s:
                 return True
-        # 振荡判据：滚动窗口
+        # 振荡判据：滚动窗口（要攒够**时间**证据，不只是样本数）
         cutoff = float(now) - self.frac_window_s
         self._recent = [(t, b) for t, b in self._recent if t >= cutoff]
         self._recent.append((float(now), big))
-        if self.frac_window_s > 0 and len(self._recent) >= 6:
+        span = (self._recent[-1][0] - self._recent[0][0]) if len(self._recent) >= 2 else 0.0
+        if self.frac_window_s > 0 and len(self._recent) >= 4 \
+                and span >= self.TALLY_SPAN_FRAC * self.frac_window_s:
             frac_big = sum(1 for _, b in self._recent if b) / float(len(self._recent))
             if frac_big >= self.frac:
                 return True

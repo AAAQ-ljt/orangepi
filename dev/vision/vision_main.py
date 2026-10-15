@@ -386,7 +386,8 @@ def main() -> int:
                         _write_status(args.status_file, {
                             "timestamp": now, "fps": round(fps, 1), "loop_ms": round(loop_ms, 1),
                             "camera": cam.index, "on_gate_camera": on_gate_camera,
-                            "center_x": None if obs is None else round(obs.center_x, 1),
+                            "center_x": (None if obs is None or obs.center_x is None
+                                         else round(obs.center_x, 1)),
                             "lane_confidence": None if obs is None else round(obs.confidence, 3),
                             "board_blocked": bool(gate_state and gate_state.blocked),
                             "start_released": gate_released,
@@ -397,7 +398,7 @@ def main() -> int:
 
                     if frames % max(1, settings.PRINT_EVERY_N) == 0:
                         print(f"[VISION] #{frames} fps={fps:.1f} loop={loop_ms:.0f}ms cam={cam.index} "
-                              f"center={None if obs is None else round(obs.center_x, 1)} "
+                              f"center={None if obs is None or obs.center_x is None else round(obs.center_x, 1)} "
                               f"conf={None if obs is None else round(obs.confidence, 2)} "
                               f"board={None if gate_state is None else gate_state.blocked} "
                               f"released={gate_released} elems={[e.name for e in elements]}")

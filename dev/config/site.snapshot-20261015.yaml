@@ -1,0 +1,18 @@
+# ★ 2026-10-15 现场 site.yaml 快照（备份留档；**真正的 site.yaml 是车端本地文件、不入 git、不参与同步**）
+# 用途：万一车端 site.yaml 丢/写坏（2026-09-23 发生过），照这份恢复；日常改动请更新本快照。
+# 恢复：把下面内容（去掉本注释头）写到 /root/dev/config/site.yaml，然后看启动日志 [site] 行确认生效。
+#      车端另有历史备份：site.yaml.old-20261015 / site.yaml.lab-20260922 / site.yaml.bak-20261015
+# 现场标定值（车端本地数据：不进 git、不参与代码同步）
+# 由 scripts/bench_test.py --calibrate 写入；同名键会覆盖 config/settings.py
+
+arbiter_conf_thresh: 0.28
+lane_hough_half_w_default_px: 300
+lane_mask_open_px: 3
+lane_pair_w_max_px: 800
+lane_pair_w_min_px: 120
+lane_roi_bottom_margin: 120
+lane_roi_top_ratio: 0.15
+lane_white_v_split: 0.35
+servo_center_angle: 86.5
+steer_sign: -1
+target_x: 342.7

@@ -246,7 +246,10 @@ cmd_status() {
   printf '温度          : %s\n' "$(awk '{printf "%.1f°C", $1/1000}' /sys/class/thermal/thermal_zone0/temp 2>/dev/null || echo '未知')"
   echo "--- 服务 ---"
   for svc in "${MANUAL_SERVICES[@]}"; do
-    local st; st=$(systemctl is-active "$svc" 2>/dev/null | head -1)
+    # ⚠️ `|| true` 不能省：本脚本是 set -euo pipefail，某个服务 inactive 时
+    #    `systemctl is-active` 返回非零 → 整条 pipeline 失败 → 脚本提前退出，
+    #    后面的服务（含 ffmpeg-stream*）根本不打印（2026-10-15 因此把"推流没起来"藏住了）
+    local st; st=$(systemctl is-active "$svc" 2>/dev/null | head -1 || true)
     printf '  %-26s %s\n' "${svc%.service}" "${st:-unknown}"
   done
   echo "--- 我们的进程 ---"

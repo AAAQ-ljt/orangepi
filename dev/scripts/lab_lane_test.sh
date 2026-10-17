@@ -19,6 +19,10 @@
 # ★ 想停（2026-10-17）：① 首选 `touch /dev/shm/lane_stop`（任何通道都能发；lane_final_test.py 主循环每帧查，
 #   走与 Ctrl+C 相同的安全收尾）② 车本地 `bash /root/dev/scripts/stop_run.sh`（或 `--file`）
 #   ③ 本窗口 Ctrl+C（**只在"本窗口前台手敲这个脚本"时有效**）④ 断电。
+# ★ 为什么 tee 要 `trap '' INT`（2026-10-17 事故）：Ctrl+C 发给**整个前台进程组**，原来 tee 先被打死
+#   ⇒ python 的 stdout 立刻变成断管 ⇒ 它的每一条 print 都抛 BrokenPipeError（收尾链第一步就崩 ⇒
+#   "电调归零"被跳过 ⇒ 车带着最后一次脉宽跑，只能断电）。让 tee 忽略 INT 后，^C 时实时输出与日志都还在；
+#   python 侧另有"打印绝不抛 + 断管接管 fd"双保险（任一失效都不会再失控）。
 set -euo pipefail
 
 DEV=/root/dev
@@ -99,7 +103,7 @@ echo "      · 车摆正在车道里；闸门会打印'等待蓝板…'的蓝色
 echo "      · 绿框=左线、红框=右线、黄圈=中心；err 越接近 0 越说明 target_x 对"
 set +e
 python3 -u "$LANE" --no-motor --max-seconds "$PROBE_S" \
-  --save-dir "$LOG_DIR/lane_probe_${STAMP}" ${PASSTHRU[@]+"${PASSTHRU[@]}"} 2>&1 | tee -a "$LOG"
+  --save-dir "$LOG_DIR/lane_probe_${STAMP}" ${PASSTHRU[@]+"${PASSTHRU[@]}"} 2>&1 | { trap "" INT; tee -a "$LOG"; }
 PROBE_RC=${PIPESTATUS[0]}
 set -e
 if [[ $PROBE_RC -ne 0 ]]; then
@@ -133,7 +137,7 @@ echo "[2/2] 真跑：蓝板挡到下摄正前方 → 移开 = 发车；想停：
 set +e
 python3 -u "$LANE" --allow-motion ${SPEED_ARGS[@]+"${SPEED_ARGS[@]}"} \
   --max-seconds "${MAX_SECONDS:-60}" \
-  --save-dir "$LOG_DIR/lane_run_${STAMP}" ${PASSTHRU[@]+"${PASSTHRU[@]}"} 2>&1 | tee -a "$LOG"
+  --save-dir "$LOG_DIR/lane_run_${STAMP}" ${PASSTHRU[@]+"${PASSTHRU[@]}"} 2>&1 | { trap "" INT; tee -a "$LOG"; }
 RC=${PIPESTATUS[0]}
 set -e
 

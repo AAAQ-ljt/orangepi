@@ -51,7 +51,7 @@ def svc_start(name: str) -> None:
         subprocess.run(["systemctl", "start", name], check=False,
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except (FileNotFoundError, OSError) as exc:
-        print(f"[BENCH]   ⚠️ 无法执行 systemctl（{exc}）")
+        _say(f"[BENCH]   ⚠️ 无法执行 systemctl（{exc}）")
 
 
 def svc_stop(name: str) -> None:
@@ -60,23 +60,53 @@ def svc_stop(name: str) -> None:
         subprocess.run(["systemctl", "stop", name], check=False,
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except (FileNotFoundError, OSError) as exc:
-        print(f"[BENCH]   ⚠️ 无法执行 systemctl（{exc}）")
+        _say(f"[BENCH]   ⚠️ 无法执行 systemctl（{exc}）")
+
+
+def _say(msg: str) -> None:
+    """打印**绝不抛**：收尾链里每一步都要印字，而 stdout 可能是一条已经断掉的管道
+    （2026-10-17 现场：`python3 … | tee` 跑，^C 先把 tee 打死 → 我们的 print 抛 BrokenPipeError
+    → 收尾第一步就崩，电调归零被整个跳过 ⇒ 车带着最后一次脉宽跑）。"""
+    try:
+        print(msg, flush=True)
+    except Exception:                                  # noqa: BLE001
+        pass
 
 
 def restore_remote_stage(state: dict, reason: str = "") -> None:
-    """停电机 + 恢复**远程控制阶段**并逐项验证（幂等；任何退出路径都调它）。"""
+    """停电机 + 恢复**远程控制阶段**并逐项验证（幂等；任何退出路径都调它）。
+
+    ★ 顺序铁律（2026-10-17 事故）：**先写硬件、后印字**。原来第一行是 `print`，stdout 一断
+    （^C 打死 `| tee`）就直接抛出去，`driver.safe_stop()` 根本没执行 ⇒ PCA9685 保持最后一次脉宽
+    ⇒ 车一直跑，现场只能断电。现在任何一条打印都不许挡在"电调归零"前面。
+    并把"电机是否确实归零"记进 `state["motor_safe"]`，供调用方决定**要不要解除看门狗**。
+    """
     if state.get("restored"):
         return
     state["restored"] = True
-    print(f"\n[BENCH] 收尾{f'（{reason}）' if reason else ''}：")
+
+    # ---- ① 硬件先行：电调 1500us、舵机回中、释放 PCA9685
     driver = state.get("driver")
+    motor_safe = True
+    stop_err = ""
     if driver is not None:
         try:
             driver.safe_stop()      # 电调 1500us、舵机回中
             driver.shutdown()       # 释放 PCA9685
-            print("[BENCH]   电调已归零、舵机回中、PCA9685 已释放")
         except Exception as exc:    # 收尾阶段不能再抛异常
-            print(f"[BENCH]   ⚠️ 释放驱动异常：{exc}")
+            motor_safe = False
+            stop_err = str(exc)
+    state["motor_safe"] = motor_safe
+
+    # ---- ② 之后才是打印（每一条都走 _say，断管也不抛）
+    _say(f"\n[BENCH] 收尾{f'（{reason}）' if reason else ''}：")
+    if driver is not None:
+        if motor_safe:
+            _say("[BENCH]   电调已归零、舵机回中、PCA9685 已释放")
+        else:
+            _say(f"[BENCH]   ⚠️⚠️ 电调归零**失败**：{stop_err}")
+            _say("[BENCH]   ⚠️⚠️ 电机可能还在转！→ 看门狗 1s 内会强写 1500us；"
+                 "**别断电**，等它 / 手边留断电开关")
     if state.get("used_motor"):
         svc_start("opi-control.service")
         time.sleep(2)
@@ -86,28 +116,28 @@ def restore_remote_stage(state: dict, reason: str = "") -> None:
         for svc, desc in checks:
             ok = svc_active(svc)
             all_ok &= ok
-            print(f"[BENCH]   {'✅' if ok else '❌'} {svc:28s} {desc} = {'active' if ok else '未启动'}")
+            _say(f"[BENCH]   {'✅' if ok else '❌'} {svc:28s} {desc} = {'active' if ok else '未启动'}")
         if all_ok:
-            print("[BENCH] ✅ 已恢复**远程控制阶段**（可以正常遥控/看图传）")
+            _say("[BENCH] ✅ 已恢复**远程控制阶段**（可以正常遥控/看图传）")
         else:
-            print("[BENCH] ⚠️ 有服务没起来，请手动执行："
+            _say("[BENCH] ⚠️ 有服务没起来，请手动执行："
                   "systemctl start opi-control ffmpeg-stream ffmpeg-stream-sub")
         # ★ 2026-10-15 现场提醒：opi-control 一旦起来就**接管 PCA9685** —— 如果谁的
         #   手机/网页正停在摇杆页（或键盘按住），车会直接按那个输入动起来，
         #   而我们这边的 Ctrl+C 已经没用了（脚本已经退出，不是它在开车）。
-        print("[BENCH] ⚠️ 注意：远程控制已恢复 = 网页摇杆/键盘**现在能直接让车动** —— "
-              "别把手机/网页停在摇杆页；要车绝对不动就断电或 systemctl stop opi-control")
+        _say("[BENCH] ⚠️ 注意：远程控制已恢复 = 网页摇杆/键盘**现在能直接让车动** —— "
+             "别把手机/网页停在摇杆页；要车绝对不动就断电或 systemctl stop opi-control")
     else:
         for svc in STREAM_SERVICES:
             ok = svc_active(svc)
-            print(f"[BENCH]   {'✅' if ok else '❌'} {svc:28s} 图传推流 = {'active' if ok else '未启动'}")
-        print("[BENCH] ✅ 未改动远程控制阶段（本次只读摄像头）")
+            _say(f"[BENCH]   {'✅' if ok else '❌'} {svc:28s} 图传推流 = {'active' if ok else '未启动'}")
+        _say("[BENCH] ✅ 未改动远程控制阶段（本次只读摄像头）")
 
 
 def install_signal_guard(state: dict) -> None:
     """Ctrl+C / kill / 关会话 / 异常终止 → 只置标志，由主循环退出后统一收尾。"""
     def _on_signal(signum, _frame):
-        print(f"\n[BENCH] 收到信号 {signum}，准备收尾…")
+        _say(f"\n[BENCH] 收到信号 {signum}，准备收尾…")
         state["stopped"] = True
 
     for name in ("SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT", "SIGABRT"):

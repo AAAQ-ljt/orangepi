@@ -240,6 +240,167 @@ def test_sigterm_stops_cleanly() -> None:
     assert rc == 0, f"rc={rc}"
 
 
+class _FakePCA:
+    """假 PCA9685（不碰 I2C）：只记下写了什么。"""
+
+    CH_ESC = 1
+
+    def __init__(self) -> None:
+        self.writes: list = []
+
+    def set_steering_angle(self, angle: float) -> None:
+        self.writes.append(("steer", angle))
+
+    def write_us(self, ch: int, us: float) -> None:
+        self.writes.append((ch, us))
+
+
+class _FakeDriver:
+    def __init__(self, angry: bool = False) -> None:
+        self.angry = angry
+        self.safe_stop_calls = 0
+        self.shutdown_calls = 0
+
+    def safe_stop(self) -> None:
+        self.safe_stop_calls += 1
+        if self.angry:
+            raise OSError("模拟：I2C 写失败（电调没归零）")
+
+    def shutdown(self) -> None:
+        self.shutdown_calls += 1
+
+
+class _FakeMotorSession:
+    """替掉 `bench_common.MotorSession`：不碰 opi-control/PCA9685，只把假 driver 放进 state。
+
+    run_online 里是 `from scripts.bench_common import MotorSession`（**调用时**取属性）
+    ⇒ 打补丁 `scripts.bench_common.MotorSession` 就能生效。
+    """
+
+    last = None
+
+    def __init__(self, state: dict, enabled: bool = True, speed_us_max: float = None,
+                 angry: bool = False) -> None:
+        self.state = state
+        self.enabled = enabled
+        self.angry = angry
+
+    def __enter__(self):
+        _FakeMotorSession.last = self
+        if not self.enabled:
+            self.state["used_motor"] = False
+            return None
+        self.driver = _FakeDriver(angry=self.angry)
+        self.state["driver"] = self.driver
+        self.state["used_motor"] = True
+        return _FakePCA()
+
+    def __exit__(self, *exc):
+        return False
+
+
+class _BreakableStream:
+    """可控的 stdout：先正常攒字；一旦攒到的内容里出现 `break_after`，之后所有写都抛
+    BrokenPipeError —— 精确模拟"^C 把 `| tee` 打死、我们的 stdout 变成断管"。"""
+
+    def __init__(self, break_after: str = "") -> None:
+        self.buf = io.StringIO()
+        self.break_after = break_after
+        self.broken = False
+
+    def write(self, s: str) -> int:
+        if self.break_after and self.break_after in self.buf.getvalue():
+            self.broken = True
+        if self.broken:
+            raise BrokenPipeError(32, "Broken pipe（模拟 tee 已被 ^C 打死）")
+        return self.buf.write(s)
+
+    def flush(self) -> None:
+        return None
+
+    def getvalue(self) -> str:
+        return self.buf.getvalue()
+
+    def __getattr__(self, name):                    # isatty 等透传
+        return getattr(self.buf, name)
+
+
+def test_safe_stop_even_if_stdout_pipe_breaks() -> None:
+    """★ 2026-10-17 事故回归：stdout 断管（^C 打死 `| tee`）时**也必须**把电调归零。
+
+    旧行为（现场实测，退出码 134 + 车不停只能断电）：`restore_remote_stage()` 第一步是 print →
+    断管就抛 BrokenPipeError → `driver.safe_stop()` 被整个跳过 → PCA9685 保持最后一次脉宽（1600us）
+    → 车一直跑。这里用假 driver 钉住"safe_stop 一定被调用"，并顺带钉住"收尾不能抛出去"。
+    """
+    import scripts.bench_common as bc
+
+    tmp = tempfile.mkdtemp(prefix="lane_pipebreak_")
+    saved_ms = bc.MotorSession
+    saved_stdout = sys.stdout
+    bc.MotorSession = _FakeMotorSession
+    sys.stdout = _BreakableStream(break_after="track")   # 跟线开始后就断管
+    try:
+        rc, _, _ = _run([_lane_frame()] * 120,
+                        ["--no-start-gate", "--allow-motion", "--watchdog-s", "0",
+                         "--save-dir", tmp, "--max-seconds", "3"])
+    finally:
+        sys.stdout = saved_stdout
+        bc.MotorSession = saved_ms
+    ms = _FakeMotorSession.last
+    assert ms is not None and ms.driver is not None, "假 MotorSession 应该被用过（说明真的在跑车路径）"
+    assert ms.driver.safe_stop_calls >= 1, (
+        "stdout 断管后 safe_stop 没被调用 —— 电调不会归零，车会带着最后一次脉宽跑（现场事故）")
+    assert rc == 0 or rc == 1, f"rc={rc}（收尾链抛出去就会变成 134/异常终止）"
+
+
+def test_watchdog_stays_armed_if_motor_stop_fails() -> None:
+    """★ 电调归零**失败**时不许解除看门狗——它得留着在 1 秒后强写 1500us（唯一退路）。
+
+    事故链条：断管 → safe_stop 被跳过（失败）→ 但收尾照旧 `wd.stop()` 删心跳+收进程
+    ⇒ 安全网被自家解除武装 ⇒ 没人写 1500us ⇒ 车跑到断电。
+    """
+    import scripts.bench_common as bc
+    import scripts.esc_watchdog as ew
+
+    class _FakeWd:
+        instances: list = []
+
+        def __init__(self, timeout_s: float = 1.0, tag: str = "lane", grace_s: float = 60.0,
+                     dry_run: bool = False) -> None:
+            self.stopped = False
+            self.path = os.path.join(tempfile.gettempdir(), f"fakewd_{id(self)}.hb")
+            _FakeWd.instances.append(self)
+
+        def start(self, log_path: str = "") -> None:
+            with open(self.path, "w") as fh:
+                fh.write("hb\n")
+
+        def feed(self) -> None:
+            pass
+
+        def stop(self):
+            self.stopped = True
+            return 0
+
+    tmp = tempfile.mkdtemp(prefix="lane_wdkeep_")
+    saved_ms, saved_wd = bc.MotorSession, ew.WatchdogClient
+    bc.MotorSession = (lambda state, enabled=True, speed_us_max=None:
+                       _FakeMotorSession(state, enabled, speed_us_max, angry=True))
+    ew.WatchdogClient = _FakeWd
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            _run([_lane_frame()] * 90,
+                 ["--no-start-gate", "--allow-motion", "--watchdog-s", "1",
+                  "--save-dir", tmp, "--max-seconds", "2.0"])
+    finally:
+        bc.MotorSession, ew.WatchdogClient = saved_ms, saved_wd
+    assert _FakeWd.instances, "看门狗应该被拉起过"
+    wd = _FakeWd.instances[-1]
+    assert wd.stopped is False, (
+        "电调没归零成功却把看门狗收掉了（删了心跳 + terminate）—— 安全网被解除武装，车会一直跑")
+
+
 def main() -> int:
     funcs = [v for k, v in sorted(globals().items())
              if k.startswith("test_") and callable(v) and getattr(v, "__module__", "") == __name__]

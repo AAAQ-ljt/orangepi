@@ -1651,6 +1651,89 @@ def clear_stop_file(path: str, why: str) -> None:
         print(f"[LANE] ⚠️ 删停止文件 {path} 失败（不影响跑车）：{exc}")
 
 
+class _SafeStream:
+    """把 stdout/stderr 包一层：**任何写入失败都不抛**（管道断了就当这行日志丢）。
+
+    为什么（2026-10-17 事故）：`| tee` 跑法下 ^C 先把 tee 打死，之后**每一条 print** 都抛
+    BrokenPipeError —— 主循环里一条 print 就能把整趟跑挂掉（变成异常路径，收尾链跟着遭殃）。
+    包一层以后，"日志写不出去"最多少一行字，绝不影响开车/停车逻辑。
+    """
+
+    def __init__(self, stream) -> None:
+        self._stream = stream
+
+    def write(self, data):
+        try:
+            return self._stream.write(data)
+        except Exception:                              # noqa: BLE001
+            return len(data) if isinstance(data, str) else 0
+
+    def flush(self) -> None:
+        try:
+            self._stream.flush()
+        except Exception:                              # noqa: BLE001
+            pass
+
+    def __getattr__(self, name):                       # isatty/encoding 等透传
+        return getattr(self._stream, name)
+
+
+def install_safe_streams() -> None:
+    """在线跑车时调用一次（幂等）：从此 stdout/stderr 写不出去也不抛。"""
+    if not isinstance(sys.stdout, _SafeStream):
+        sys.stdout = _SafeStream(sys.stdout)
+    if not isinstance(sys.stderr, _SafeStream):
+        sys.stderr = _SafeStream(sys.stderr)
+
+
+def detach_std_if_broken(log_path: str) -> str:
+    """收尾专用：探一下 stdout 还在不在；**断了就把 fd 1/2 接到自己的日志上**。
+
+    为什么（2026-10-17 事故）：`lab_lane_test.sh` 用 `python3 … | tee` 跑我们 —— ^C 会先打死 tee，
+    我们的 stdout 立刻变成断管，之后**每一条 print 都会抛 BrokenPipeError**；收尾链里任何"先打印"
+    的步骤都会当场崩掉（最致命的是"电调归零"被跳过 ⇒ 车带着最后一次脉宽跑，现场只能断电）。
+    fd 一旦换掉，后面所有打印（含三方库里的）都写进 exit.log，永不炸；log_path 为空则丢弃输出。
+    返回实际接管的路径（'' = stdout 还活着或接管失败，两种情况都不抛）。
+    """
+    try:
+        os.write(1, b" ")              # 探针：**绕过 _SafeStream** 直接写 fd，断了这里就抛
+        return ""                      # 还活着 → 不接管（现场还能在终端里看到收尾过程）
+    except Exception:                  # noqa: BLE001  BrokenPipeError / OSError / ValueError
+        pass
+    try:
+        fd = os.open(log_path or os.devnull, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+        os.dup2(fd, 1)
+        os.dup2(fd, 2)
+        if fd > 2:
+            os.close(fd)
+        return log_path
+    except OSError:
+        try:
+            devnull = os.open(os.devnull, os.O_WRONLY)
+            os.dup2(devnull, 1)
+            os.dup2(devnull, 2)
+            os.close(devnull)
+        except OSError:
+            pass
+        return ""
+
+
+def sync_disk() -> None:
+    """把这次会话的记录**真的写到 SD** 上（收尾时调一次，成本几毫秒）。
+
+    为什么（2026-10-17 事故）：车 rootfs 挂着 `commit=600`（10 分钟才提交一次），断电重启后
+    **最近十分钟的写入会整块消失** —— 那次事故的 session.json / run.csv / 看门狗日志就是这么
+    "一条都找不到"的，复盘全靠人肉回忆。收尾 sync 一次，至少让"这趟怎么结束的"留得下来。
+    """
+    fn = getattr(os, "sync", None)          # Windows 没有 os.sync
+    if fn is None:
+        return
+    try:
+        fn()
+    except OSError:
+        pass
+
+
 def _try(fn, *a, what: str = "", **k):
     """收尾步骤的"绝不抛"包装：任何一步失败都不许挡住后面的步骤。
 
@@ -1676,12 +1759,13 @@ def run_online(args, det: LaneFinalDetector, center_deg: float, sign: float,
 
     use_motor = bool(args.allow_motion)
     state = {"stopped": False, "stop_by": "", "driver": None, "restored": False,
-             "used_motor": use_motor}
+             "used_motor": use_motor, "motor_safe": None}   # motor_safe：电调是否确实归零
     install_signal_guard(state)
 
     # ★ 停车通道（2026-10-17，调试期）：Ctrl+C 只在"本进程是那个终端的前台作业"时才是信号
     #   （10-16 现场 7 趟零「收到信号」就是按键没到）。所以除了信号，再加一条**不依赖终端**的
     #   通道：停止文件。启动时先清残留（免得上一趟的文件把这一趟当场停掉），退出时也清。
+    install_safe_streams()          # ★ 在线跑车：先让 stdout/stderr 写不出去也不抛（^C 打死 | tee 的场景）
     stop_file = str(getattr(args, "stop_file", "") or "")
     clear_stop_file(stop_file, "上一趟的残留；本趟启动时清掉，之后 touch 才有效")
     selfchk = launch_selfcheck()
@@ -1914,15 +1998,30 @@ def run_online(args, det: LaneFinalDetector, center_deg: float, sign: float,
     except KeyboardInterrupt:
         print("[LANE] Ctrl+C → 安全停车")
     finally:
-        # ★ 收尾链每一步都包一层（绝不抛）：stdout 可能是断掉的管道（SIGPIPE 已忽略），
-        #   抛在第 1 步就会把后面的看门狗收掉/session.json 落盘全跳过（见 _try 的注释）。
+        # ★ 收尾链（2026-10-17 事故后重排，**顺序别动**）：
+        #   ① 先探 stdout：`| tee` 已被 ^C 打死就把 fd1/2 接到 exit.log —— 后面所有打印都安全；
+        #   ② 电调归零（`restore_remote_stage` 内部也是"先写硬件、后打印"）；
+        #   ③ **只有电调确实归零了**才解除看门狗；没归零就留着它（1s 后它自己强写 1500us）；
+        #   ④ 最后 sync 一次落盘（rootfs commit=600：不 sync，断电后这趟记录就没了）。
         clear_stop_file(stop_file, "本趟结束")
+        exit_log = ""
+        if args.save_dir:
+            exit_log = detach_std_if_broken(os.path.join(args.save_dir, "exit.log"))
         _try(rec.close, what="关 CSV")
         if use_motor:
             _try(restore_remote_stage, state, "run_online 退出", what="恢复远程控制阶段")
         if wd is not None:
-            wd_code = _try(wd.stop, what="收掉看门狗")  # 电机已安全 → 再解除看门狗
-            wd_tripped = wd_code in (2, 3)              # 2/3 = 心跳停过并写了安全值
+            if (not use_motor) or state.get("motor_safe") is True:
+                wd_code = _try(wd.stop, what="收掉看门狗")   # 电调已归零 → 才解除看门狗
+                wd_tripped = wd_code in (2, 3)               # 2/3 = 心跳停过并写了安全值
+            else:
+                # ★ 电调没归零 → **绝不解除看门狗**：心跳不再更新，它 1s 内会强写 1500us + 舵机回中。
+                #   现场 10-17：这里被跳过 ⇒ 安全网被自家解除武装 ⇒ 车跑到断电。
+                wd_tripped = True
+                print("[LANE] ⚠️⚠️ 电调归零失败 → **不解除看门狗**：1s 内它会强写 1500us"
+                      "（等它，别断电；车若还在动就断电）")
+        if exit_log:
+            print(f"[LANE] 收尾输出已被接管到 {exit_log}（stdout 管道断了）")
         # 结果落进 session.json（含着陆原因、相位分布、末帧读数）——复盘不依赖 stdout
         sess["result"] = {
             "ended": time.strftime("%Y-%m-%d %H:%M:%S"), "rc": rc, "frames": frames,
@@ -1933,6 +2032,8 @@ def run_online(args, det: LaneFinalDetector, center_deg: float, sign: float,
             "last": {"center_x": runner.last_center, "error_px": last_err,
                      "angle_deg": last_ang, "esc_us": last_us},
             "watchdog_tripped": wd_tripped,
+            "motor_safe": state.get("motor_safe"),   # None=没动电机 / True=已归零 / False=归零失败
+            "exit_log": exit_log,
             "cone": {"frames": len(cone_flags),
                      "hits": sum(1 for f in cone_flags if f),
                      "triggers": runner.cone_triggers, "aborts": runner.cone_aborts,
@@ -1940,6 +2041,7 @@ def run_online(args, det: LaneFinalDetector, center_deg: float, sign: float,
                      "too_near": runner.cone_too_near},
         }
         _try(_dump_sess, what="落 session.json")
+        _try(sync_disk, what="sync 落盘")            # commit=600：不 sync，断电就丢
     fps_end = runner.rate.fps
     print(f"[LANE] 结束：{frames} 帧 | 有效跟线 {runner.frames_ok} 帧 "
           f"| 护栏/超时 {runner.guard_trips} 次 | 末帧率 {fps_end:.1f}")

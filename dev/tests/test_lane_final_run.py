@@ -353,6 +353,29 @@ def test_safe_stop_even_if_stdout_pipe_breaks() -> None:
     assert rc == 0 or rc == 1, f"rc={rc}（收尾链抛出去就会变成 134/异常终止）"
 
 
+class _FakeWd:
+    """假 WatchdogClient：只记"有没有被 stop()"，不拉真进程。"""
+
+    instances: list = []
+
+    def __init__(self, timeout_s: float = 1.0, tag: str = "lane", grace_s: float = 60.0,
+                 dry_run: bool = False) -> None:
+        self.stopped = False
+        self.path = os.path.join(tempfile.gettempdir(), f"fakewd_{id(self)}.hb")
+        _FakeWd.instances.append(self)
+
+    def start(self, log_path: str = "") -> None:
+        with open(self.path, "w") as fh:
+            fh.write("hb\n")
+
+    def feed(self) -> None:
+        pass
+
+    def stop(self):
+        self.stopped = True
+        return 0
+
+
 def test_watchdog_stays_armed_if_motor_stop_fails() -> None:
     """★ 电调归零**失败**时不许解除看门狗——它得留着在 1 秒后强写 1500us（唯一退路）。
 
@@ -361,26 +384,6 @@ def test_watchdog_stays_armed_if_motor_stop_fails() -> None:
     """
     import scripts.bench_common as bc
     import scripts.esc_watchdog as ew
-
-    class _FakeWd:
-        instances: list = []
-
-        def __init__(self, timeout_s: float = 1.0, tag: str = "lane", grace_s: float = 60.0,
-                     dry_run: bool = False) -> None:
-            self.stopped = False
-            self.path = os.path.join(tempfile.gettempdir(), f"fakewd_{id(self)}.hb")
-            _FakeWd.instances.append(self)
-
-        def start(self, log_path: str = "") -> None:
-            with open(self.path, "w") as fh:
-                fh.write("hb\n")
-
-        def feed(self) -> None:
-            pass
-
-        def stop(self):
-            self.stopped = True
-            return 0
 
     tmp = tempfile.mkdtemp(prefix="lane_wdkeep_")
     saved_ms, saved_wd = bc.MotorSession, ew.WatchdogClient
@@ -399,6 +402,44 @@ def test_watchdog_stays_armed_if_motor_stop_fails() -> None:
     wd = _FakeWd.instances[-1]
     assert wd.stopped is False, (
         "电调没归零成功却把看门狗收掉了（删了心跳 + terminate）—— 安全网被解除武装，车会一直跑")
+
+
+def test_watchdog_disarmed_before_service_restore() -> None:
+    """★ 电调归零**成功**时：看门狗必须在"恢复服务"的 2s 等待**之前**就解除。
+
+    否则一次成功的收尾也会把看门狗点着（1s 超时 < 2s 服务恢复）：日志假报
+    「看门狗触发过（主控卡死/被杀）」，而且它会去写一次 I2C、与刚起来的 opi-control 抢总线。
+    """
+    import scripts.bench_common as bc
+    import scripts.esc_watchdog as ew
+
+    tmp = tempfile.mkdtemp(prefix="lane_wdok_")
+    saved_ms, saved_wd = bc.MotorSession, ew.WatchdogClient
+    bc.MotorSession = _FakeMotorSession
+    ew.WatchdogClient = _FakeWd
+    seen: dict = {}
+    real_start = bc.svc_start
+
+    def _spy_start(svc: str) -> None:
+        # 拉起 opi-control 的那一刻，看门狗应该**已经**被解除了
+        if svc == "opi-control.service" and "at_service_start" not in seen:
+            seen["at_service_start"] = _FakeWd.instances[-1].stopped
+        real_start(svc)
+
+    bc.svc_start = _spy_start
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            _run([_lane_frame()] * 90,
+                 ["--no-start-gate", "--allow-motion", "--watchdog-s", "1",
+                  "--save-dir", tmp, "--max-seconds", "2.0"])
+    finally:
+        bc.MotorSession, ew.WatchdogClient, bc.svc_start = saved_ms, saved_wd, real_start
+    assert _FakeWd.instances, "看门狗应该被拉起过"
+    wd = _FakeWd.instances[-1]
+    assert wd.stopped is True, "电调已归零、收尾成功，看门狗却没被解除（收尾链断在半路）"
+    assert seen.get("at_service_start") is True, (
+        "解除看门狗发生在恢复服务之后 —— 成功的收尾会误触发看门狗（现场 10-17 的假报警）")
 
 
 def main() -> int:

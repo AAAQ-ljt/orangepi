@@ -73,13 +73,17 @@ def _say(msg: str) -> None:
         pass
 
 
-def restore_remote_stage(state: dict, reason: str = "") -> None:
+def restore_remote_stage(state: dict, reason: str = "", on_motor_safe=None) -> None:
     """停电机 + 恢复**远程控制阶段**并逐项验证（幂等；任何退出路径都调它）。
 
     ★ 顺序铁律（2026-10-17 事故）：**先写硬件、后印字**。原来第一行是 `print`，stdout 一断
     （^C 打死 `| tee`）就直接抛出去，`driver.safe_stop()` 根本没执行 ⇒ PCA9685 保持最后一次脉宽
     ⇒ 车一直跑，现场只能断电。现在任何一条打印都不许挡在"电调归零"前面。
     并把"电机是否确实归零"记进 `state["motor_safe"]`，供调用方决定**要不要解除看门狗**。
+
+    `on_motor_safe`：电调这一步一做完就立刻回调（**在恢复服务的 2s 等待之前**）。调用方用它
+    "电调已安全 ⇒ 现在可以解除看门狗"——否则停喂心跳 + 服务恢复要 2s 多，看门狗会在**成功的收尾里
+    被触发**（2026-10-17 现场就报了一次假的「看门狗触发过（主控卡死/被杀）」）。
     """
     if state.get("restored"):
         return
@@ -97,6 +101,11 @@ def restore_remote_stage(state: dict, reason: str = "") -> None:
             motor_safe = False
             stop_err = str(exc)
     state["motor_safe"] = motor_safe
+    if on_motor_safe is not None:               # ★ 电调已处置（成/败都通知）→ 立刻决定看门狗去留
+        try:
+            on_motor_safe(motor_safe)
+        except Exception as exc:                # noqa: BLE001
+            _say(f"[BENCH]   ⚠️ on_motor_safe 回调异常（继续收尾）：{exc}")
 
     # ---- ② 之后才是打印（每一条都走 _say，断管也不抛）
     _say(f"\n[BENCH] 收尾{f'（{reason}）' if reason else ''}：")
@@ -110,6 +119,10 @@ def restore_remote_stage(state: dict, reason: str = "") -> None:
     if state.get("used_motor"):
         svc_start("opi-control.service")
         time.sleep(2)
+        if not svc_active("opi-control.service"):      # ★ 给一次重试：别的进程可能在这 2s 里把它停了
+            _say("[BENCH]   ⚠️ opi-control 第一次没起来 → 重试一次")
+            svc_start("opi-control.service")
+            time.sleep(1)
         checks = [("opi-control.service", "远程控制（网页摇杆/键盘）")]
         checks += [(s, "图传推流") for s in STREAM_SERVICES]
         all_ok = True

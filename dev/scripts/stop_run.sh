@@ -160,6 +160,10 @@ if [[ "$MODE" == "status" ]]; then
   info "   看门狗（esc_watchdog.py）：$([[ -n "$wd" ]] && echo "在跑 (pid=$wd)" || echo "不在")"
   info "   停止文件（$STOP_FILE）：$([[ -e "$STOP_FILE" ]] && echo '**存在**（主循环下一帧就会停车）' || echo '不在（正常）')"
   info "   opi-control.service：$(_svc_state opi-control.service)（active = 网页摇杆/键盘现在能让车动）"
+  info "   nginx.service：$(_svc_state nginx.service)（active = 网页本身打得开）"
+  info "   ⚠️ 网页摇杆『没反应』先看这两行：opi-control 不是 active 就是没恢复手动阶段 ——"
+  info "      跑 \`bash $SCRIPTS/car-mode.sh manual\` 或 \`systemctl start opi-control\`；"
+  info "      常见原因：另一个会话正在跑占电机的脚本（如 diag/esc_probe.py）——它会临时停掉 opi-control。"
   info "   ffmpeg-stream(.service/-sub)：$(_svc_state ffmpeg-stream.service) / $(_svc_state ffmpeg-stream-sub.service)"
   exit 0
 fi

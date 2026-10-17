@@ -84,24 +84,6 @@
   · 现场顺序照 §2.8：轮子架空 `--no-motor --cone` 看读数 / `--calibrate --cone` 看锥桶落点 →
     场地慢速 → 才考虑打开默认。绕行油门现场 A/B 档 = 1585/1580/1575/1570（`--cone-speed-us`）。
 
-斑马线相位（`--zebra`，默认关；2026-10-17 加）
--------------------------------------------------
-  · 检测：`vision/zebra_detect.py`（逐行白占比 + 连续行段；**不是**官方"连通域数 ≥4"——车靠近后
-    A4 白条粘连成大块，实测停车那一刻连通域只剩 3 个，那条判据恰好判否）。闸门六道见 settings.ZEBRA_*；
-    实测：停车那一刻横道占行 146~328（0.3m 深度 = 182 行 ⇒ 该段约 1.6mm/行）、白像素 5.4 万；
-    首次可检出在 f194（远边 9 行白），比手推停车点早约 2s。
-  · 相位：**防抖 3 帧** + 发车后 `--zebra-arm-after-s`（默认 3s，防起点白线打头）才认横道 →
-    `zebra-slow`（近边行到 `--zebra-slow-row` 之前照常巡航，到了压蠕速 1560us）→
-    `zebra-stop`（近边行到 `--zebra-stop-row`(+`--zebra-stop-lead-px`) → **断油 1500us + 播报 + 停够 10s**）
-    → 回循迹（**真停过车**才挂"检测先出画 + 冷却"的重挂载闩锁，防同一道横道二进宫；中止不设冷却）。
-  · ★ 本相位**只接管车速**（方向盘仍归循迹/单侧/丢线阶梯——实测横道横在眼前时车道读数 99% 双侧有效）；
-    护栏与丢线停车**优先**于它（`self.stopped` 时一律不干预 ⇒ 绝不会"护栏停了车又被加油门"）。
-    接近段时限 `--zebra-approach-max-s`（默认 12s）到时强制断油保持（防蠕行无尽）。
-  · ★★ **两个行号必须现场卷尺标定**（机位相关 + 这车没有刹车）：默认 240/330 只是**手推视频的落点**；
-    现场流程见 doc/开发文档.md §2.3（`--calibrate --zebra` 定停车行 → A/B 扫 slow_row 与滑行量，
-    日志里每趟都打印"行速率 行/s"）。"30cm 在横道**哪一侧**"待跟裁判确认：默认停在**之前**；
-    若确认要"压过横道停"，用 `--zebra-extra-creep-s 1~2`（不改代码）。
-
 帧率口径（下摄 ≈30fps，自动曝光，亮/暗会 9~30 变）
 ---------------------------------------------------
 控制律全程走 dt：`control/rate.py` 的 `FrameRate` 实测 dt + `PidRef.step(e, dt)` +
@@ -133,18 +115,6 @@
     sudo python3 /root/dev/scripts/lane_final_test.py --no-motor --cone
     sudo python3 /root/dev/scripts/lane_final_test.py --calibrate --cone      # 静止看锥桶落点
 
-    # ⑤c 车上：斑马线相位（--zebra，默认关；车头距横道近边 1~3m，轮子架空/场地空旷）
-    sudo python3 /root/dev/scripts/lane_final_test.py --no-motor --zebra      # 近边行读数 + 叠加图
-    sudo python3 /root/dev/scripts/lane_final_test.py --calibrate --zebra --zebra-calib-write
-    #   ↑ ★ 卷尺标定：把车摆到"裁判认的位置"（车头距横道近边 20~25cm）再跑，
-    #     它打印近边行中位并写回 site.yaml 的 zebra_stop_row（下次运行自动生效）
-
-    # ⑤d 离线验收（换场地/动镜头后必跑）：正样本要恰好触发 N 次（N=视频里的横道条数），
-    #     空赛道要 0 次。定档工具给三张表（顶部亮带/各档触发/停车段参考行）
-    "$PY" scripts/diag/zebra_calibrate.py --pos <横道视频> --neg <空赛道视频>
-    "$PY" scripts/lane_final_test.py --video <当天横道视频> --zebra     → 「相位触发 N 次」
-    "$PY" scripts/lane_final_test.py --video <当天空赛道视频> --zebra   → 「相位触发 0 次」
-
     # ⑥ 车上：正式跑（场地空旷 + 有人持急停；蓝板挡一下再移开 = 发车）
     sudo python3 /root/dev/scripts/lane_final_test.py --allow-motion --max-seconds 120
 
@@ -167,7 +137,6 @@
    ④ 把板挡回下摄正前方**也能停，但不是闸门的功劳**——板挡住画面会丢线，维持 0.6s 后按丢线停车
       （还会往前滑一段）；**闸门发车后即闩锁，没有"再见板即停"**。
    车不停就**直接断电**（AGENTS.md §1.1）。跑完看 `logs/lane_<时间戳>/run.csv`；
-   ⚠️ 斑马线停完 10s 会**自己继续走**（规则要求，不是故障）；要它彻底停走上面 ①②③④ 任一条。
 4. 网页图传全程可用（本脚本只停副摄那一路推流，主摄/网页不受影响）；
 5. 读数不对先跑 ①/② 看叠加图，别在现场猜参数。
 
@@ -202,7 +171,6 @@ from control.rate import REF_FPS, FrameRate
 from vision.camera_guard import camera_exclusive, crop_frame, open_camera
 from vision.cone_detect import ConeBox, ConeDetector, ConeTracker
 from vision.start_gate import StartGate
-from vision.zebra_detect import ZebraDetector, ZebraTracker
 
 # ================================================================ 检测档（1014 素材实测标定）
 # 出处：train/opencv-level1/video/true_track_sub_video/2.mp4（3573 帧 @28.9fps，摄像头固定
@@ -286,23 +254,6 @@ CONE_FIRST_DIR0 = str(settings.CONE_FIRST_DIR)           # 居中时先往哪边
 CONE_IN_LANE_TOL_PX0 = 20.0      # "在车道线内"先验的容差（px）：框的中心两侧各放宽这么多仍算在线内
 CONE_MAX_BOTTOM_Y0 = float(settings.CONE_TRIGGER_MAX_BOTTOM_Y)   # 框底高于它才算"前方锥桶"（0=关）
 
-# ---- 斑马线相位默认值（`--zebra`；全部来自 config/settings.py 的 ZEBRA_*，现场可 CLI 覆盖）
-#   检测档（ROI 上沿/阈值/行占比/连续行/开运算/跨度/像素）已按**裁剪后画面**定档，
-#   证据写在 settings.ZEBRA_GATE_ROI ~ ZEBRA_MIN_PIXELS 的注释里（2026-10-16 现场横道视频）。
-#   ★★ 两个行号（slow/stop）是**机位相关档**，必须现场用卷尺标定（见 doc/开发文档.md §2.3）：
-#   行→距离极度非线性（横道那 0.3m 深度就占 182 行），而且这车**没有刹车**（1500us = 断油滑行）。
-ZEBRA_ROI_TOP0 = float(settings.ZEBRA_GATE_ROI[2])       # 0.26 = 裁剪后 y=100 起
-ZEBRA_SLOW_ROW0 = float(settings.ZEBRA_SLOW_ROW)         # 近边行到它 → 转蠕速（开始准备停）
-ZEBRA_STOP_ROW0 = float(settings.ZEBRA_STOP_ROW)         # 近边行到它 → 断油 + 停够 10s
-ZEBRA_CREEP_US0 = float(settings.ZEBRA_CREEP_US)         # 接近段蠕速（1560；必须 > 死区）
-ZEBRA_HOLD_S0 = float(settings.ZEBRA_STOP_SECONDS)       # 停车保持时长（规则：10s）
-ZEBRA_EXTRA_CREEP_S0 = float(settings.ZEBRA_EXTRA_CREEP_S)   # >0 = 到停车行后再蠕 N 秒（"停在横道之后"变体）
-ZEBRA_APPROACH_MAX_S0 = float(settings.ZEBRA_APPROACH_MAX_S)  # 接近段时限（到时强制断油+保持）
-ZEBRA_ARM_AFTER_S0 = float(settings.ZEBRA_ARM_AFTER_S)   # 发车后多久才认斑马线（防起点白线误触发）
-ZEBRA_COOLDOWN_S0 = float(settings.ZEBRA_COOLDOWN_S)     # 一趟做完后的静默期
-ZEBRA_VOICE0 = str(settings.ZEBRA_VOICE_PATH)            # 停车期间播报的语音文件
-ZEBRA_LOST_GRACE_S = 1.0     # slow 相位里"检测消失"多久算误检（未到停车行前；秒）
-
 
 # ================================================================ 读数
 @dataclass
@@ -347,21 +298,6 @@ class ConeState:
     bottom_y: Optional[float] = None      # 框底行 = 接地点（估距/"在车道内"先验）
     n_boxes: int = 0                      # 本帧原始检出框数（诊断/落盘）
     conf: float = 0.0                     # 最可信那只的 conf
-
-
-@dataclass
-class ZebraState:
-    """一帧的斑马线证据（入口的检测器/防抖器 → 相位机的输入；None = 没开斑马线相位）。
-
-    与 `ConeState` 同构：相位机不碰摄像头、不碰检测器，只做"要不要刹、刹在哪"的仲裁。
-    `near_row`（近边行号，裁剪后画面坐标）是刹停主控信号 —— 行号越大 = 横道离车越近。
-    """
-    present: bool = False                 # 防抖后的结论（ZebraTracker：连续 3 帧进、2 帧出）
-    near_row: Optional[float] = None      # 近边行号（离车最近那条白带的下沿）—— 刹停信号
-    far_row: Optional[float] = None       # 远边行号（诊断）
-    n_rows: int = 0                       # 连续行段长度
-    n_pixels: int = 0                     # 段内白像素总数（强度，诊断）
-    conf: float = 0.0
 
 
 class HalfWidthPrior:
@@ -754,18 +690,7 @@ class LaneRunner:
                  cone_first_dir: str = CONE_FIRST_DIR0,
                  cone_in_lane: bool = True,
                  cone_in_lane_tol_px: float = CONE_IN_LANE_TOL_PX0,
-                 cone_max_bottom_y: float = CONE_MAX_BOTTOM_Y0,
-                 # ---- 斑马线相位（--zebra；默认关 ⇒ 行为与本开关加入前逐位一致）----
-                 zebra_enabled: bool = False,
-                 zebra_slow_row: float = ZEBRA_SLOW_ROW0,
-                 zebra_stop_row: float = ZEBRA_STOP_ROW0,
-                 zebra_stop_lead_px: float = 0.0,
-                 zebra_creep_us: float = ZEBRA_CREEP_US0,
-                 zebra_hold_s: float = ZEBRA_HOLD_S0,
-                 zebra_extra_creep_s: float = ZEBRA_EXTRA_CREEP_S0,
-                 zebra_approach_max_s: float = ZEBRA_APPROACH_MAX_S0,
-                 zebra_arm_after_s: float = ZEBRA_ARM_AFTER_S0,
-                 zebra_cooldown_s: float = ZEBRA_COOLDOWN_S0) -> None:
+                 cone_max_bottom_y: float = CONE_MAX_BOTTOM_Y0) -> None:
         self.det = det
         self.rate = rate
         self.center_deg = float(center_deg)
@@ -820,65 +745,20 @@ class LaneRunner:
         self.cone_aborts = 0                        # 半途中止次数（丢线/停车）
         self.cone_out_lane = 0                      # 被"在车道线内"先验拦下的次数（现场判据是否过严）
         self.cone_too_near = 0                      # 被判"太近、不值当绕"的次数（贴车头/已绕过）
-        # ---- 斑马线相位状态（--zebra 默认关：全部字段只在 zebra_enabled 时被读写）----
-        self.zebra_enabled = bool(zebra_enabled)
-        self.zebra_slow_row = float(zebra_slow_row)     # 近边行到它 → 转蠕速【现场卷尺标定】
-        self.zebra_stop_row = float(zebra_stop_row)     # 近边行到它 → 断油 + 开始计时【现场卷尺标定】
-        self.zebra_stop_lead_px = float(zebra_stop_lead_px)   # 停车行提前量（补偿断油后的滑行）
-        self.zebra_hold_s = float(zebra_hold_s)         # 停够这么久（规则 10s）
-        self.zebra_extra_creep_s = float(zebra_extra_creep_s)   # >0 = 过停车行再蠕 N 秒（"停在横道之后"变体）
-        self.zebra_approach_max_s = float(zebra_approach_max_s)
-        self.zebra_arm_after_s = float(zebra_arm_after_s)
-        self.zebra_cooldown_s = float(zebra_cooldown_s)
-        # 蠕速必须**严格大于**死区：等于/低于死区的"蠕行"实际是停车（会停在半路上）
-        self.zebra_creep_us = max(float(zebra_creep_us), float(settings.ESC_DEADBAND_US) + 1.0)
-        self.zebra_phase: Optional[str] = None      # None / slow / stop
-        self._zebra_t0: Optional[float] = None      # 本相位起始时刻
-        self._zebra_row: Optional[float] = None     # 本帧近边行（None = 本帧没读数）
-        self._zebra_last_seen: Optional[float] = None   # 上一次"看到横道"的时刻（丢检宽限用）
-        self._zebra_stop_reached_at: Optional[float] = None   # 首次到停车行的时刻（extra_creep 计时起点）
-        self._zebra_cooldown_until = -1e9
-        self._zebra_rearm_pending = False           # 收尾后要先"检测消失一次"才允许再触发
-        self._zebra_prev_row: Optional[float] = None
-        self._zebra_prev_t: Optional[float] = None
-        self._zebra_row_rate = 0.0                  # 近边行推进速率（行/s；现场扫 slow_row 就看它）
-        self.zebra_triggers = 0                     # 触发次数（= 进入相位）
-        self.zebra_stops = 0                        # 断油次数（= 播报次数；验收看它）
-        self.zebra_aborts = 0                       # 半途中止次数（检测丢/护栏停车）
-        self.zebra_stop_row_final: Optional[float] = None   # 最后一次断油时的近边行（落盘/复盘用）
 
     # ------------------------------------------------------------ 主步进
     def step(self, now: float, r: Reading, allowed: bool,
-             cone: Optional[ConeState] = None,
-             zebra: Optional[ZebraState] = None) -> ControlOut:
-        """一帧的裁决：斑马线相位机 → 车道/锥桶主体 → 用斑马线的油门覆盖车速。
-
-        为什么这样分层（2026-10-16）：斑马线的任务语义是"**在指定位置把车停下来**"，
-        方向盘仍归循迹（实测横道横在眼前时车道读数 100% 双侧有效，不必接管舵）；
-        所以本相位**只**干两件事：推进相位机（_zebra_advance）+ 覆盖电调脉宽。
-        好处是单侧/弱对/丢线阶梯/护栏全部保持原样 —— 少一条并行控制路径就少一类事故。
-        """
+             cone: Optional[ConeState] = None) -> ControlOut:
         self.frames_total += 1
+        center = self.center_deg
         if not allowed:                       # 发车许可没给（等板/离线前段）
             self.pid.reset()
             if self.err_filter:
                 self.err_filter.reset()
-            return ControlOut("stop", self.center_deg, NEUTRAL_US, None)
+            return ControlOut("stop", center, NEUTRAL_US, None)
         if self.launched_at is None:
             self.launched_at = now
-        if self.zebra_enabled:
-            self._zebra_advance(now, zebra)
-        co = self._step_lane(now, r, cone)
-        zname, zus = self._zebra_out(now)
-        if zname is None:
-            return co
-        return ControlOut(zname, co.angle, (co.out_us if zus is None else zus), co.err_filt,
-                          note=co.note, since_s=co.since_s)
 
-    def _step_lane(self, now: float, r: Reading,
-                   cone: Optional[ConeState]) -> ControlOut:
-        """车道 + 锥桶的原主体（斑马线相位在 `step` 里只覆盖速度，不改这一段）。"""
-        center = self.center_deg
         valid = r.valid and r.quality >= self.min_quality
         ls = self.loss.update(now, valid)
         since_s = 0.0 if valid else (999.0 if ls.since_s == float("inf") else ls.since_s)
@@ -1121,152 +1001,6 @@ class LaneRunner:
                   f"{'中止' if aborted else '完成'}（{why}）→ 回到循迹"
                   f"（冷却 {self.cone_cooldown_s:.1f}s）")
 
-    # ------------------------------------------------------------ 斑马线相位（--zebra）
-    def _zebra_out(self, now: float) -> Tuple[Optional[str], Optional[float]]:
-        """返回 (相位名 or None, 覆盖电调脉宽 or None)。(None, None) = 不干预，照原样走车道/锥桶。
-
-        - `stop` 相位：电调归零（1500us）—— 停够 `zebra_hold_s` 才结束；
-        - `slow` 相位：近边行到 `zebra_slow_row` 之前**不覆盖**（照常巡航，只改相位名），
-          到了才压到蠕速 —— 现场扫 slow_row 时一眼看出"什么时候开始慢的"。
-
-        ★ 已停车（护栏/丢线永久停）时一律不干预：那时该由车道阶梯给 1500，
-        斑马线相位绝不能在这里给油（否则"护栏停了车又被加上油门"）。
-        """
-        if self.zebra_phase is None or self.stopped:
-            return None, None
-        if self.zebra_phase == "stop":
-            return "zebra-stop", NEUTRAL_US
-        row = self._zebra_row
-        if row is not None and row >= self.zebra_slow_row:
-            return "zebra-slow", self.zebra_creep_us
-        return "zebra-slow", None
-
-    def _zebra_advance(self, now: float, zebra: Optional[ZebraState]) -> None:
-        """推进斑马线相位机（触发 → 蠕行 → 断油保温 → 收尾）。只动相位/计时，不碰舵/油门。
-
-        触发条件（全中才算）：防抖成立 + 已发车且过了 `zebra_arm_after_s`（防起点白线打头）
-        + 不在冷却 + 重挂载闩锁已清（上一趟做完后要先"检测消失一次"，防同一道横道二进宫）。
-        中止条件（未到停车行之前）：检测消失超过 `ZEBRA_LOST_GRACE_S`（判误检）、
-        车道护栏/丢线停车（安全优先）、接近段超 `zebra_approach_max_s`（→ 强制断油保持，不算中止）。
-        """
-        if zebra is not None and zebra.near_row is not None:
-            row = float(zebra.near_row)
-            if self._zebra_prev_row is not None and self._zebra_prev_t is not None \
-                    and now > self._zebra_prev_t:
-                rate = (row - self._zebra_prev_row) / (now - self._zebra_prev_t)
-                self._zebra_row_rate = max(0.0, rate)     # 行/s（现场扫档判断"是否高速冲过停车行"）
-            self._zebra_prev_row, self._zebra_prev_t = row, float(now)
-            self._zebra_row = row                         # 粘性：本帧没读数时沿用上一次的（防 1 帧闪断）
-            self._zebra_last_seen = float(now)
-        # ---- 已停车（护栏/丢线）→ 斑马线相位让位 ----
-        if self.stopped:
-            if self.zebra_phase is not None:
-                self._zebra_finish(now, "车道侧停车（护栏/丢线）", aborted=True)
-            return
-        # ---- stop 相位：停够时间 → 收尾回循迹 ----
-        # ⚠️ 取相位起点必须判 `is not None`：**0.0 是合法时刻**（离线回放第一帧 t=0），
-        #   写成 `(self._zebra_t0 or now)` 会让"0.0 进相位"的这一趟永远停不下来（踩过）。
-        if self.zebra_phase == "stop":
-            t0 = self._zebra_t0 if self._zebra_t0 is not None else now
-            if now - t0 >= self.zebra_hold_s:
-                self._zebra_finish(now, f"停够 {self.zebra_hold_s:.1f}s")
-            return
-        # ---- 重挂载闩锁：上一趟"停过车"的横道，必须先看不见了才允许再触发 ----
-        if self._zebra_rearm_pending:
-            if not bool(zebra is not None and zebra.present):
-                self._zebra_rearm_pending = False
-            else:
-                return
-        if now < self._zebra_cooldown_until:
-            return
-        # ---- slow 相位：到停车行/超时 → 断油；检测消失 → 判误检中止 ----
-        if self.zebra_phase == "slow":
-            row = self._zebra_row
-            if row is not None and row + self.zebra_stop_lead_px >= self.zebra_stop_row:
-                if self._zebra_stop_reached_at is None:
-                    self._zebra_stop_reached_at = float(now)
-                    if self.zebra_extra_creep_s > 0:
-                        print(f"[LANE] 🦓 近边行 {row:.0f}（+提前量 {self.zebra_stop_lead_px:.0f}）"
-                              f"≥ 停车行 {self.zebra_stop_row:.0f} → 按 --zebra-extra-creep-s "
-                              f"再蠕行 {self.zebra_extra_creep_s:.1f}s（「停在横道之后」变体）")
-                if now - self._zebra_stop_reached_at >= self.zebra_extra_creep_s:
-                    self._zebra_enter_stop(now)
-                return
-            if now - (self._zebra_t0 if self._zebra_t0 is not None else now) \
-                    >= self.zebra_approach_max_s:
-                print(f"[LANE] ⚠️ 斑马线接近段超过 {self.zebra_approach_max_s:.1f}s 还没到停车行"
-                      f"（近边行 {'—' if row is None else f'{row:.0f}'} / 停车行 "
-                      f"{self.zebra_stop_row:.0f}）→ 强制断油保持")
-                self._zebra_enter_stop(now, forced=True)
-                return
-            if self._zebra_last_seen is None or \
-                    (now - self._zebra_last_seen) > ZEBRA_LOST_GRACE_S:
-                self._zebra_finish(now, f"检测消失 >{ZEBRA_LOST_GRACE_S:.1f}s（未到停车行）",
-                                   aborted=True)
-            return
-        # ---- 触发 ----
-        if not bool(zebra is not None and zebra.present):
-            return
-        if self.launched_at is None or (now - self.launched_at) < self.zebra_arm_after_s:
-            return
-        self.zebra_triggers += 1
-        self.zebra_phase = "slow"
-        self._zebra_t0 = float(now)
-        self._zebra_stop_reached_at = None
-        self.big_err.reset()
-        self.osc.reset()
-        self._single_since = None
-        if self.cone_phase is not None:
-            self._cone_finish(now, "让位斑马线停车", announce=False)
-        row = self._zebra_row
-        print(f"[LANE] 🦓 斑马线（近边行 {'—' if row is None else f'{row:.0f}'}；"
-              f"慢行档 {self.zebra_slow_row:.0f} / 停车行 {self.zebra_stop_row:.0f}）→ 接近："
-              f"先照常巡航，到慢行档转蠕速 {self.zebra_creep_us:.0f}us")
-
-    def _zebra_enter_stop(self, now: float, forced: bool = False) -> None:
-        """到停车行（或接近段超时）→ 断油 + 开始保温计时（播报由入口在计数变化时做）。"""
-        row = self._zebra_row
-        self.zebra_phase = "stop"
-        self._zebra_t0 = float(now)
-        self.zebra_stops += 1
-        self.zebra_stop_row_final = row
-        self.big_err.reset()
-        self.osc.reset()
-        self._single_since = None
-        if self.cone_phase is not None:
-            self._cone_finish(now, "让位斑马线停车", announce=False)
-        print(f"[LANE] 🦓 到停车行（近边行 {'—' if row is None else f'{row:.0f}'}"
-              f"（+提前量 {self.zebra_stop_lead_px:.0f}） vs 停车行 {self.zebra_stop_row:.0f}；"
-              f"行速率 {self._zebra_row_rate:.0f} 行/s）"
-              f"{'（接近段超时，强制）' if forced else ''} → 断油 {NEUTRAL_US:.0f}us，"
-              f"停够 {self.zebra_hold_s:.1f}s（停车期间播报语音）")
-
-    def _zebra_finish(self, now: float, why: str, aborted: bool = False) -> None:
-        """收尾/中止：回循迹 + 冷却；**真停过车**才挂"重挂载闩锁"（见 _zebra_advance 的说明）。
-
-        冷却只在"真停过车"时给：那是为了防同一道横道二进宫（10s 保温都在它前面停着了）。
-        中止（读数断/护栏停车/检测消失）意味着**任务还没做完**，再给 6s 冷却只是白白少一次机会
-        ⇒ 中止只清状态、不设冷却（检测还在就允许重新触发）。
-        """
-        did_stop = self.zebra_phase == "stop"
-        self.zebra_phase = None
-        self._zebra_t0 = None
-        self._zebra_stop_reached_at = None
-        self._zebra_row = None
-        self._zebra_prev_row = self._zebra_prev_t = None
-        self._zebra_row_rate = 0.0
-        if did_stop:
-            self._zebra_cooldown_until = float(now) + self.zebra_cooldown_s
-            self._zebra_rearm_pending = True
-        self._single_since = None
-        self.big_err.reset()
-        self.osc.reset()
-        if aborted:
-            self.zebra_aborts += 1
-        tail = "；重挂载要先等横道出画" if did_stop else "（中止不设冷却：任务还没做完，允许再触发）"
-        print(f"[LANE] 🦓 斑马线相位{'中止' if aborted else '结束'}（{why}）→ 回到循迹"
-              f"（冷却 {self.zebra_cooldown_s:.1f}s{tail}）")
-
     def _guard_check(self, now: float, angle: float, err_filt: Optional[float],
                      err_raw: Optional[float]) -> bool:
         """返回 True = 本帧触发护栏（调用方应立刻回中位停车）。"""
@@ -1288,37 +1022,12 @@ class LaneRunner:
 # ================================================================ 叠加图 / 记录
 def annotate(frame: np.ndarray, r: Optional[Reading], det: LaneFinalDetector,
              phase: str = "", extra: str = "", cones: Optional[Sequence[ConeBox]] = None,
-             target_px: Optional[float] = None,
-             zebra: Optional[ZebraState] = None,
-             zebra_rows: Optional[Tuple[float, float]] = None,
-             zebra_roi_top: float = 0.0) -> np.ndarray:
+             target_px: Optional[float] = None) -> np.ndarray:
     vis = frame.copy()
     h, w = vis.shape[:2]
     for y, color in ((det.y_top, (255, 128, 0)), (det.y_bot, (255, 128, 0)),
                      (det.look_top, (0, 200, 255)), (det.look_bot, (0, 200, 255))):
         cv2.line(vis, (0, int(y)), (w, int(y)), color, 1)
-    # ---- 斑马线：ROI 上沿（青）/ 慢行档（黄）/ 停车行（红）三条横线 + 本帧白带框 ----
-    if zebra_rows is not None:
-        slow_row, stop_row = zebra_rows
-        y_roi = int(h * zebra_roi_top)
-        cv2.line(vis, (0, y_roi), (w, y_roi), (200, 200, 0), 1)
-        cv2.line(vis, (0, int(slow_row)), (w, int(slow_row)), (0, 220, 220), 1)
-        cv2.line(vis, (0, int(stop_row)), (w, int(stop_row)), (0, 0, 255), 1)
-        cv2.putText(vis, f"zebra ROI/slow{int(slow_row)}/stop{int(stop_row)}",
-                    (6, max(12, y_roi + 12)), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 0), 2)
-    if zebra is not None and zebra.near_row is not None:
-        x0, x1 = 0, w
-        cv2.rectangle(vis, (x0, int(zebra.far_row or 0)), (x1, int(zebra.near_row)),
-                      (0, 0, 255), 1)
-        cv2.line(vis, (0, int(zebra.near_row)), (w, int(zebra.near_row)), (0, 0, 255), 2)
-        cv2.putText(vis, f"zebra near={zebra.near_row:.0f} far={zebra.far_row:.0f} "
-                         f"rows={zebra.n_rows} px={zebra.n_pixels}",
-                    (6, min(h - 6, int(zebra.near_row) + 14)),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 3)
-        cv2.putText(vis, f"zebra near={zebra.near_row:.0f} far={zebra.far_row:.0f} "
-                         f"rows={zebra.n_rows} px={zebra.n_pixels}",
-                    (6, min(h - 6, int(zebra.near_row) + 14)),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 255), 1)
     if cones:
         for c in cones:                      # 锥桶候选框（橙）+ 中心/底边（选绕行侧与估距用）
             x0, y0, x1, y1 = (int(v) for v in c.xyxy)
@@ -1517,88 +1226,6 @@ def cone_filter_in_lane(r: Optional[Reading], cones: Sequence[ConeBox],
     return kept, len(cones) - len(kept)
 
 
-# ================================================================ 斑马线相位的入口侧（检测/防抖/统计）
-def zebra_setup(args) -> Tuple[Optional[ZebraDetector], Optional[ZebraTracker]]:
-    """按 CLI/settings 建斑马线检测器与防抖器（`--zebra` 关时返回 (None, None) = 零开销）。
-
-    检测器**复用** `vision/zebra_detect.py`（不复制）：逐行白占比 → 连续行段 → 闸门
-    （横向开运算/行占比/段长/跨度/像素数），防抖 = `ZebraTracker`（连续 3 帧进、2 帧出）。
-    ROI 上沿/阈值/闸门都留了现场覆盖参数（机位相关）。
-    """
-    if not getattr(args, "zebra", False):
-        return None, None
-    roi = (float(settings.ZEBRA_GATE_ROI[0]), float(settings.ZEBRA_GATE_ROI[1]),
-           float(args.zebra_roi_top), float(settings.ZEBRA_GATE_ROI[3]))
-    det = ZebraDetector(roi=roi, thresh=args.zebra_thresh,
-                        s_max=getattr(args, "zebra_s_max", None),
-                        row_frac=getattr(args, "zebra_row_frac", None),
-                        min_rows=getattr(args, "zebra_min_rows", None))
-    trk = ZebraTracker()
-    crop_y = int(getattr(settings, "FRAME_CROP_LINE_Y", 0) or 0)
-    print(f"[LANE] 斑马线检测：灰度>{det.thresh} 且 S≤{det.s_max} ROI x{roi[0]:.2f}~{roi[1]:.2f} / "
-          f"y{roi[2]:.2f}~{roi[3]:.2f}"
-          + (f"（= 裁剪后画面 y{int(roi[2] * crop_y)} 起）" if crop_y else "")
-          + f" | 行白占比≥{det.row_frac:.2f} 连续≥{det.min_rows} 行 | 横向开运算 "
-          f"{det.min_run_px}px | 跨度≥{det.min_width_frac:.2f}×ROI宽 | 白像素≥{det.min_pixels}"
-          f" | 防抖 {trk.enter_frames}/{trk.exit_frames} 帧")
-    if int(roi[2] * (crop_y or 384)) <= int(settings.FRAME_CROP_LINE_Y * 0.28):
-        print("[LANE] ⚠️ ROI 上沿开得比定档值(0.26)还浅：画面顶部那条「远景亮带」"
-              "（赛道尽头/围栏，每帧都在）可能落进来 → 会每帧误触发，先跑 "
-              "scripts/diag/zebra_calibrate.py 复量")
-    return det, trk
-
-
-def zebra_state_of(tracker: Optional[ZebraTracker],
-                   hit) -> Optional[ZebraState]:
-    """本帧的斑马线证据（防抖结论 + 近边/远边行号）；没开 = None。"""
-    if tracker is None:
-        return None
-    present = tracker.update(hit)
-    last = tracker.last
-    return ZebraState(present=present,
-                      near_row=(last.near_row if last is not None else None),
-                      far_row=(last.far_row if last is not None else None),
-                      n_rows=(last.n_rows if last is not None else 0),
-                      n_pixels=(last.n_pixels if last is not None else 0),
-                      conf=(last.conf if last is not None else 0.0))
-
-
-def zebra_summary_line(flags: Sequence[bool], runner: "LaneRunner",
-                       rows: Optional[Sequence[Optional[float]]] = None) -> str:
-    """斑马线统计一行（验收就看"相位触发 N 次"：正样本 = 视频里的横道次数；空赛道 = 0）。
-
-    `flags` = 逐帧"检测器出没出读数"（诊断用，不等于触发——触发要过防抖+武装期）。
-    `rows` = 逐帧近边行（可选）：给"横道落在哪几行/行速率"的现场判据。
-    """
-    n = len(flags)
-    hits = sum(1 for f in flags if f)
-    runs, cur = [], 0
-    for f in flags:
-        if f:
-            cur += 1
-        else:
-            if cur:
-                runs.append(cur)
-            cur = 0
-    if cur:
-        runs.append(cur)
-    tail = ""
-    if runner.zebra_triggers == 0:
-        tail = "  ✅ 零触发（空赛道验收看这个）"
-    rng = ""
-    vals = [v for v in (rows or []) if v is not None]
-    if vals:
-        rng = f" | 近边行 p05~p95 {np.percentile(vals, 5):.0f}~{np.percentile(vals, 95):.0f}" \
-              f"（最大 {max(vals):.0f}）"
-    stop = (f" | 末次断油近边行 "
-            f"{'—' if runner.zebra_stop_row_final is None else f'{runner.zebra_stop_row_final:.0f}'}"
-            if runner.zebra_stops else "")
-    return (f"[LANE] 斑马线（--zebra）：命中 {hits}/{n} 帧（{hits / max(1, n) * 100:.1f}%）"
-            f" | 最长连续 {max(runs) if runs else 0} 帧"
-            f" | 相位触发 {runner.zebra_triggers} 次 / 断油 {runner.zebra_stops} 次"
-            f" / 中止 {runner.zebra_aborts} 次{stop}{rng}{tail}")
-
-
 def cone_summary_line(flags: Sequence[bool], n_boxes: int, runner: "LaneRunner",
                       rejected: int = 0) -> str:
     """锥桶统计一行（§2.8 的"空赛道零触发"验收就看这一行的"相位触发 N 次"）。"""
@@ -1784,17 +1411,6 @@ def run_offline(args, det: LaneFinalDetector, center_deg: float, sign: float,
     cone_flags: List[bool] = []
     cone_boxes_total = 0
     cone_rejected = 0
-    zebra_det, zebra_tracker = zebra_setup(args)
-    zebra_flags: List[bool] = []
-    zebra_rows_seen: List[Optional[float]] = []
-    if zebra_det is not None:
-        # ★ 离线回放：斑马线相位**按"只看触发/落点"口径**跑 —— 保持时长与冷却都置 0。
-        #   为什么：离线时间轴是"帧号/fps"，停 10s 会白吃掉视频里 10s 的行程，
-        #   第二道横道就落进冷却里（正样本验收会数成 1 次而不是 2 次）。10s 保温由单测+现场覆盖。
-        runner.zebra_hold_s = 0.0
-        runner.zebra_cooldown_s = 0.0
-        print("[LANE] 斑马线（离线回放口径）：保持时长与冷却按 0 处理"
-              "（只看触发次数与落点行；10s 保温见 tests/test_lane_final_zebra.py 与现场验收）")
     montage_every = args.montage
     thumbs: List[np.ndarray] = []
     sheet_no = 0
@@ -1809,18 +1425,13 @@ def run_offline(args, det: LaneFinalDetector, center_deg: float, sign: float,
         if cone_det is not None and runner.cone_in_lane:
             cones, _rej = cone_filter_in_lane(r, cones, det.y_ref, runner.cone_in_lane_tol_px)
             cone_rejected += _rej
-        zhit = zebra_det.detect(frame) if zebra_det is not None else None
         det_ms.append(time.perf_counter() - t_frame)
         now = k / fps                       # 离线时间轴（秒）
         ci = cone_state_of(cone_tracker, cones)
-        zi = zebra_state_of(zebra_tracker, zhit)
-        if zi is not None:
-            zebra_flags.append(zhit is not None)
-            zebra_rows_seen.append(zi.near_row)
         if ci is not None:
             cone_flags.append(bool(cones))
             cone_boxes_total += len(cones)
-        co = runner.step(now, r, allowed=True, cone=ci, zebra=zi)
+        co = runner.step(now, r, allowed=True, cone=ci)
         rows.append(r)
         centers.append(r.center_x)
         phases.append(co.phase)
@@ -1831,14 +1442,9 @@ def run_offline(args, det: LaneFinalDetector, center_deg: float, sign: float,
                   f"R={r.n_r:2d}({r.score_r:4.1f}) c={_fmt(r.center_x) or '—':>5} "
                   f"err={_fmt(r.error) or '—':>6} ang={co.angle:.1f} us={co.out_us:.0f} {r.tag}"
                   + (f" cone={len(cones)}{'*' if ci and ci.present else ''}"
-                     if cone_det is not None else "")
-                  + (f" zebra={'—' if zi is None or zi.near_row is None else f'{zi.near_row:.0f}'}"
-                     f"{'*' if zi and zi.present else ''}" if zebra_det is not None else ""))
+                     if cone_det is not None else ""))
         ann = (lambda fr: annotate(fr, r, det, co.phase, cones=cones,
-                                   target_px=det.target_x + runner.cone_target_offset(),
-                                   zebra=(zi if (zi is not None and zi.present) else None),
-                                   zebra_rows=(runner.zebra_slow_row, runner.zebra_stop_row),
-                                   zebra_roi_top=zebra_det.roi[2] if zebra_det else 0.0))
+                                   target_px=det.target_x + runner.cone_target_offset()))
         if args.every and idx % args.every == 0:
             cv2.imwrite(os.path.join(out_dir, f"f_{idx:06d}.jpg"), ann(frame),
                         [cv2.IMWRITE_JPEG_QUALITY, 90])
@@ -1854,8 +1460,6 @@ def run_offline(args, det: LaneFinalDetector, center_deg: float, sign: float,
     lines = summarize(rows, centers, phases, det_ms)
     if cone_tracker is not None:
         lines.append(cone_summary_line(cone_flags, cone_boxes_total, runner, cone_rejected))
-    if zebra_tracker is not None:
-        lines.append(zebra_summary_line(zebra_flags, runner, zebra_rows_seen))
     if runner.guard_trips:
         lines.append(f"[LANE] 护栏/超时触发：{runner.guard_trips} 次"
                      f"（画龙/跑偏/探路超时；离线复跑用于回归）")
@@ -1907,9 +1511,6 @@ def run_online_calibrate(args, det: LaneFinalDetector) -> int:
     cone_det, cone_tracker = cone_setup(args)        # --calibrate --cone：看锥桶落在画面哪几行
     cone_flags: List[bool] = []
     cone_pick: List[ConeBox] = []
-    zebra_det, zebra_tracker = zebra_setup(args)     # --calibrate --zebra：卷尺标定停车行
-    zebra_flags: List[bool] = []
-    zebra_pick: list = []
     with camera_exclusive(services=("ffmpeg-stream-sub.service",)):
         cap = open_camera(args.cam, settings.IMG_W, settings.IMG_H, fourcc="MJPG")
         if cap is None:
@@ -1934,12 +1535,6 @@ def run_online_calibrate(args, det: LaneFinalDetector) -> int:
                     cone_flags.append(bool(cones))
                     if cones:
                         cone_pick.append(cones[0])
-                if zebra_det is not None:
-                    zh = zebra_det.detect(frame)
-                    zebra_state_of(zebra_tracker, zh)
-                    zebra_flags.append(zh is not None)
-                    if zh is not None:
-                        zebra_pick.append(zh)
         finally:
             cap.release()
     clear_stop_file(getattr(args, "stop_file", ""), "标定结束")
@@ -1991,38 +1586,6 @@ def run_online_calibrate(args, det: LaneFinalDetector) -> int:
             print(f"[LANE] ✅ 已写回 {path} 的 target_x = {round(med, 1)}（A 路径与以后运行都会用它）")
         except Exception as exc:
             print(f"[LANE] ⚠️ 写 site.yaml 失败（不影响本次打印的结果）：{exc}")
-    if zebra_det is not None:
-        n_hit, n_tot = sum(1 for f in zebra_flags if f), max(1, len(zebra_flags))
-        print(f"[LANE] 斑马线读数（--zebra）：命中 {n_hit}/{n_tot} 帧（{n_hit / n_tot * 100:.0f}%）"
-              + ("——画面里没有横道就别在意；**有横道却 0 命中** = ROI/阈值要现场重标"
-                 "（scripts/diag/zebra_calibrate.py）" if n_hit == 0 else ""))
-        # ★ 现场标定停车行：把车**摆到裁判认的那个位置**（卷尺：车头距横道近边 <30cm），
-        #   车身别动，跑这一条 → 打印近距离边行号；--zebra-calib-write 直接写 site.yaml。
-        if zebra_pick:
-            nrs = np.asarray([z.near_row for z in zebra_pick], dtype=float)
-            frs = np.asarray([z.far_row for z in zebra_pick], dtype=float)
-            pxs = np.asarray([z.n_pixels for z in zebra_pick], dtype=float)
-            med_row = float(np.median(nrs))
-            print(f"[LANE]   近边行 中位 **{med_row:.0f}**（p05~p95 {np.percentile(nrs, 5):.0f}~"
-                  f"{np.percentile(nrs, 95):.0f}；远边行中位 {np.median(frs):.0f}；"
-                  f"白像素中位 {np.median(pxs):.0f}）")
-            print(f"[LANE]   ⇒ 这就是「车头停在当前摆位」对应的停车行："
-                  f"`--zebra-stop-row {med_row:.0f}`"
-                  f"（当前值 {args.zebra_stop_row:.0f}"
-                  f"，慢行档 {args.zebra_slow_row:.0f}）")
-            print("[LANE]   ⚠️ 还要留**断油后的滑行量**：这车没有刹车（1500us=断油），"
-                  "真跑时按 A/B 把停车行往小调（先试 −20，见 doc/开发文档.md §2.3 扫档法）")
-            if args.zebra_calib_write:
-                try:
-                    from config import site as _site
-                    path = _site.save({"zebra_stop_row": round(med_row, 1)})
-                    print(f"[LANE] ✅ 已写回 {path} 的 zebra_stop_row = {round(med_row, 1)}"
-                          f"（下次运行自动生效；这是**机位相关档**，动镜头/换场地要重标）")
-                except Exception as exc:
-                    print(f"[LANE] ⚠️ 写 site.yaml 失败（不影响本次打印的结果）：{exc}")
-        else:
-            print("[LANE]   ⚠️ 一段都没检出横道 → 把车摆到「车头距横道近边 20~25cm」再跑，"
-                  "或先确认 ROI 上沿/阈值（scripts/diag/zebra_calibrate.py）")
     return 0
 
 
@@ -2171,6 +1734,27 @@ def sync_disk() -> None:
         pass
 
 
+def _disarm_watchdog_if_safe(wd, state: dict, use_motor: bool, st: dict) -> bool:
+    """电调确认安全 → 解除看门狗；否则**留着它**（1s 内它会强写 1500us）。幂等。
+
+    返回"看门狗是否真触发过"（True 会让收尾打印告警）。
+    为什么要回调式（2026-10-17 现场假报警）：恢复服务要 `sleep 2`，而看门狗 1s 就超时 ⇒ 一次
+    **成功的**收尾也会把它点着（日志报「看门狗触发过（主控卡死/被杀）」+ 它去写一次 I2C，
+    与 opi-control 启动抢总线）。所以电调一归零就立刻解除它，别等服务恢复。
+    """
+    if wd is None or st.get("done") or st.get("kept"):
+        return bool(st.get("kept"))
+    if (not use_motor) or state.get("motor_safe") is True:
+        code = _try(wd.stop, what="收掉看门狗")      # 电调已归零 → 才解除看门狗
+        st["done"] = True
+        st["code"] = code
+        return code in (2, 3)                        # 2/3 = 心跳真停过并写了安全值
+    st["kept"] = True
+    print("[LANE] ⚠️⚠️ 电调归零失败 → **不解除看门狗**：1s 内它会强写 1500us"
+          "（等它，别断电；车若还在动就断电）")
+    return True
+
+
 def _try(fn, *a, what: str = "", **k):
     """收尾步骤的"绝不抛"包装：任何一步失败都不许挡住后面的步骤。
 
@@ -2239,20 +1823,6 @@ def run_online(args, det: LaneFinalDetector, center_deg: float, sign: float,
     cone_flags: List[bool] = []
     cone_boxes_total = 0
     cone_rejected = 0
-    zebra_det, zebra_tracker = zebra_setup(args)   # --zebra 关 → (None, None)，零开销
-    zebra_flags: List[bool] = []
-    zebra_rows_seen: List[Optional[float]] = []
-    # ★ 语音播报（规则要求：停车期间播报队名；未播报加罚）：**非阻塞** ffplay 后台进程，
-    #   在"断油那一刻"放一次（zebra_stops 计数变化触发），播不出来会补试一次并打警告。
-    voice = None
-    if zebra_det is not None and args.zebra_voice_on:
-        try:
-            from hardware.audio import AudioPlayer
-            voice = AudioPlayer(audio_path=args.zebra_voice)
-        except Exception as exc:                            # noqa: BLE001
-            print(f"[LANE] ⚠️ 语音播放器没起来（{exc}）：斑马线停车将**不播报**")
-    _zebra_stops_seen = 0
-    _zebra_voice_retry_at = -1e9
     if args.save_every_s > 0:
         print(f"[LANE] 存图：每 {args.save_every_s:.1f}s 一张（最多 {args.save_max} 张 → "
               f"覆盖 {args.save_every_s * args.save_max:.0f}s；不够就调 --save-max）")
@@ -2277,7 +1847,6 @@ def run_online(args, det: LaneFinalDetector, center_deg: float, sign: float,
             "save_max": args.save_max, "allow_motion": use_motor,
             "stop_file": stop_file, "launch": selfchk,
             "cone": {"enabled": bool(args.cone)},
-            "zebra": {"enabled": bool(args.zebra)},
         },
         "result": None,
     }
@@ -2293,23 +1862,6 @@ def run_online(args, det: LaneFinalDetector, center_deg: float, sign: float,
             "hsv_low": args.cone_hsv_low or list(settings.CONE_BLUE_HSV_LOW),
             "hsv_high": args.cone_hsv_high or list(settings.CONE_BLUE_HSV_HIGH),
             "min_h": args.cone_min_h if args.cone_min_h is not None else settings.CONE_MIN_H,
-        })
-    if args.zebra:
-        sess["params"]["zebra"].update({
-            "roi_top": args.zebra_roi_top, "thresh": args.zebra_thresh,
-            "s_max": zebra_det.s_max if zebra_det else None,
-            "row_frac": zebra_det.row_frac if zebra_det else None,
-            "min_rows": zebra_det.min_rows if zebra_det else None,
-            "min_run_px": zebra_det.min_run_px if zebra_det else None,
-            "min_width_frac": zebra_det.min_width_frac if zebra_det else None,
-            "min_pixels": zebra_det.min_pixels if zebra_det else None,
-            "slow_row": runner.zebra_slow_row, "stop_row": runner.zebra_stop_row,
-            "stop_lead_px": runner.zebra_stop_lead_px, "creep_us": runner.zebra_creep_us,
-            "hold_s": runner.zebra_hold_s, "extra_creep_s": runner.zebra_extra_creep_s,
-            "approach_max_s": runner.zebra_approach_max_s,
-            "arm_after_s": runner.zebra_arm_after_s, "cooldown_s": runner.zebra_cooldown_s,
-            "voice": (args.zebra_voice if (voice is not None) else ""),
-            "voice_on": bool(voice is not None),
         })
     phase_counts: dict = {}
 
@@ -2346,20 +1898,6 @@ def run_online(args, det: LaneFinalDetector, center_deg: float, sign: float,
               "（首帧被切就 --cone-roi-top 0.05）；现场顺序照 doc §2.8（架空看读数 → 场地慢速 → 才开默认）")
     else:
         print("[LANE] 锥桶相位：关（--cone 打开；不开 = 与 10-15 现场验证过的版本一致）")
-    if args.zebra:
-        print(f"[LANE] 斑马线相位：开（慢行档 {runner.zebra_slow_row:.0f} → 蠕速 "
-              f"{runner.zebra_creep_us:.0f}us → 停车行 {runner.zebra_stop_row:.0f}"
-              f"（+提前量 {runner.zebra_stop_lead_px:.0f}）→ 断油停够 "
-              f"{runner.zebra_hold_s:.1f}s + 播报"
-              + (f"（{args.zebra_voice}）" if voice is not None else "（⚠️ 未挂播放器：不播报）")
-              + " | 发车后 " + f"{runner.zebra_arm_after_s:.0f}s 才认横道"
-              + (f" | 过停车行再蠕 {runner.zebra_extra_creep_s:.1f}s（停在横道之后变体）"
-                 if runner.zebra_extra_creep_s > 0 else "") + "）")
-        print("[LANE] ⚠️ 两个行号是**机位相关档 + 卷尺标定档**：把车摆到目标位置跑 "
-              "`--calibrate --zebra [--zebra-calib-write]` 得到 zebra_stop_row；"
-              "换场地/动镜头后重跑 scripts/diag/zebra_calibrate.py 定检测档")
-    else:
-        print("[LANE] 斑马线相位：关（--zebra 打开；不开 = 与 10-15 现场验证过的版本一致）")
     _crop = int(getattr(settings, "FRAME_CROP_LINE_Y", 0) or 0)
     print(f"[LANE] 画面裁剪：保留 y<{_crop}（车盖不入画；闸门/检测/存图同源）"
           if _crop else "[LANE] 画面裁剪：关闭（settings.FRAME_CROP_LINE_Y=0）")
@@ -2437,25 +1975,7 @@ def run_online(args, det: LaneFinalDetector, center_deg: float, sign: float,
                         if ci is not None:
                             cone_flags.append(bool(cones))
                             cone_boxes_total += len(cones)
-                        zhit = zebra_det.detect(frame) if zebra_det is not None else None
-                        zi = zebra_state_of(zebra_tracker, zhit)
-                        if zi is not None:
-                            zebra_flags.append(zhit is not None)
-                            zebra_rows_seen.append(zi.near_row)
-                        co = runner.step(now, r, allowed, cone=ci, zebra=zi)
-                        # ★ 断油那一刻播报一次（计数变化 = 新一次停车）；播不出来 1s 后补试一次
-                        if voice is not None and runner.zebra_stops > _zebra_stops_seen:
-                            _zebra_stops_seen = runner.zebra_stops
-                            _zebra_voice_retry_at = now + 1.0
-                            ok_play = voice.play()
-                            print(f"[LANE] 🔊 播报{'…' if ok_play else '（没起来，1s 后补试）'}"
-                                  f"：{args.zebra_voice}", flush=True)
-                        elif voice is not None and _zebra_voice_retry_at > 0 \
-                                and now >= _zebra_voice_retry_at and runner.zebra_phase == "stop":
-                            _zebra_voice_retry_at = -1e9
-                            if not voice.is_playing():
-                                print(f"[LANE] 🔊 补试播放：{'成功' if voice.play() else '仍失败'}"
-                                      f"（{args.zebra_voice}）", flush=True)
+                        co = runner.step(now, r, allowed, cone=ci)
                         if use_motor and pca is not None:
                             pca.set_steering_angle(co.angle)
                             pca.write_us(pca.CH_ESC, co.out_us)
@@ -2468,11 +1988,7 @@ def run_online(args, det: LaneFinalDetector, center_deg: float, sign: float,
                             vis = annotate(frame, r, det, co.phase,
                                            extra=f"ang={co.angle:.1f} esc={co.out_us:.0f}",
                                            cones=cones,
-                                           target_px=det.target_x + runner.cone_target_offset(),
-                                           zebra=(zi if (zi is not None and zi.present) else None),
-                                           zebra_rows=(runner.zebra_slow_row,
-                                                       runner.zebra_stop_row),
-                                           zebra_roi_top=(zebra_det.roi[2] if zebra_det else 0.0))
+                                           target_px=det.target_x + runner.cone_target_offset())
                             last_vis = vis
                             rec.maybe_save(t_rel, frame, vis)
                         frames += 1
@@ -2483,11 +1999,7 @@ def run_online(args, det: LaneFinalDetector, center_deg: float, sign: float,
                                   f"c={_fmt(r.center_x) or '—':>5} err={_fmt(r.error) or '—':>6} "
                                   f"ang={co.angle:.1f} us={co.out_us:.0f} q={r.quality:.2f} {r.tag}"
                                   + (f" cone={len(cones)}{'*' if ci and ci.present else ''}"
-                                     if cone_det is not None else "")
-                                  + (f" zebra="
-                                     f"{'—' if zi is None or zi.near_row is None else f'{zi.near_row:.0f}'}"
-                                     f"{'*' if zi and zi.present else ''}"
-                                     if zebra_det is not None else ""))
+                                     if cone_det is not None else ""))
                         if stop_requested(state, stop_file):
                             break
                         if args.max_seconds > 0 and t_rel >= args.max_seconds:
@@ -2517,18 +2029,14 @@ def run_online(args, det: LaneFinalDetector, center_deg: float, sign: float,
         if args.save_dir:
             exit_log = detach_std_if_broken(os.path.join(args.save_dir, "exit.log"))
         _try(rec.close, what="关 CSV")
+        wd_state: dict = {"done": False, "kept": False, "code": None}
         if use_motor:
-            _try(restore_remote_stage, state, "run_online 退出", what="恢复远程控制阶段")
-        if wd is not None:
-            if (not use_motor) or state.get("motor_safe") is True:
-                wd_code = _try(wd.stop, what="收掉看门狗")   # 电调已归零 → 才解除看门狗
-                wd_tripped = wd_code in (2, 3)               # 2/3 = 心跳停过并写了安全值
-            else:
-                # ★ 电调没归零 → **绝不解除看门狗**：心跳不再更新，它 1s 内会强写 1500us + 舵机回中。
-                #   现场 10-17：这里被跳过 ⇒ 安全网被自家解除武装 ⇒ 车跑到断电。
-                wd_tripped = True
-                print("[LANE] ⚠️⚠️ 电调归零失败 → **不解除看门狗**：1s 内它会强写 1500us"
-                      "（等它，别断电；车若还在动就断电）")
+            # 电调一归零就立刻解除看门狗（on_motor_safe 在恢复服务的 2s 等待之前回调），
+            # 否则成功的收尾也会把看门狗点着（现场 10-17 假报警 + 与 opi-control 抢 I2C）。
+            _try(restore_remote_stage, state, "run_online 退出",
+                 on_motor_safe=(lambda _ok: _disarm_watchdog_if_safe(wd, state, use_motor, wd_state)),
+                 what="恢复远程控制阶段")
+        wd_tripped = _disarm_watchdog_if_safe(wd, state, use_motor, wd_state)   # 幂等兜底
         if exit_log:
             print(f"[LANE] 收尾输出已被接管到 {exit_log}（stdout 管道断了）")
         # 结果落进 session.json（含着陆原因、相位分布、末帧读数）——复盘不依赖 stdout
@@ -2548,18 +2056,9 @@ def run_online(args, det: LaneFinalDetector, center_deg: float, sign: float,
                      "triggers": runner.cone_triggers, "aborts": runner.cone_aborts,
                      "out_lane": runner.cone_out_lane + cone_rejected,
                      "too_near": runner.cone_too_near},
-            "zebra": {"frames": len(zebra_flags),
-                      "hits": sum(1 for f in zebra_flags if f),
-                      "triggers": runner.zebra_triggers, "stops": runner.zebra_stops,
-                      "aborts": runner.zebra_aborts,
-                      "stop_row_final": runner.zebra_stop_row_final,
-                      "voice_played": bool(_zebra_stops_seen > 0 and voice is not None),
-                      "voice": (args.zebra_voice if voice is not None else "")},
         }
         _try(_dump_sess, what="落 session.json")
         _try(sync_disk, what="sync 落盘")            # commit=600：不 sync，断电就丢
-        if voice is not None:
-            _try(voice.stop, what="停语音")        # 退出路径：别让语音盖住以后的调试
     fps_end = runner.rate.fps
     print(f"[LANE] 结束：{frames} 帧 | 有效跟线 {runner.frames_ok} 帧 "
           f"| 护栏/超时 {runner.guard_trips} 次 | 末帧率 {fps_end:.1f}")
@@ -2567,11 +2066,6 @@ def run_online(args, det: LaneFinalDetector, center_deg: float, sign: float,
           f"（osc=画龙 / big-err=跑偏 / lost=丢线）| 相位分布={dict(sorted(phase_counts.items()))}")
     if args.cone:
         print(cone_summary_line(cone_flags, cone_boxes_total, runner, cone_rejected))
-    if args.zebra:
-        print(zebra_summary_line(zebra_flags, runner, zebra_rows_seen))
-        if runner.zebra_stops and voice is not None and _zebra_stops_seen != runner.zebra_stops:
-            print(f"[LANE] ⚠️ 断油 {runner.zebra_stops} 次但只播报了 {_zebra_stops_seen} 次"
-                  f"（看上面 🔊 行是不是失败）")
     if wd_tripped:
         print("[LANE] ⚠️ 这一趟看门狗触发过（主控卡死/被杀）——务必看它打印的 🔛 那几行！")
     print(f"[LANE] 回实验室看：{rec.csv_path} + session.json"
@@ -2692,48 +2186,6 @@ def build_parser() -> argparse.ArgumentParser:
     cn.add_argument("--cone-min-h", type=int, default=None,
                     help=f"锥桶框最小高（px；默认 settings.CONE_MIN_H={settings.CONE_MIN_H}）")
 
-    zb = ap.add_argument_group("斑马线相位（--zebra；检测器复用 vision/zebra_detect.py；默认关）")
-    zb.add_argument("--zebra", action="store_true",
-                    help="打开斑马线相位（识别 → 蠕行 → 断油停够 10s + 播报 → 继续循迹；默认关）")
-    zb.add_argument("--zebra-slow-row", type=float, default=ZEBRA_SLOW_ROW0,
-                    help="近边行到它 → 转蠕速（**现场卷尺标定**，见 doc/开发文档.md §2.3）")
-    zb.add_argument("--zebra-stop-row", type=float, default=ZEBRA_STOP_ROW0,
-                    help="近边行到它 → 断油 + 开始停够 10s（**现场卷尺标定**；默认=手推视频落点）")
-    zb.add_argument("--zebra-stop-lead-px", type=float, default=0.0,
-                    help="停车行提前量（px；补偿断油后的滑行。车没有刹车，滑行距离靠现场 A/B 定）")
-    zb.add_argument("--zebra-creep-us", type=float, default=ZEBRA_CREEP_US0,
-                    help="接近段蠕速脉宽（必须 > 死区；默认 = ESC_CREEP_US 1560）")
-    zb.add_argument("--zebra-hold-s", type=float, default=ZEBRA_HOLD_S0,
-                    help="停车保持时长（秒；规则 10s。离线回放按 0 处理，见 run_offline）")
-    zb.add_argument("--zebra-extra-creep-s", type=float, default=ZEBRA_EXTRA_CREEP_S0,
-                    help="到停车行后再蠕行 N 秒才断油（秒；>0 = 「停在横道**之后**」变体，"
-                         "规则图 9 的 30cm 红框画在横道之后、现场待复核，见 §2.3）")
-    zb.add_argument("--zebra-approach-max-s", type=float, default=ZEBRA_APPROACH_MAX_S0,
-                    help="接近段时限（秒；到时强制断油+保持，防蠕行无尽）")
-    zb.add_argument("--zebra-arm-after-s", type=float, default=ZEBRA_ARM_AFTER_S0,
-                    help="发车后多久才开始认斑马线（秒；防起点白线/画线打头误触发）")
-    zb.add_argument("--zebra-cooldown-s", type=float, default=ZEBRA_COOLDOWN_S0,
-                    help="一趟结束后的静默期（秒；还要叠'检测先出画'才重挂载）")
-    zb.add_argument("--zebra-roi-top", type=float, default=ZEBRA_ROI_TOP0,
-                    help="斑马线 ROI 上沿（**裁剪后**画面比例；2026-10-16 现场视频定档 0.26："
-                         "避开画面顶部那条每帧都在的「远景亮带」，空赛道零触发）")
-    zb.add_argument("--zebra-thresh", type=int, default=int(settings.ZEBRA_GRAY_THRESH),
-                    help="灰度阈值（默认 200：白纸被打爆 242+、而塑料膜/地面炫光只有 ~195）")
-    zb.add_argument("--zebra-s-max", type=int, default=None,
-                    help=f"白的饱和度上限（0=不看；默认 settings.ZEBRA_S_MAX="
-                         f"{settings.ZEBRA_S_MAX}。**阳光直晒的红跑道面**会越过灰度阈值，靠它压掉）")
-    zb.add_argument("--zebra-row-frac", type=float, default=None,
-                    help=f"单行白占比下限（默认 settings.ZEBRA_ROW_FRAC={settings.ZEBRA_ROW_FRAC}）")
-    zb.add_argument("--zebra-min-rows", type=int, default=None,
-                    help=f"连续行段长度下限（默认 settings.ZEBRA_MIN_ROWS={settings.ZEBRA_MIN_ROWS}）")
-    zb.add_argument("--zebra-voice", default=ZEBRA_VOICE0,
-                    help="停车期间播报的语音文件（默认 /root/dev/voice/aa.mp3）")
-    zb.add_argument("--no-zebra-voice", dest="zebra_voice_on", action="store_false", default=True,
-                    help="不播报（离线/单测用；正式比赛**必须播**，未播报要加罚）")
-    zb.add_argument("--zebra-calib-write", action="store_true",
-                    help="配合 --calibrate --zebra：把本次测得的近边行中位写进 site.yaml 的 "
-                         "zebra_stop_row（下次运行自动生效）")
-
     hw = ap.add_argument_group("硬件/在线")
     hw.add_argument("--cam", type=int, default=2, help="摄像头 index（巡线固定 2=下摄）")
     hw.add_argument("--no-motor", action="store_true", help="只跑视觉，不动电机（默认行为）")
@@ -2776,14 +2228,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             print(f"[LANE] ❌ --cone-speed-us {args.cone_speed_us:.0f} 不高于电调死区"
                   f"（{settings.ESC_DEADBAND_US}us）：绕行期会**停在锥桶前面**，拒绝运行")
             return 2
-        if args.zebra and args.zebra_creep_us <= settings.ESC_DEADBAND_US:
-            print(f"[LANE] ❌ --zebra-creep-us {args.zebra_creep_us:.0f} 不高于电调死区"
-                  f"（{settings.ESC_DEADBAND_US}us）：接近段会**停死在半路上**，拒绝运行")
-            return 2
-    if args.zebra and args.zebra_stop_row <= args.zebra_slow_row:
-        print(f"[LANE] ❌ 停车行 {args.zebra_stop_row:.0f} 必须**大于**慢行档 "
-              f"{args.zebra_slow_row:.0f}（行号越大 = 横道越近；等于就是把车停死在慢行档上）")
-        return 2
     else:
         if offline is False:
             print("[LANE] dry-run：--no-motor/默认不动电机；加 --allow-motion 才动车")
@@ -2837,13 +2281,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         cone_speed_us=args.cone_speed_us, cone_cooldown_s=args.cone_cooldown_s,
         cone_side_tol_px=args.cone_side_tol_px, cone_first_dir=args.cone_first_dir,
         cone_in_lane=args.cone_in_lane, cone_in_lane_tol_px=args.cone_in_lane_tol_px,
-        cone_max_bottom_y=args.cone_max_bottom_y,
-        zebra_enabled=bool(args.zebra),
-        zebra_slow_row=args.zebra_slow_row, zebra_stop_row=args.zebra_stop_row,
-        zebra_stop_lead_px=args.zebra_stop_lead_px, zebra_creep_us=args.zebra_creep_us,
-        zebra_hold_s=args.zebra_hold_s, zebra_extra_creep_s=args.zebra_extra_creep_s,
-        zebra_approach_max_s=args.zebra_approach_max_s,
-        zebra_arm_after_s=args.zebra_arm_after_s, zebra_cooldown_s=args.zebra_cooldown_s)
+        cone_max_bottom_y=args.cone_max_bottom_y)
 
     print(f"[LANE] 增益（登记 {REF_FPS:.0f}fps）：kp={kp:.3f} ki={ki:.3f} kd={kd:.3f}"
           f"；30fps 逐帧等效 " + "ki=%.3f kd=%.3f" % runner.pid.frame_equivalent(30.0))

@@ -8,6 +8,10 @@
 ## 安全（每趟都要确认，2026-10-15 事故后加严）
 
 - 轮子架空，或场地空旷 + **有人持急停**；**跑动时人要在能立刻断电的距离内**（电池开关/插头）。
+- ★ **同一时刻只许一个人在动电机**（2026-10-17 教训）：另一个会话/队友跑占电机的脚本（如 `diag/esc_probe.py`、
+  `bench_test.py`、另一次循迹）时，它会把 `opi-control` 停掉独占电调 —— 此时**网页摇杆是没反应的**
+  （不是"手动模式没恢复"）。核对一条命令：`bash /root/dev/scripts/stop_run.sh --status`
+  （看 `opi-control` / `nginx` 两行）；要修就 `bash /root/dev/scripts/car-mode.sh manual` 或 `systemctl start opi-control`。
 - **车不停时的处置顺序**：① **直接断电**（最可靠）；② **停止文件**（首选软件手段，见下）；
   ③ `bash /root/dev/scripts/stop_run.sh` / `pkill -TERM -f lane_final_test.py`；
   ④ Ctrl+C —— **只在「你前台手敲的这个窗口」里有效**（脚本启动日志会打印自检行：能到/到不了车）。

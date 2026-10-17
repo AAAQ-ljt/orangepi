@@ -275,16 +275,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         from scripts.bench_common import MotorSession, install_signal_guard
         state = {"stopped": False, "driver": None, "restored": False}
         install_signal_guard(state)            # 信号只置标志；MotorSession 自己挂了 atexit 收尾
+        # 看门狗**晚一点拉**（见下面 1 处注释）：2026-10-17 首次台架实测发现，
+        # 若在建会话/倒计时之前就拉起，那 ~5.5s（MotorSession 2.5s + 倒计时 3s）没有心跳
+        # ⇒ 它必然触发一次并写 1500（无害，但退出码 2 会让人误以为"跑动中卡过"）。
         wd = None
-        if args.watchdog_s > 0:
-            try:
-                from scripts.esc_watchdog import WatchdogClient
-                wd = WatchdogClient(timeout_s=args.watchdog_s)
-                wd.start(log_path=os.path.join(os.path.dirname(log_path), "esc_watchdog.log"))
-                say(f"[ESC] ✅ 电调看门狗已拉起（{args.watchdog_s:.1f}s 不喂心跳就强制回中位）")
-            except Exception as exc:                        # noqa: BLE001
-                wd = None
-                say(f"[ESC] ⚠️ 看门狗没起来（{exc}）——请人守着、手边留断电开关！")
         t0 = time.monotonic()
         rc = 0
         try:
@@ -301,6 +295,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                         return 0
                     time.sleep(0.5)
                 check_plan(steps, args.min_us, args.max_us)      # 起跑前再核一次
+                # ★ 现在才拉看门狗：此后的心跳间隔 ≤0.2s（run_plan 分片喂），
+                #   退出码 2/3 才真正等于"跑动中主控卡过"。（此前的窗口里电调一直是 1500 中位，
+                #   MotorSession 的 center_all 已经写过，没有"带着油门没人管"的风险。）
+                if args.watchdog_s > 0:
+                    try:
+                        from scripts.esc_watchdog import WatchdogClient
+                        wd = WatchdogClient(timeout_s=args.watchdog_s)
+                        wd.start(log_path=os.path.join(os.path.dirname(log_path),
+                                                       "esc_watchdog.log"))
+                        say(f"[ESC] ✅ 电调看门狗已拉起（{args.watchdog_s:.1f}s 不喂心跳就强制回中位）")
+                    except Exception as exc:                    # noqa: BLE001
+                        wd = None
+                        say(f"[ESC] ⚠️ 看门狗没起来（{exc}）——请人守着、手边留断电开关！")
                 run_plan(steps,
                          write_us=lambda us: pca.write_us(pca.CH_ESC, us),
                          feed=(wd.feed if wd is not None else None),
@@ -327,6 +334,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "再跑 --plan double；还没有 → 电调当前模式不含反向，查编程菜单/中位漂移）")
         say("[ESC]  ② 上扫（--plan neutral）到哪个脉宽轮子开始**正转**？（现场登记 1545；差得多 = 中位漂了）")
         say("[ESC]  ③ 1600→1450 与 1600→1500 相比：**立刻停 = 有主动刹车**；一样滑 = 空档（无刹车）")
+        say("[ESC]      ⚠️ 四轮悬空时轮子惯性太小、两种都「瞬间停」，判不出来：改用手**拨轮子**"
+            "（给 1450 时若明显发涩/有阻力 = 电调在刹车；给 1500 应很松），或在地面空旷处跑一次 --plan brake")
         say(f"[ESC] 日志已存：{log_path}（连同观察结果一起发回来）")
         return rc
     finally:

@@ -14,9 +14,13 @@
 from __future__ import annotations
 
 import contextlib
+import io
+import json
 import os
+import signal
 import sys
 import tempfile
+import threading
 import time
 
 import numpy as np
@@ -27,6 +31,8 @@ import scripts.lane_final_test as lft  # noqa: E402
 from tests.test_lane_final import _blank_frame, _lane_frame  # noqa: E402
 
 W, H = 640, 480
+
+_SKIPPED: list = []          # 跳过的用例要**单独报出来**，不许混进"通过"里
 
 
 def _board_frame() -> np.ndarray:
@@ -185,6 +191,55 @@ def test_online_calibrate_mode() -> None:
     assert "--target-x" in out, "应打印可直接复制的 --target-x"
 
 
+def test_sigterm_stops_cleanly() -> None:
+    """★ 2026-10-16 回归：外部 SIGTERM 必须能**安全停**（收到信号 → 收尾 → 正常退出）。
+
+    为什么单列这一条：现场"跑起来停不下来"，追下去是**按键那条路不可靠**（7 份日志里零「收到信号」，
+    信号根本没到进程）——于是"从另一个 shell 发信号"成了唯一的软件停车手段（`stop_run.sh` / `pkill -TERM`）。
+    这条路必须锁死：改坏了就意味着现场又没有软件停车办法了。
+
+    非 Linux 会被跳过（Windows 上 TerminateProcess 不能被 python 捕获）——**车上会真跑**。
+    信号在"主循环真在跑"之后才发（等 CSV 出现：它的创建在 install_signal_guard 之后），
+    免得在装处理器之前把测试进程打死（那会整文件崩）。
+    """
+    if not sys.platform.startswith("linux"):
+        _SKIPPED.append("test_sigterm_stops_cleanly")
+        print("      ⏭️ 跳过 test_sigterm_stops_cleanly（需要 Linux 的 SIGTERM 语义；车上会真跑这一条）")
+        return
+    tmp = tempfile.mkdtemp(prefix="lane_sig_")
+    csv = os.path.join(tmp, "run.csv")
+
+    def _fire() -> None:
+        t0 = time.time()
+        while time.time() - t0 < 10.0:                 # 等主循环起来（CSV 一出现就说明处理器已装好）
+            if os.path.exists(csv) and os.path.getsize(csv) > 0:
+                break
+            time.sleep(0.05)
+        time.sleep(0.3)
+        os.kill(os.getpid(), signal.SIGTERM)           # 等价于 stop_run.sh / pkill -TERM 干的事
+        print("[test] 已发送 SIGTERM", flush=True)
+
+    prev = signal.getsignal(signal.SIGTERM)
+    th = threading.Thread(target=_fire, daemon=True)
+    t0 = time.time()
+    th.start()
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            rc, _, _ = _run([_lane_frame()], ["--no-start-gate", "--max-seconds", "60",
+                                              "--save-dir", tmp, "--log-csv", csv])
+        dt = time.time() - t0
+    finally:
+        signal.signal(signal.SIGTERM, prev)            # 别把被测脚本的处理器留下来（会串到别的用例）
+    out = buf.getvalue()
+    assert dt < 15.0, (f"SIGTERM 后应立刻退出（实得 {dt:.1f}s，max-seconds=60 ⇒ 信号没生效，"
+                       f"现场就等于'停不下来'）")
+    assert "收到信号" in out, f"应打印「收到信号」：{out[-800:]}"
+    assert "收尾" in out, f"必须走安全收尾（停车/释放）：{out[-800:]}"
+    assert "结束" in out, f"应有收尾统计：{out[-800:]}"
+    assert rc == 0, f"rc={rc}"
+
+
 def main() -> int:
     funcs = [v for k, v in sorted(globals().items())
              if k.startswith("test_") and callable(v) and getattr(v, "__module__", "") == __name__]
@@ -198,7 +253,13 @@ def main() -> int:
             import traceback
             print(f"  ❌ {fn.__name__}: {exc}")
             traceback.print_exc()
-    print(f"[test_lane_final_run] {len(funcs) - failed}/{len(funcs)} passed")
+    ran = len(funcs) - len(_SKIPPED)
+    msg = f"[test_lane_final_run] {ran - failed}/{ran} passed"
+    if _SKIPPED:
+        msg += f"，{len(_SKIPPED)} 个跳过未验证：" + "；".join(_SKIPPED)
+    print(msg)
+    if _SKIPPED:
+        print("      ⚠️ 跳过的用例**没有**验证过——车上（Linux）跑一遍才算数")
     return 1 if failed else 0
 
 
@@ -229,6 +290,80 @@ def test_real_errors_still_exit_on_read_fail() -> None:
     rc, _, _ = _run([_lane_frame()] * 4, ["--no-start-gate", "--read-fail-s", "0.5",
                                           "--max-seconds", "30"], fail_after=4, cyclic=False)
     assert rc == 1
+
+
+def test_stop_file_stops_cleanly() -> None:
+    """★ 2026-10-17（调试期停车按钮）：**停止文件出现 = 安全停车**，与 Ctrl+C 同一条收尾链。
+
+    为什么单列这一条：10-16 现场 7 趟日志零「收到信号」——按键那条路（无 PTY / 后台 / 别的窗口）
+    根本到不了进程，于是"停车"必须有第二条不依赖终端的通道。这里钉住三件事：
+    ① 文件一出现就**立刻**退出（不许跑满 --max-seconds）；② 走了安全收尾（rc=0 + 落盘）；
+    ③ 收尾时把文件清掉、并把"谁停的"记进 session.json（复盘要能对号）。
+    """
+    tmp = tempfile.mkdtemp(prefix="lane_stopfile_")
+    stop_file = os.path.join(tmp, "lane_stop")
+    csv = os.path.join(tmp, "run.csv")
+
+    def _touch() -> None:
+        t0 = time.time()
+        while time.time() - t0 < 10.0:                 # 等主循环起来（CSV 一出现就说明在跑）
+            if os.path.exists(csv):
+                break
+            time.sleep(0.05)
+        time.sleep(0.3)
+        with open(stop_file, "w") as fh:
+            fh.write("stop\n")
+        print("[test] 已创建停止文件", flush=True)
+
+    th = threading.Thread(target=_touch, daemon=True)
+    th.start()
+    buf = io.StringIO()
+    t0 = time.time()
+    with contextlib.redirect_stdout(buf):
+        rc, _, _ = _run([_lane_frame()] * 60,
+                        ["--no-start-gate", "--stop-file", stop_file,
+                         "--save-dir", tmp, "--log-csv", csv,      # 会话目录给我们，好找 CSV/session.json
+                         "--max-seconds", "20"])
+    dt = time.time() - t0
+    out = buf.getvalue()
+    with open(csv, encoding="utf-8") as fh:
+        csv_text = fh.read()
+    assert dt < 8.0, f"停止文件出现后应立刻退出（实得 {dt:.1f}s，max-seconds=20 ⇒ 通道没生效）"
+    assert rc == 0, f"停止文件应走安全收尾（rc=0），实得 {rc}"
+    assert "停止文件" in out and "安全停车" in out, f"应有停止文件提示：{out[-600:]}"
+    assert not os.path.exists(stop_file), "收尾时必须把停止文件清掉（否则下一趟起不来）"
+    assert "track" in [p for p, _ in _phases(csv_text)], "停之前应正常在跟线"
+    with open(os.path.join(tmp, "session.json"), encoding="utf-8") as fh:
+        sess = json.load(fh)
+    assert sess["params"]["stop_file"] == stop_file, sess["params"].get("stop_file")
+    assert sess["result"]["stopped_by"] == "stop-file", sess["result"].get("stopped_by")
+    for key in ("tty", "pgid", "tpgid", "keyboard_reaches"):
+        assert key in sess["params"]["launch"], f"启动自检应记 {key}：{sess['params']['launch']}"
+
+
+def test_stale_stop_file_does_not_stop() -> None:
+    """上一趟残留的停止文件**不许**把这一趟当场停掉（启动时清残留；跑完也不留）。"""
+    tmp = tempfile.mkdtemp(prefix="lane_stale_")
+    stop_file = os.path.join(tmp, "lane_stop")
+    with open(stop_file, "w") as fh:
+        fh.write("stale\n")
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc, _, csv_text = _run([_lane_frame()] * 40,
+                               ["--no-start-gate", "--stop-file", stop_file,
+                                "--max-seconds", "1.0"])
+    out = buf.getvalue()
+    assert rc == 0, f"rc={rc}"
+    assert "清掉停止文件" in out, f"应提示清掉了残留：{out[:800]}"
+    assert not os.path.exists(stop_file), "跑完不该留下停止文件"
+    assert "track" in [p for p, _ in _phases(csv_text)], "残留文件不该挡住跟线"
+
+
+def test_stop_file_disabled_by_empty_path() -> None:
+    """`--stop-file ''` = 关掉这条通道（现场想回到"只有信号"的老行为时用）。"""
+    rc, _, _ = _run([_lane_frame()] * 30, ["--no-start-gate", "--stop-file", "",
+                                           "--max-seconds", "0.8"])
+    assert rc == 0
 
 
 if __name__ == "__main__":

@@ -2,7 +2,10 @@
 
 > 本文件是**所有 AI 助手（ZCode / Claude / 其他 agent）在本仓库工作时的第一读物**，等价于团队开发规范。
 > 人类队员也请先读这一份。原始的长版规范已合并进本文件（`doc/开发规范.md` 已删除）。
-> 最后更新：2026-10-15——**现场事故复盘 + 四块修复**（详见 `doc/开发文档.md` §7 的 2026-10-15 条目）：① **闸门误发车**（下摄压低不够时"车自己车盖的上沿"落进 `START_GATE_ROI`，那圈暗蓝灰像素面积 0.06~0.14 压着 0.06 阈值抖 → 两次没放板就发车）已修 = ROI 底边 0.95→0.80 + 面积路径**也要主导度≥35** + 画面裁剪 `FRAME_CROP_LINE_Y=384`；当场 30 次武装**零假报**。② **单侧垃圾读数**加两道护栏（单侧也过跳变门限、"回中位保速"加 1.2s 时限）。③ **★ 车停不下来（事故级）**：PCA9685 一直输出最后一次脉宽，相机 UVC 卡死/进程被杀时车会带着油门前冲、Ctrl+C 无效 → 新增**独立进程看门狗** `scripts/esc_watchdog.py`（1s 不喂心跳强写 1500us）+ 读帧挪 daemon 线程（卡死不再阻塞主循环）。④ **增益实测**：亮光下 `kp 0.10 + kd 0.50 @ 1585` 最稳、**kd ≥0.65 会 D 过载**、**暗光 16.6fps 是独立退化因素**。⑤ 日志增强：`session.json`（参数+停机原因）、`lane_ab_summary.py` / `cam_cv2_fps.py` / `car_test_sweep.sh`；现场单 `dev/doc/field-lane-ab-20261015.md`。
+> 最后更新：2026-10-17——**调试期"停车"落地三件事：停止文件 + 看门狗自保 + 按键自检**（这一轮不碰比赛规则，只解决"跑起来停不下来"）：① ★ **停止文件通道**（`lane_final_test.py --stop-file`，默认 `/dev/shm/lane_stop`）：**文件存在 = 安全停车**，主循环**每帧**查（两处检查点都改成 `stop_requested()`），走与 Ctrl+C **完全相同**的收尾链；**启动清残留、退出也清**；任何通道都能发（另一个会话 / 串口 / 网页终端 / AI 工具），不依赖 PTY、不依赖 PID、不依赖命令行特征。为什么：10-16 现场 7 趟日志零「收到信号」= 按键根本没到进程（Ctrl+C 只在"该进程就是这个终端的前台作业"时才是信号）→ 详情与判据见 §6 陷阱表。② ★ **看门狗自保**（`esc_watchdog.py`）：`start_new_session=True`（独立会话）+ **忽略 SIGINT/SIGHUP/SIGQUIT、只留 SIGTERM**（主控收尾用 terminate 收它）+ **输出重定向到自己的日志**（原来继承主控那条 `| tee` 管道，操作员一断线它下一次 print 就 BrokenPipeError 自杀）+ 循环体"绝不抛"。为什么：操作员按 Ctrl+C / 断线**不能再把安全网一起带走**（主循环卡在 I2C/写盘时，那 1 秒后写 1500us 是唯一的救命一手）。③ **启动自检行**：日志/session.json 记录 `tty/pgid/tpgid/keyboard_reaches`——一眼看出"这个窗口的 Ctrl+C 能不能到车"；`session.json.result.stopped_by` 记 `signal` / `stop-file`。④ 收尾链每步包 `_try()`：stdout 管道断了也不许跳过 `wd.stop()` 与 session.json 落盘。⑤ `stop_run.sh --file`（走停止文件通道）+ `--status` 显示停止文件状态；`lab_lane_test.sh` / 现场单 / report.md §6 / §1.1 的停车顺序同步改。测试：`test_lane_final_run` +3 例（停止文件生效/残留不清跑/关掉通道）、`test_esc_watchdog` +3 例（抗 INT+HUP 后仍触发 / TERM 仍能收 / 独立会话+自己的日志，Linux 门控、**车上必须跑一遍**）。本轮只落本地（车在充电、未同步）。
+> 2026-10-16——**锥桶：口径更正 + "在车道线内"先验 + 定档工具 + 文档更正（闸门闩锁）**：① **09-07 那批蓝锥正样本作废**（镜头抬高时拍的、锥桶在画面中部，对现在的压低机位不作数）⇒ 据此算的"检出 85.3%/82.5%"同步作废；正样本改为**现场重拍**（手推车拍下摄锥桶视频）。② ★ **新增 `cone_in_lane` 先验（默认开）**：要**尽早**发现锥桶就必然在画面最上面几行找它，而那一带是"赛道尽头之外"的东西（塑料膜边/墙/树影/远处的人——**不是天空**，但同样蓝灰、HSV 与锥桶重叠）→ 先验要求**锥桶框顶/底两行都落在两条车道线之间、且当帧双侧读数**，入口在喂 3 帧防抖**之前**过滤（否则防抖数的是未过先验的原始检出）。实测：2.mp4 全片 3573 帧 ROI 0.05/0.15 时**远景误检 100% 被滤、触发 0**（旧值 5/3 次）；sub.mp4 滤 94%；1.mp4 只滤 6%（它的左线在画面外、车道带是猜的）→ 新工具 `scripts/diag/cone_calibrate.py --pos <锥桶视频> --neg <空赛道>` 给"带先验/不带先验"两列 + ROI 上沿扫档，**当天视频定档**。⑤ ★ **当天下午现场视频到手后已定稿**：`锥桶1016.mp4`（手推 2564 帧）里 7 段锥桶接近**全部检出**（首帧框顶 y≈50~72、h≈40，≈3.5m 外）、**全是真锥、无远景误触发**；上沿 0.20→**0.10**（早 ~0.5s/段）；空赛道 1014 帧目录/2.mp4/1.mp4 **0 触发**。⚠️ 手推会上浮摄像头上浮→顶部噪声；真跑车头更低→噪声更少但锥桶更晚入画，首次真跑存图复核。③ **绕行油门** `CONE_AVOID_US` 1548→**1575**（现场 A/B **1585/1580/1575/1570**，`--cone-speed-us`；巡航 1590+ 只降一两档）。④ **文档更正、代码不动**：入口闸门是**一次性闩锁，没有"再见板即停"**（板挡回去能停是靠丢线，会滑一段）；只有台架 `bench_test.py` 是"再见板→停"。锥桶相位照旧 `--cone`（默认关）。本轮仍只落本地（待同步车端）。
+> 2026-10-15 夜——**锥桶相位接入入口**（照 `doc/开发文档.md` §2.8 的固定流程，不新建脚本）：`scripts/lane_final_test.py` 加 `--cone`（**默认关**）= 复用 `vision/cone_detect.py` 检测器 + 用**目标点偏移**执行（PD 目标 = 车道中心 ∓ `CONE_AVOID_OFFSET_PX` 120px，到时归零 → 回正 → 反向 S 形），替代旧归档脚本的开环 ±20°；`CONE_GATE_ROI` 上沿按**裁剪后画面**定到 **0.20**（当时是唯一"空赛道零误检"的档；锥桶落点未量，见上一条更正）；离线验收 = `--frames <空赛道帧目录> --cone` 看汇总行「相位触发 0 次」；新测 `tests/test_lane_final_cone.py`（15 例）→ 本地 23 个测试文件全绿。⚠️ **ROI 是机位相关档**：压低前的 `sub.mp4`（地平线/远处楼栋入画）**87.7% 帧误检** → 动过镜头/换场地必须拿当天片段复跑这条命令。
+> 2026-10-15——**现场事故复盘 + 四块修复**（详见 `doc/开发文档.md` §7 的 2026-10-15 条目）：① **闸门误发车**（下摄压低不够时"车自己车盖的上沿"落进 `START_GATE_ROI`，那圈暗蓝灰像素面积 0.06~0.14 压着 0.06 阈值抖 → 两次没放板就发车）已修 = ROI 底边 0.95→0.80 + 面积路径**也要主导度≥35** + 画面裁剪 `FRAME_CROP_LINE_Y=384`；当场 30 次武装**零假报**。② **单侧垃圾读数**加两道护栏（单侧也过跳变门限、"回中位保速"加 1.2s 时限）。③ **★ 车停不下来（事故级）**：PCA9685 一直输出最后一次脉宽，相机 UVC 卡死/进程被杀时车会带着油门前冲、Ctrl+C 无效 → 新增**独立进程看门狗** `scripts/esc_watchdog.py`（1s 不喂心跳强写 1500us）+ 读帧挪 daemon 线程（卡死不再阻塞主循环）。④ **增益实测**：亮光下 `kp 0.10 + kd 0.50 @ 1585` 最稳、**kd ≥0.65 会 D 过载**、**暗光 16.6fps 是独立退化因素**。⑤ 日志增强：`session.json`（参数+停机原因）、`lane_ab_summary.py` / `cam_cv2_fps.py` / `car_test_sweep.sh`；现场单 `dev/doc/field-lane-ab-20261015.md`。
 > 2026-10-14——**循迹重写为最终脚本**：摄像头机械固定完成、实拍素材 `train/opencv-level1/video/true_track_sub_video/2.mp4`（3573 帧 @28.9fps）到手 → 旧的一整套（`lane_ref_test.py` 实跑入口 / `lane_official.py` 官方口径离线件 / `centroid_follow.py`）**已归档**（`archive/20261014-lane-scripts/` + `dev/attic/lane-old-20261014.tar.gz`）；新入口 = **`dev/scripts/lane_final_test.py`**（单文件：脊搜索检测 + PD 控制 + 记录 + 安全；离线 `--frames/--video/--calibrate`、在线 `--no-motor/--allow-motion`），标定与全片验证报告在 `train/opencv-level1/lane_test/1014_lane_final/report.md`（全片双侧 82%、剔除末段 89%、丢失 0%、中心 p90 5.8px、单帧 10ms）。⚠️ 检测链路**不再照抄官方 Hough**（官方链路在这套素材上锁的是路面刷痕：默认 ROI 双侧率仅 25%），改法/证据见报告。`vision_main` 这条 A 路径仍用 `lane_ref.py`（本轮不动）。旧记录：2026-10-12——①**图传全链复核**：车端两路推流 `ss` 实证 ESTAB→自建 `121.40.149.155`、官方 82.157.204.126 零流量；**`cam_car0027` 是流名、从未停用**（09-15 停的是官方通道；`ffmpeg-stream*` 为 enabled——"只 stop 不 disable"会随重启复活）；新网页入口 `https://car1.liyekai380.dpdns.org/`（实测后端 cam_car0027 有流）。②**双摄身份 VID:PID 更正**：`/dev/video0`=32e4:0234「Global Shutter Camera」、`/dev/video2`=2993:0858「icspring camera」（与旧记载相反，云台归属待 `cam-identify.py` 复核）。③**2026-10-13 镜头压低**：现场档改 ROI 0.15~0.75 / 前瞻带 0.17~0.26、新增贴边容差 `LANE_PAIR_EDGE_TOL_PX=40`（旧档在车道占满画面时会全盲、自检不发车）——细节见 `doc/开发文档.md` §2.2；④**巡线下摄真帧率随光照 9~30fps**（亮环境实测 29.8、暗环境 AE 长曝光掉到 9~16；"15fps"是暗环境真实值）。**循迹控制律已按实测帧率折算**（2026-10-12）：增益/窗口的登记口径 = 15fps（现场整定帧率），运行时时按实测 dt 折算成连续时间形式（`dev/control/rate.py` + `PidRef.step(e, dt)`），所以**换帧率不用重标 kp/kd**；现场 A/B 表继续按 15fps 口径写数字。2026-10-11 记录：巡线**前瞻带根治**：下摄平视角下真车道线是虚线、在 y≈195~205 就从画面左右边缘出去 → 自动前瞻带加"不贴边"余量后落到 y≈120~168，自检可发车已复验；`kd` 折算方向修正、`prime()` 防踢腿。现场命令单已删除（2026-10-15；新的循迹现场清单见 `lane_test/1014_lane_final/report.md` §6）。其余同 v11：**模型轨 = 红绿灯专属 3 类 light3cls，8 类契约与 4cls 全部废弃/退役，其余元素全 OpenCV**；RKNN 转换移交队友。**doc 已重构：开发相关内容只信 `doc/开发文档.md`，旧文档进 `doc/attic/` 只读不维护**）
 
 ---
@@ -12,7 +15,7 @@
 **项目**：2026 全国大学生智能汽车竞赛 · 室外 5G 远程驾驶无人车赛。
 **硬件**：Orange Pi 5（RK3588S）+ XT-NetRC 阿克曼底盘 + PCA9685 + 双摄（**两路都是 USB**；2026-10-12 VID:PID 实测：`/dev/video0`=32e4:0234「Global Shutter Camera」模组 / `/dev/video2`=2993:0858「icspring camera」模组＝**下摄副摄，巡线用**——与旧记载相反，云台归属待 `cam-identify.py` 复核）+ SIM8200 5G。
 **目标**：**完赛，并尽量快**。规则里"停车超 20s 不动 = 比赛失败"，"停错车位/无轮入区 +100s"，"撞锥 +20s"，"压线 +10s/次"——所以**可靠性优先于速度**。
-**当前阶段**：发车（P0-2）、巡线（P1-1，受视角限制不作为完赛路径依赖；10-11 前瞻带根治后自检可发车）、日志降频与语音非阻塞（P1-5）、锥桶 HSV 检测与 S 型绕行（P1-3 部分）已落地；**当前硬阻塞 = 红绿灯 3 类（off/red/green）标注与补拍 + 操场现场标定**（HSV 主通道 W3 即可通路，模型作为第二校验通道，见 `doc/补拍清单.md`）。**现场流程/命令**：`doc/开发文档.md` §5 + `train/opencv-level1/lane_test/1014_lane_final/report.md` §6（10-11 那两份现场单已删除，2026-10-15 文档清理）。
+**当前阶段**：发车（P0-2）、巡线（P1-1，受视角限制不作为完赛路径依赖；10-11 前瞻带根治后自检可发车）、日志降频与语音非阻塞（P1-5）、**锥桶（P1-3：检测器 + 相位都已进入口 `lane_final_test.py --cone`，默认关；⚠️ 检测档（ROI/框高）**待现场用锥桶视频重标**——09-07 正样本已作废，见 `doc/开发文档.md` §2.5）** 已落地；**当前硬阻塞 = 红绿灯 3 类（off/red/green）标注与补拍 + 操场现场标定**（HSV 主通道 W3 即可通路，模型作为第二校验通道，见 `doc/补拍清单.md`）。**现场流程/命令**：`doc/开发文档.md` §5 + `train/opencv-level1/lane_test/1014_lane_final/report.md` §6（10-11 那两份现场单已删除，2026-10-15 文档清理）。
 
 **先看文档再动手**：
 - `doc/开发文档.md` —— **唯一开发文档**：现状 / 决策 / 元素设计 / 数据模型 / 计划进度 / 代码交接 / 执行记录全在里面（旧路线图/方案/专项/循迹交接等已归档 `doc/attic/`，**只读不维护**）
@@ -39,9 +42,19 @@
    写进去的脉宽** —— 主控卡死/被杀，车就带着油门继续跑，且 Ctrl+C 只是给主循环设标志、此时无效。
    所以动电机的运行**必须**有独立看门狗在位（`scripts/esc_watchdog.py`，`lane_final_test.py --allow-motion`
    会自动拉起；**跑前确认日志里有「电调看门狗已拉起」**），并且操作员**手边随时能断电**。
-8. **车不停时的处置顺序**：① **直接断电**（唯一覆盖"总线/驱动板本身坏了"的手段）；② `car-mode.sh estop`；
-   ③ Ctrl+C（只管我们的脚本，脚本卡死时无效）。**别把手机/网页停在摇杆页**：我们的脚本退出后会恢复
-   opi-control，那是官方手动驾驶服务，摇杆的输入会直接让车动。
+8. **车不停时的处置顺序（2026-10-17 更新）**：① **直接断电**（唯一覆盖"总线/驱动板本身坏了"的手段）；
+   ② **停止文件**（首选软件手段，`touch /dev/shm/lane_stop`：主循环每帧查它，走与 Ctrl+C 完全相同的
+   安全收尾；任何通道都能发——另一个会话/串口/网页终端/AI 工具）或 `stop_run.sh` / `pkill -TERM -f lane_final_test.py`；
+   ③ Ctrl+C —— **只在「该进程就是这个终端的前台作业」时才是信号**（启动日志会打印 tty/pgid/tpgid 自检；
+   无 PTY / 后台 `&` / nohup / 在别的窗口按，都到不了车：10-16 现场 7 趟日志零「收到信号」就是这么来的）。
+   **别把手机/网页停在摇杆页**：我们的脚本退出后会恢复 opi-control，那是官方手动驾驶服务，摇杆的输入会直接让车动。
+   ⚠️ **"把蓝板挡回下摄前方"不是闸门停车**（2026-10-16 更正）：`lane_final_test.py` 的发车闸门**发车后即闩锁**、
+   不再看板；板挡回去能停是**经由丢线**（读数失效 → 维持 0.6s → 丢线停车，**还会往前滑一段**）。
+   只有台架 `bench_test.py` 是"再见板→停"语义。
+9. **★ 看门狗是"主控死了/卡住"的退路，不是停车按钮**：它只在**心跳停 1s** 时写 1500us；主控活着、每帧喂心跳时
+   它按设计不动。它自己必须有自保（2026-10-17：独立会话 `start_new_session` + 忽略 SIGINT/SIGHUP/SIGQUIT，
+   只留 SIGTERM 给收尾；输出进自己的日志，不继承会被打断的管道）——否则"操作员按 Ctrl+C / 断线"会连
+   安全网一起带走（主循环卡在 I2C/写盘时，那 1 秒后的一手就是唯一的救命手段）。
 
 ### 1.2 车端环境（官方资产不可破坏）
 
@@ -82,7 +95,7 @@
 | **P0-4** | 现场几何实测（赛道宽、停车区黄线、斑马线 30cm 停区、是否有编码器、红灯长等 vs 20s 判失败） | 🟡 10-10 操场执行（含官方口径核对） |
 | **P1-1** | 扫线 + 误差滤波 + PID（**入口 `scripts/lane_final_test.py`**（2026-10-14 最终版：脊搜索检测 + PD + 记录 + 安全，单文件自包含）；旧 `lane_ref_test.py` / `lane_official.py` / `centroid_follow.py` **已归档**；A 路径检测器 `lane_ref.py` 仍在用） | ✅ 代码级完成 + 1014 素材全片验证（双侧 82%/剔除末段 89%/丢失 0%/中心 p90 5.8px/单帧 10ms，报告 `lane_test/1014_lane_final/report.md`）；现场待办：静止自检标定 target_x + 实跑复验 |
 | **P1-2** | 距离估计与减速停准（框底边 → 地面坐标 → 速度曲线） | ⬜ |
-| **P1-3** | FSM 主体重构（斑马线 10s、红绿灯光电、锥桶绕行、停车五阶段） | 🟡 锥桶部分已落地（`cone_detect` hsv + S 型绕行）；斑马线/灯/停车待接 |
+| **P1-3** | FSM 主体重构（斑马线 10s、红绿灯光电、锥桶绕行、停车五阶段） | 🟡 **锥桶 = 检测 + 相位都已进入口**（`lane_final_test.py --cone`，默认关；**检测档待现场锥桶视频重标** → `scripts/diag/cone_calibrate.py`，见 `doc/开发文档.md` §2.5）；斑马线/灯/停车待接 |
 | **P1-4** | 停车：蓝板接地点 + IPM 判左右 → 五阶段入库 | ⬜ |
 | **P1-5** | 日志降频 + 语音播放非阻塞 | ✅ 已完成（`PRINT_EVERY_N` + `audio.py` 后台播放） |
 | **P2-*** | 阈值现场标定、双摄分时复用、性能优化、技术手册 | ⬜（语义分割轨已放弃，v11） |
@@ -163,10 +176,10 @@ cd dev && export PYTHONPATH=.
 
 # 单测（纯函数 + __main__ 风格，不需要 pytest）—— 直接全部跑一遍
 for t in tests/test_*.py; do "$PY" "$t" || echo "FAIL $t"; done
-# 当前 21 个文件：filters/pid/lane_arbiter/protocol/start_gate/control/elements/site_config/
-#   camera_guard/rknn_detector/bench_logic/lane_ref/lane_final/lane_final_run/color_elements/
-#   cone_detect/imu/parking_logic/lane_rate/vision_replay + integration
-#   （lane_official / lane_ref_run 随旧脚本归档，2026-10-14）
+# 当前 23 个文件：filters/pid/lane_arbiter/protocol/start_gate/control/elements/site_config/
+#   camera_guard/rknn_detector/bench_logic/lane_ref/lane_final/lane_final_cone/lane_final_run/
+#   color_elements/cone_detect/imu/parking_logic/lane_rate/vision_replay/esc_watchdog + integration
+#   （lane_official / lane_ref_run 随旧脚本归档，2026-10-14；esc_watchdog 10-15、lane_final_cone 10-15 夜）
 "$PY" tests/test_integration.py        # 端到端：起控制端 + UDP 打假数据（dry-run）
 "$PY" tests/test_lane_ref_run.py       # 循迹：假摄像头跑完整状态机（自检→发车→跟线→丢线停车）
 
@@ -221,6 +234,17 @@ bash /root/dev/scripts/car-mode.sh manual          # 回到手动遥控（任何
 bash /root/dev/scripts/car-mode.sh estop           # 紧急停止：立刻归零
 bash /root/dev/scripts/car-mode.sh stream up       # 图传推流（自建服务器）拉起/检查
 bash /root/dev/scripts/car-mode.sh logs vision     # 看视觉日志
+
+# 锥桶相位（--cone，默认关；先只读档看读数，再到场地慢速——doc §2.8 的现场顺序）
+sudo python3 /root/dev/scripts/lane_final_test.py --no-motor --cone        # 架空/场地：锥桶读数 + 叠加图
+sudo python3 /root/dev/scripts/lane_final_test.py --calibrate --cone       # 静止：看锥桶落在画面哪几行
+# 绕行油门现场 A/B 档：--cone-speed-us 1585 / 1580 / 1575 / 1570（默认 1575；巡航 1590+ 只降一两档）
+# 离线定档（拍完锥桶视频后，PC 上跑）：scripts/diag/cone_calibrate.py --pos <锥桶视频> --neg <空赛道帧目录>
+# 离线验收（空赛道零触发是门槛）：--frames <当天实拍帧目录> --cone → 看汇总行「相位触发 0 次」
+# ★ 想停车（2026-10-17 起，按顺序）：① touch /dev/shm/lane_stop（任何通道都能发；主循环每帧查）
+#   ② bash /root/dev/scripts/stop_run.sh（= 按 PID 发 TERM；--file 走停止文件通道）
+#   ③ Ctrl+C（只在你前台手敲的那个窗口里有效）④ 断电
+# ⚠️ **板挡回去不是闸门停车**（靠丢线、会滑一段，见 §1.1 第 8 条）
 
 # 其它
 bash /root/dev/scripts/safe_pwm_init.sh            # 只确保 PCA9685 回到安全值
@@ -314,6 +338,9 @@ StartGateState(blocked: bool, armed: bool, released: bool, blue_ratio: float, ti
 | 坑 | 后果 / 正确做法 |
 |---|---|
 | **以为"程序活着"就有刹车** | **PCA9685 保持最后一次脉宽**：主控卡死（相机 UVC 卡死让 `cap.read()` 无限阻塞）或进程被杀 → 车带着最后的油门一直跑、**Ctrl+C 无效**（信号只设标志），现场两次都要断电。修法：独立进程看门狗（`esc_watchdog.py`，1s 不喂心跳强写 1500us）+ 读帧 daemon 线程（帧龄超时即退出）；**跑前确认日志有"电调看门狗已拉起"，车不停先断电** |
+| **以为按了 Ctrl+C 就该停**（2026-10-16/17 定案） | Ctrl+C 只在「该进程**就是这个终端的前台作业**」时才是信号（内核把 ^C 交给终端的前台进程组）。无 PTY 的通道（`ssh 车 "命令"`/paramiko/AI 工具）、后台 `&`、`nohup`、在别的窗口按——**都到不了车**（10-16 那 7 趟日志零「收到信号」）。⇒ 停车改走**不依赖键盘**的通道：① `touch /dev/shm/lane_stop`（`lane_final_test.py` 主循环每帧查，启动清残留/退出也清；`--stop-file` 可改）；② `stop_run.sh` / `pkill -TERM`；③ 断电。启动日志会打印自检行（tty/pgid/tpgid → 按键能不能到），别猜 |
+| **以为"关掉窗口/断掉 5G"只是断开连接** | 断开会话 = 前台进程组收到 **SIGHUP**，而 `install_signal_guard` 把 HUP 当"停止"⇒ **车当场停**（`esc_watchdog` 反过来：独立会话 + 忽略 HUP，安全网不受影响）。比赛/远程流程若要求"断线后继续跑"，跑动进程必须**脱开会话启动**（setsid/nohup），并在启动参数上区分"失联即停 / 抗断线"两种语义 |
+| **让看门狗自己会被 Ctrl+C 杀掉** | 它和主控同进程组、且原来继承主控那条 `| tee` 管道 ⇒ 操作员的 ^C/断线能顺手带走安全网（主循环卡住时，那 1s 后写 1500us 就是唯一救命手段）。已修（2026-10-17）：`start_new_session=True` + 忽略 INT/HUP/QUIT（**留 TERM** 给收尾）+ 输出进自己的日志 + 循环体"绝不抛" |
 | **以为安全组被"覆盖"了** | 端口从某些网络连不上，先分清是**安全组**还是**你本地网络**：换个观测点（小车本身）测同一端口。2026-09-16 实测：SG 一直正常，是校园网出口封了 22/2222 这类 SSH 端口 |
 | 用团队自己写的 qmicli 脚本给 SIM8262E-M2 拨号 | 该模组时序特殊，手写 qmicli 容易 `CID allocation failed`；**先试 APN 轮询（`car-net.sh cellular up`），失败再用厂商 `simcom-cm`，最后 `cellular recover` 做 USB 硬复位** |
 | **以为模组坏了/拨号脚本有问题，其实是网卡被改名** | systemd 会把 `wwan0` 改成 `wwx<MAC>`，所有写死 `wwan0` 的脚本（含厂商二进制）全部失效。已修：脚本运行时自动探测 + `/etc/systemd/network/10-wwan0.link` 固定名字。排查：`dmesg \| grep -E 'qmi\|wwan' \| tail` |
@@ -353,6 +380,12 @@ StartGateState(blocked: bool, armed: bool, released: bool, blue_ratio: float, ti
 | **开机后 frp/SSH 全断、frpc 卡 activating**（2026-10-13 已修） | 不是 frp 的问题，是**车没网**：`car-net.service` 的 ExecStart 直接执行 `/root/dev/scripts/net/car-net.sh auto`，脚本一丢执行位 systemd 就报 `203/EXEC`、重试 10 次放弃 → 不拨号 → 无上行 → frpc 连不上服务器。**根因在仓库**：全库 `.sh` 在 git 里都是 `100644`（无执行位），凡"按仓库原样同步到车"必复现（同步工具不会替 git 补 +x）；之前能用是因为有人手动拨过号，把坑盖住了。车端已修：全部 `.sh` 补 `+x`，`systemctl reset-failed car-net.service` 后 restart 实测通过（日志"上电联网完成（蜂窝）"）。**仓库侧待办**：对 `dev/scripts` 下被 systemd 直接执行的入口脚本 `git update-index --chmod=+x` 后提交，否则下次全量同步/换车再踩。排查路径：`car-net.sh status` 看"默认出口/蜂窝"，`journalctl -b -u car-net.service` 搜 `203` |
 | **cv2 里 `CAP_PROP_BUFFERSIZE=1` 会把出帧率砍半**（2026-10-15 小车实测） | 同一颗下摄、同一画面：**BUFFERSIZE=1 → 14.1fps；不设（驱动默认 4）→ 28.0fps**；ffmpeg 走同一设备 29.8fps。单缓冲时驱动必须等应用把 buffer 放回才能抓下一帧。`vision/camera_guard.open_camera()` 已改为 **不设 BUFFERSIZE + 显式 FPS=30**——之前所有 cv2 工具（循迹脚本/采集/探针）都只吃到 ~14fps，"模组硬限制 15fps"就是它；修后循迹主循环 **14.7 → 29.9fps**。**别设回 1**；要压滞后用 2~4 |
 | **直接往车端推 Windows 工作区的 `.sh`（CRLF）** | 工作区字节被原样推到车上 → `set -euo pipefail` 报 `pipefail: invalid option name`、脚本当场死（2026-10-15 car-mode.sh 实例）。**推 shell/systemd/conf 前先转 LF**（`.gitattributes` 已加 `*.sh/*.service/*.timer/*.link/*.conf → eol=lf`）；`ssh_sync` 推的一批目前都是 `.py/.md`（CRLF 无害），但别推 `.sh` 除非确认过换行 |
+| **把锥桶 ROI/HSV 当成"和机位无关"的档** | `CONE_GATE_ROI` 是**机位相关**档，现为**上沿 0.10**（裁剪后 y=38 起；2026-10-16 用当天现场锥桶视频定档：锥桶首帧框顶 y≈50~72、h≈40）。⇒ **换场地/动镜头后必须拿当天片段复跑** `scripts/diag/cone_calibrate.py --pos <锥桶视频> --neg <空赛道>`（看"锥桶框顶 y / 空赛道**带先验**触发次数"两列）+ 入口复验「空赛道相位触发 0 次」；别照抄别人的 ROI，**09-07 那批正样本（镜头抬高时拍的）已作废** |
+| **拿"手推视频的顶部噪声"当真跑场景** | 手推时人按车尾 → **摄像头上浮** → 画面顶部会冒"赛道尽头之外"的东西（墙/长椅/塑料膜，y0~48，多为单帧）；**真跑时后驱加速让车头更低、摄像头更低** → 顶部噪声更少，但同一 ROI 行对应**更近**的距离（锥桶更晚入画）。⇒ 首次真跑后用 `--no-motor --cone` + 存图复核锥桶首帧行，必要时把上沿开到 0.05 |
+| **画面底部角落的"蓝物"被当成要绕的锥桶** | 2026-10-16 实验室实测：底部蓝色地面/垫子（框底 384 = 贴着裁剪线）被判"在车道线内"→ 点着一次 3.2s 的 S 型。已加**"只绕前方锥桶"**闸门 `CONE_TRIGGER_MAX_BOTTOM_Y=300`（`--cone-max-bottom-y`：框底必须高于它才算"前方"；赛道实测接近段框底 90~226 不受影响）。⇒ 实验室里要把锥桶摆在**车前 2~3m** 才看得到触发（贴车头的那种不绕） |
+| **拿"09-07 锥桶数据集"标定现在的检测档** | 那批样本是**镜头抬高**时拍的（锥桶在画面中部）；现在的压低机位下**锥桶会出现在画面上部**——按它算出的 ROI/检出率（曾写进文档的"85.3%"）**全部作废**。正样本必须**现场重拍**（手推车、下摄原样） |
+| **以为"把蓝板挡回去 = 再见板即停"** | 入口 `lane_final_test.py` 的闸门是**一次性闩锁**：`allowed` 置位后不再调 `gate.update()`，**没有再见板即停**。现场"板挡回去能停"是**经由丢线**（读数失效 → 0.6s → 丢线停，还会滑一段），不覆盖"车已出线/相机被挡但还有垃圾读数"这类情形。要立刻停：Ctrl+C / 断电（台架 `bench_test.py` 才是"再见板→停"语义） |
+| **在镜头上部 ~60px 那条"远景带"里找锥桶（且只靠 ROI 挡）** | 要**尽早**发现锥桶就必然在画面最上面几行找它，而那一带是"赛道尽头之外"的东西（塑料膜边/墙/树影/远处的人；**不是天空**，但同样蓝灰、HSV 与锥桶重叠：实测 S63/V190 vs S67/V213）。两道先验解决：**① ROI 上沿** + **② `cone_in_lane`（默认开）：锥桶框顶/底两行都要落在两条车道线之间、且当帧是双侧读数**，入口在喂 3 帧防抖**之前**过滤。实测过滤力：当前机位 2.mp4 全片 **100%**（ROI 0.05/0.15 时远景框全滤掉、触发 0）；旧机位 sub.mp4 94%；`1.mp4` 仅 6%（**它的左线在画面外 x=−39，车道带是猜的**）⇒ **不是银弹，用当天视频量**（`scripts/diag/cone_calibrate.py` 给"带先验/不带先验"两列） |
 
 ---
 

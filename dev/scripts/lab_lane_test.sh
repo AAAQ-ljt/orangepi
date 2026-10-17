@@ -7,6 +7,8 @@
 #   bash /root/dev/scripts/lab_lane_test.sh --run --kd 0.24    # ③ A/B：加大阻尼
 #   bash /root/dev/scripts/lab_lane_test.sh --run --kp 0.10 --kd 0.25   # ④ A/B：对齐上届阻尼比（Kd/Kp=2.5）
 #   bash /root/dev/scripts/lab_lane_test.sh --run --speed-us 1580       # ⑤ 复现"越快越蛇行"（对照档）
+#   bash /root/dev/scripts/lab_lane_test.sh --run --cone --speed-us 1585 --cone-speed-us 1575 \
+#        --save-every-s 0.2                                            # ⑥ 锥桶相位（锥桶摆车前 2~3m）
 #
 # 其余参数原样透传给 `scripts/lane_final_test.py`（--target-x / --single-max-s / --max-seconds …）。
 # 本脚本只做三件事：打印本轮参数（含今天新上的闸门档/裁剪档）、把 stdout 另存一份、
@@ -14,6 +16,9 @@
 #
 # 安全（AGENTS.md §1.1）：只有 `--run` 才动车（= 显式 --allow-motion）；
 #   必须在轮子架空、或场地空旷且有人持急停的情况下跑。
+# ★ 想停（2026-10-17）：① 首选 `touch /dev/shm/lane_stop`（任何通道都能发；lane_final_test.py 主循环每帧查，
+#   走与 Ctrl+C 相同的安全收尾）② 车本地 `bash /root/dev/scripts/stop_run.sh`（或 `--file`）
+#   ③ 本窗口 Ctrl+C（**只在"本窗口前台手敲这个脚本"时有效**）④ 断电。
 set -euo pipefail
 
 DEV=/root/dev
@@ -112,12 +117,19 @@ fi
 # ---------------- ② 真跑（显式 --allow-motion） ----------------
 echo
 if ! confirm "⚠️ 即将【真正动电机】：速度 ${SPEED}us、闸门在（蓝板挡一下再移开才发车）。
-   请确认：轮子已架空、或场地空旷且有人持急停；手边随时能断电 / 把板挡回镜头前停车。"; then
+   请确认：轮子已架空、或场地空旷且有人持急停；手边随时能断电。
+   ★ 想停（2026-10-17 起按这个顺序）：
+     ① 首选·停止文件 —— 任何通道都能发（另一个会话/串口/网页终端）：
+        touch /dev/shm/lane_stop
+     ② 车本地会话里：bash /root/dev/scripts/stop_run.sh（= 按 PID 发 TERM）
+     ③ 本窗口 Ctrl+C —— **只在'本窗口前台手敲这个脚本'时有效**（启动日志会打印自检行）；
+        无 PTY / 后台 & / nohup / 在别的窗口按，都到不了车。
+     挡板能停是靠丢线（会滑一段），闸门发车后即闩锁、**没有'再见板即停'**。"; then
   echo "已取消（未动车）。"
   exit 1
 fi
 
-echo "[2/2] 真跑：蓝板挡到下摄正前方 → 移开 = 发车；想停就把板挡回正前方或 Ctrl+C"
+echo "[2/2] 真跑：蓝板挡到下摄正前方 → 移开 = 发车；想停：touch /dev/shm/lane_stop（首选）"
 set +e
 python3 -u "$LANE" --allow-motion ${SPEED_ARGS[@]+"${SPEED_ARGS[@]}"} \
   --max-seconds "${MAX_SECONDS:-60}" \

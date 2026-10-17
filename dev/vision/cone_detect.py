@@ -34,6 +34,11 @@ class ConeBox:
         return (self.xyxy[0] + self.xyxy[2]) / 2.0
 
     @property
+    def top_y(self) -> float:
+        """框顶边：竖立物体的远端（2026-10-16 加）——"锥桶在两条车道线之间"先验要看顶/底两行。"""
+        return float(self.xyxy[1])
+
+    @property
     def bottom_y(self) -> float:
         """框底边：估距离用它（竖立物体会偏高）。"""
         return float(self.xyxy[3])
@@ -151,11 +156,13 @@ class ConeDetector:
     def __init__(self, method: str = "hsv", model_path: Optional[str] = None,
                  profile_name: str = "car4cls", conf_threshold: Optional[float] = None,
                  roi: Optional[Tuple[float, float, float, float]] = None,
-                 hsv_low=None, hsv_high=None):
+                 hsv_low=None, hsv_high=None, min_h: Optional[int] = None):
         self.method = method
         self.roi = roi
         self.hsv_low = hsv_low        # 现场覆盖（None = 用 settings.CONE_BLUE_HSV_*）
         self.hsv_high = hsv_high
+        self.min_h = min_h            # 现场覆盖（None = 用 settings.CONE_MIN_H）；
+                                      # 2026-10-15：画面裁剪到 384 后远锥的框高口径变了，留这个旋钮
         self.model_path = model_path
         self._rknn = None
         self._profile = None
@@ -185,10 +192,10 @@ class ConeDetector:
 
     def detect(self, frame_bgr: np.ndarray) -> List[ConeBox]:
         if self.method == "hsv":
-            return detect_cones_hsv(frame_bgr, roi=self.roi,
+            return detect_cones_hsv(frame_bgr, roi=self.roi, min_h=self.min_h,
                                     hsv_low=self.hsv_low, hsv_high=self.hsv_high)
         if self._model is None:
-            return detect_cones_hsv(frame_bgr, roi=self.roi,
+            return detect_cones_hsv(frame_bgr, roi=self.roi, min_h=self.min_h,
                                     hsv_low=self.hsv_low, hsv_high=self.hsv_high)
         try:
             elements = self._postprocess(self._model.infer(self._model.preprocess(frame_bgr)),

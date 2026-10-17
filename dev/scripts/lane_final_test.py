@@ -48,6 +48,42 @@
    S 弯里"短暂"丢一侧；连续 1.2s 都只有一侧 = 车已出线/线已出画，继续保速就是直冲
    （2026-10-15 的"冲出赛道"就是这样来的）。超时按丢线停车（可恢复）。
 
+锥桶相位（`--cone`，默认关；2026-10-15 按 `doc/开发文档.md` §2.8 定案接入）
+-------------------------------------------------------------------
+**一个入口 + 分模块检测器**：元素检测器不复制 —— 直接 import `vision/cone_detect.py`
+（HSV 蓝色连通域 + `ConeTracker` 3 帧防抖）；**相位机仍在本文件里**（它是"谁此刻拥有
+方向盘"的唯一仲裁者）。执行用**目标点偏移**而不是开环打死舵：绕行期间 PD 的目标点 =
+车道中心 ∓ `CONE_AVOID_OFFSET_PX`（锥偏左 → 往右绕），到时归零 → 回正直行 → 反向绕
+→ 回循迹（两个锥 = 天然 S 形）。车沿"偏出中线 offset"的线走，不会一直画出去。
+  · 触发链：`--cone` 开 → ConeDetector(hsv) 每帧 → **"在两条车道线之间"先验**（`cone_in_lane`，
+    见下）→ ConeTracker 连续 3 帧有锥 → avoid1；S 进行中不再触发；一轮结束冷却
+    `CONE_COOLDOWN_S`（防同一个锥二进宫）。
+  · ★ **"锥桶只在两条车道线之间"先验**（2026-10-16 加，默认开 `--no-cone-in-lane` 可关）：
+    要**尽早**发现锥桶就必然在画面最上面几行找它，而那一带正是"赛道尽头之外"的东西（塑料膜边、
+    墙/树影、远处的人）出现的地方 → 光学形状分不开（HSV 实测重叠）。这条先验要求锥桶框在
+    **顶行与底行**都落在车道带内（左右线按当前帧读数外推），且**该帧必须是双侧读数**——
+    入口在喂防抖器**之前**就按它过滤（否则 3 帧防抖数的是未过先验的原始检出，实测会点着误避让）。
+    实测：当前机位 2.mp4 全片 3573 帧，ROI 上沿 0.05/0.15 时先验把 93/26 个远景框**全滤掉（触发 0）**，
+    合成"车道中间锥桶"全过；旧机位 sub.mp4 滤掉 94%；但 1.mp4（左线在画面外、车道带是"猜"的）只滤 6%
+    ⇒ **它不是银弹**：ROI 上沿怎么开要用当天视频量（`scripts/diag/cone_calibrate.py` 同时给两列）。
+  · ★ **只绕"前方"的锥桶**（`--cone-max-bottom-y`，默认 300px；0=关）：框底（接地点）已经很低 =
+    贴到车头/已经绕过，绕也没用。2026-10-16 实验室实测的教训：画面**底部角落的蓝色物**（实验室是蓝色地面，
+    框底 384 = 贴着裁剪线）会被判"在车道线内"并点着一次 3.2s 的 S 型；而赛道实测里锥桶各段接近的框底是
+    90~226 ⇒ 300 只压掉"太近"的，不影响正常接近段（锥桶视频仍 7/7 段触发）。
+  · 绕行期间**豁免**跑偏/画龙护栏（那是刻意的大幅转向 —— 10-11 教训：不豁免 S 走到一半
+    就被 guard 停死），安全靠四条兜底：油门降到绕行档、每段时间上限、
+    **读数一断（丢线）立刻中止绕行**把方向盘交回丢线阶梯、转向仍受 PD 的 ±limit 限幅。
+  · 单侧帧的"回中位直行"在绕行期间让位（相位优先级 **cone > single**）。
+  · 检测档：**`CONE_GATE_ROI` 上沿已按 2026-10-16 现场锥桶视频（手推，2564 帧）定档为 0.10**（裁剪后 y=38 起）——
+    锥桶**首帧**框顶 y≈50~72（框 28~34 × 40~46px；h=40 正是 `CONE_MIN_H` 的下限 ⇒ **检出距离由 min_h 决定**，
+    实测约 3.5m）；上沿 0.20 会把首帧切成 h≈21 被 min_h 拒掉、迟 ~0.2~0.3s。
+    空赛道（1014 帧目录 3573 帧 / 2.mp4 / 1.mp4）在这一档 + 先验下 **0 触发**；锥桶视频 7 段接近**全部检出**。
+    ⚠️ **手推姿态差**：拍视频时人按着车尾、摄像头上浮 → 画面顶部会出现"赛道尽头之外"的东西（墙/长椅/塑料膜，
+    y0~48、多为单帧）；**真跑时后驱加速让车头更低** → 顶部噪声更少、但同一 ROI 行对应更近的距离（锥桶更晚入画）。
+    ⇒ 首次真跑后用 `--no-motor --cone` 存图复核，必要时把上沿开到 0.05（有先验兜底）。
+  · 现场顺序照 §2.8：轮子架空 `--no-motor --cone` 看读数 / `--calibrate --cone` 看锥桶落点 →
+    场地慢速 → 才考虑打开默认。绕行油门现场 A/B 档 = 1585/1580/1575/1570（`--cone-speed-us`）。
+
 帧率口径（下摄 ≈30fps，自动曝光，亮/暗会 9~30 变）
 ---------------------------------------------------
 控制律全程走 dt：`control/rate.py` 的 `FrameRate` 实测 dt + `PidRef.step(e, dt)` +
@@ -75,15 +111,32 @@
     # ⑤ 车上：只看读数不动电机（车摆正在车道里，别挡板）
     sudo python3 /root/dev/scripts/lane_final_test.py --no-motor
 
+    # ⑤b 车上：锥桶相位看读数（锥桶摆车前 2~3m，轮子架空/场地空旷）
+    sudo python3 /root/dev/scripts/lane_final_test.py --no-motor --cone
+    sudo python3 /root/dev/scripts/lane_final_test.py --calibrate --cone      # 静止看锥桶落点
+
     # ⑥ 车上：正式跑（场地空旷 + 有人持急停；蓝板挡一下再移开 = 发车）
     sudo python3 /root/dev/scripts/lane_final_test.py --allow-motion --max-seconds 120
+
+    # ⑦ 离线验收（§2.8 门槛）：整段**空赛道**必须零触发
+    "$PY" scripts/lane_final_test.py --frames ../train/opencv-level1/video/frames/2 --cone
 
 现场清单（去操场照这个顺序做）
 ------------------------------
 1. 车摆正在车道里（自检要看你前方的赛道）→ 启动 ⑤/⑥，看启动日志三行：
    「实测帧率」「检测档 ROI/前瞻带」「PID 登记→逐帧等效」；
 2. 看到「✅ 起步前自检完成」→ 把蓝板挡到下摄正前方 → 移开 → 发车；
-3. 想停：把板挡回下摄正前方（或 Ctrl+C）；跑完看 `logs/lane_<时间戳>/run.csv`；
+3. 想停（2026-10-17 起按这个顺序，调试期）：
+   ① **停止文件（首选）**——任何通道都能发，不依赖 PTY/PID/命令行：
+      另开会话 / 串口 / 网页终端里 `touch /dev/shm/lane_stop`（`--stop-file` 可改路径）。
+      主循环每帧查它，走的是与 Ctrl+C 完全相同的安全收尾；**启动时清残留、退出时也清**。
+   ② `bash /root/dev/scripts/stop_run.sh`（车本地会话里敲）= 按 PID 发 TERM；等价
+      `pkill -TERM -f lane_final_test.py`。
+   ③ Ctrl+C —— **只在「本进程是该终端的前台作业」时才是信号**（启动日志会打印这条自检：
+      tty/pgid/tpgid；前台手敲能用；无 PTY / 后台 `&` / nohup / 在别的窗口按，都到不了）。
+   ④ 把板挡回下摄正前方**也能停，但不是闸门的功劳**——板挡住画面会丢线，维持 0.6s 后按丢线停车
+      （还会往前滑一段）；**闸门发车后即闩锁，没有"再见板即停"**。
+   车不停就**直接断电**（AGENTS.md §1.1）。跑完看 `logs/lane_<时间戳>/run.csv`；
 4. 网页图传全程可用（本脚本只停副摄那一路推流，主摄/网页不受影响）；
 5. 读数不对先跑 ①/② 看叠加图，别在现场猜参数。
 
@@ -116,6 +169,7 @@ from control.lane_control import (BigErrorGuard, LossGuard, NEUTRAL_US, Oscillat
                                   PidRef, adaptive_pulse, floor_pulse, gains_for)
 from control.rate import REF_FPS, FrameRate
 from vision.camera_guard import camera_exclusive, crop_frame, open_camera
+from vision.cone_detect import ConeBox, ConeDetector, ConeTracker
 from vision.start_gate import StartGate
 
 # ================================================================ 检测档（1014 素材实测标定）
@@ -179,6 +233,26 @@ ERR_STOP_PX0, ERR_STOP_S0 = 60.0, 1.5
 RESUME_FRAMES = 5           # 丢线停车后连续 N 帧有效才自动恢复（防抖）
 PRINT_EVERY0 = 10
 MAX_SECONDS0 = 120.0
+# ★ 停止文件（调试期"停车按钮"，2026-10-17）：**文件存在 = 停车**。为什么需要它：
+#   Ctrl+C 只在"本进程是那个终端的前台作业"时才是信号（`/proc` 的 tpgid == pgid）——
+#   2026-10-16 现场 7 趟日志里零「收到信号」就是按键根本没到进程。停止文件不需要 PTY、
+#   不需要 PID、不需要第二个会话里的命令行特征：任何通道（另一个 SSH / 热点 / 串口 /
+#   网页终端 / AI 工具）`touch` 一下就停，走的是与 Ctrl+C 完全相同的安全收尾链。
+STOP_FILE0 = "/dev/shm/lane_stop"
+
+# ---- 锥桶相位默认值（`--cone`；全部来自 config/settings.py 的 CONE_*，现场可 CLI 覆盖）
+#   出处：2026-10-15 按 `doc/开发文档.md` §2.8 的"每加一个元素的固定流程"接入。
+#   检测档（ROI/HSV/框高）已按**裁剪后画面**重标，见 settings.CONE_GATE_ROI 的注释与证据。
+CONE_ROI_TOP0 = float(settings.CONE_GATE_ROI[2])   # 0.10 = 裁剪后 y=38 起（2026-10-16 现场锥桶视频定档）
+CONE_OFFSET_PX0 = float(settings.CONE_AVOID_OFFSET_PX)   # 目标点偏移幅度（px）
+CONE_AVOID_S0 = float(settings.CONE_AVOID_S)             # 单段绕行时长（秒）
+CONE_SEGUE_S0 = float(settings.CONE_SEGUE_S)             # 两段之间的回正直行（秒）
+CONE_COOLDOWN_S0 = float(settings.CONE_COOLDOWN_S)       # 一轮结束后的冷却（秒）
+CONE_SPEED_US0 = float(settings.CONE_AVOID_US)           # 绕行期油门（>死区，低速）
+CONE_SIDE_TOL_PX0 = float(settings.CONE_SIDE_TOLERANCE_PX)   # "居中"容差（px）
+CONE_FIRST_DIR0 = str(settings.CONE_FIRST_DIR)           # 居中时先往哪边绕（left/right）
+CONE_IN_LANE_TOL_PX0 = 20.0      # "在车道线内"先验的容差（px）：框的中心两侧各放宽这么多仍算在线内
+CONE_MAX_BOTTOM_Y0 = float(settings.CONE_TRIGGER_MAX_BOTTOM_Y)   # 框底高于它才算"前方锥桶"（0=关）
 
 
 # ================================================================ 读数
@@ -209,6 +283,21 @@ class Reading:
     def add_tag(self, t: str) -> None:
         """追加标签（保留已有）——旧版踩过"直接赋值把 jump-reject 吃掉"的坑。"""
         self.tag = f"{self.tag}|{t}" if self.tag else t
+
+
+@dataclass
+class ConeState:
+    """一帧的锥桶证据（入口的检测器/防抖器 → 相位机的输入；None = 没开锥桶相位）。
+
+    相位机**不碰摄像头、不碰检测器**：入口（run_online/run_offline）负责"这一帧有没有锥桶"，
+    这里只做"要不要绕、往哪绕、绕多久"的仲裁 —— 与 lane 读数同一条时间轴，离线能整套回放。
+    """
+    present: bool = False                 # 防抖后的结论（ConeTracker：连续 3 帧进、2 帧出）
+    center_x: Optional[float] = None      # 最可信那一只的 center_x（选绕行侧用）
+    top_y: Optional[float] = None         # 框顶行（"在车道线内"先验要看顶/底两行）
+    bottom_y: Optional[float] = None      # 框底行 = 接地点（估距/"在车道内"先验）
+    n_boxes: int = 0                      # 本帧原始检出框数（诊断/落盘）
+    conf: float = 0.0                     # 最可信那只的 conf
 
 
 class HalfWidthPrior:
@@ -589,7 +678,19 @@ class LaneRunner:
                  use_filter: bool = True, filter_window: Optional[int] = None,
                  filter_outlier_px: Optional[float] = None,
                  observe_only: bool = False,
-                 single_max_s: float = SINGLE_MAX_S0) -> None:
+                 single_max_s: float = SINGLE_MAX_S0,
+                 # ---- 锥桶相位（--cone；默认关 ⇒ 行为与本开关加入前逐位一致）----
+                 cone_enabled: bool = False,
+                 cone_offset_px: float = CONE_OFFSET_PX0,
+                 cone_avoid_s: float = CONE_AVOID_S0,
+                 cone_segue_s: float = CONE_SEGUE_S0,
+                 cone_speed_us: float = CONE_SPEED_US0,
+                 cone_cooldown_s: float = CONE_COOLDOWN_S0,
+                 cone_side_tol_px: float = CONE_SIDE_TOL_PX0,
+                 cone_first_dir: str = CONE_FIRST_DIR0,
+                 cone_in_lane: bool = True,
+                 cone_in_lane_tol_px: float = CONE_IN_LANE_TOL_PX0,
+                 cone_max_bottom_y: float = CONE_MAX_BOTTOM_Y0) -> None:
         self.det = det
         self.rate = rate
         self.center_deg = float(center_deg)
@@ -620,9 +721,34 @@ class LaneRunner:
         self.guard_trips = 0
         self.frames_ok = 0
         self.frames_total = 0
+        # ---- 锥桶相位状态（-cone 默认关：全部字段只在 cone_enabled 时被读写）----
+        self.cone_enabled = bool(cone_enabled)
+        self.cone_offset_px = float(cone_offset_px)
+        self.cone_avoid_s, self.cone_segue_s = float(cone_avoid_s), float(cone_segue_s)
+        self.cone_cooldown_s = float(cone_cooldown_s)
+        self.cone_side_tol_px = float(cone_side_tol_px)
+        self.cone_first_left = str(cone_first_dir).strip().lower() != "right"
+        self.cone_in_lane = bool(cone_in_lane)      # "锥桶只在两条车道线之间"先验（见 _cone_in_lane）
+        self.cone_in_lane_tol_px = float(cone_in_lane_tol_px)
+        # 只对"前方"的锥桶起绕（框底高于它；0=关）——太近的（贴着车头/已经绕过）绕也没用
+        self.cone_max_bottom_y = float(cone_max_bottom_y)
+        # 绕行油门必须**严格大于**死区：低于/等于死区的"低速绕行"实际是停车
+        # （车会停死在锥桶前面）。现场档位 1585/1580/1575/1570（默认 1575），下限不会再动它。
+        self.cone_speed_us = max(float(cone_speed_us),
+                                 float(settings.ESC_DEADBAND_US) + 1.0)
+        self.cone_phase: Optional[str] = None      # None / avoid1 / resume / avoid2
+        self._cone_t0: Optional[float] = None      # 本段起始时刻
+        self._cone_left = self.cone_first_left     # 本次 S 的绕行侧（触发那一刻定，S 内不复算）
+        self._cone_cooldown_until = -1e9
+        self._cone_off_used: Optional[float] = 0.0  # 上一帧用的目标点偏移（变号时预置微分）
+        self.cone_triggers = 0                      # 触发次数（验收/会话汇总用）
+        self.cone_aborts = 0                        # 半途中止次数（丢线/停车）
+        self.cone_out_lane = 0                      # 被"在车道线内"先验拦下的次数（现场判据是否过严）
+        self.cone_too_near = 0                      # 被判"太近、不值当绕"的次数（贴车头/已绕过）
 
     # ------------------------------------------------------------ 主步进
-    def step(self, now: float, r: Reading, allowed: bool) -> ControlOut:
+    def step(self, now: float, r: Reading, allowed: bool,
+             cone: Optional[ConeState] = None) -> ControlOut:
         self.frames_total += 1
         center = self.center_deg
         if not allowed:                       # 发车许可没给（等板/离线前段）
@@ -638,6 +764,8 @@ class LaneRunner:
         since_s = 0.0 if valid else (999.0 if ls.since_s == float("inf") else ls.since_s)
 
         if self.stopped:
+            if self.cone_phase is not None:   # 停车相位里不能留半截 S 型避让
+                self._cone_finish(now, "停车", announce=False)
             # 护栏触发 = 永久停；丢线超时 = 连续有效帧够多可恢复
             if self.stop_reason == "lost":
                 self._valid_streak = self._valid_streak + 1 if valid else 0
@@ -657,6 +785,25 @@ class LaneRunner:
                     return ControlOut("lost", center, NEUTRAL_US, None, since_s=since_s)
             else:
                 return ControlOut("guard", center, NEUTRAL_US, None, since_s=since_s)
+
+        # ---- ★ 锥桶相位（--cone；相位优先级：cone > single > 循迹）----
+        if self.cone_enabled:
+            self._cone_advance(now, r, cone, ls)
+        if self.cone_phase is not None and ls.phase == "fresh":
+            self.frames_ok += 1
+            self.last_center = r.center_x
+            off = self.cone_target_offset()
+            err = r.error if r.error is not None else 0.0
+            err_filt = self.err_filter.update(err) if self.err_filter is not None else err
+            angle = self._step_with_offset(err_filt, off)
+            # 绕行是**刻意**的大幅转向：单侧/弱对限幅与跑偏/画龙护栏一律豁免
+            # （10-11 教训：不豁免 → S 走到一半被 guard 停死）。兜底 = 低速 + 计时上限 +
+            # 丢线立刻中止（_cone_advance 里）；转向仍受 PD 自己的 ±limit 限幅。
+            held = now - (self._cone_t0 if self._cone_t0 is not None else now)
+            dur = self.cone_segue_s if self.cone_phase == "resume" else self.cone_avoid_s
+            return ControlOut(self.cone_phase, angle, self.cone_speed_us, err_filt - off,
+                              note=f"目标点偏移 {off:+.0f}px（{held:.1f}/{dur:.1f}s）",
+                              since_s=since_s)
 
         # ---- 本帧有有效读数 ----
         if ls.phase == "fresh":
@@ -688,7 +835,7 @@ class LaneRunner:
                                   note=f"单侧回中位直行（已 {held_s:.1f}s）")
             err = r.error if r.error is not None else 0.0
             err_filt = self.err_filter.update(err) if self.err_filter is not None else err
-            angle = self.pid.step(err_filt, self.rate.dt)
+            angle = self._step_with_offset(err_filt, 0.0)
             angle = apply_steer_cap(center, angle, r.both_sides, r.n_l, r.n_r,
                                     self.single_limit, self.weak_limit)
             out_us = adaptive_pulse(err, self.speed_us)
@@ -730,6 +877,130 @@ class LaneRunner:
         print(f"[LANE] ⚠️ 丢线 {ls.since_s:.1f}s 未恢复 → 停车（不带垃圾读数继续跑）")
         return ControlOut("lost", center, NEUTRAL_US, None, since_s=since_s)
 
+    # ------------------------------------------------------------ 锥桶相位（--cone）
+    def cone_target_offset(self) -> float:
+        """当前相位的目标点偏移（px，加在 det.target_x 上）：往左绕 = +，往右绕 = −，回正 = 0。
+
+        符号口径（与本文件其余部分一致）：`error = center_x − target_x`；车往**左**偏时画面里的
+        车道中心会右移（center_x 变大）⇒ 把目标点也右移（target+off）时，稳态就落在"车停在
+        车道中心左侧"。所以 **往左绕 = 目标点 +offset，往右绕 = 目标点 −offset**。
+        """
+        if self.cone_phase == "avoid1":
+            return self.cone_offset_px if self._cone_left else -self.cone_offset_px
+        if self.cone_phase == "avoid2":
+            return -self.cone_offset_px if self._cone_left else self.cone_offset_px
+        return 0.0
+
+    def _step_with_offset(self, err_filt: float, off: float) -> float:
+        """按"目标点偏移"跑一步 PD（off=0 = 正常跟线）。
+
+        进出绕行段时 off 会跳变（0 → ±offset → 反向）——**跳变那一帧把微分预置到新误差**
+        （`PidRef.prime` 的用途：否则 kd 会把这一跳当成几十~上百 px 的瞬态，给一记假踢腿）。
+        """
+        if self._cone_off_used is None or abs(off - self._cone_off_used) > 1e-9:
+            self.pid.prime(err_filt - off)
+            self._cone_off_used = off
+        return self.pid.step(err_filt - off, self.rate.dt)
+
+    def _cone_advance(self, now: float, r: Reading, cone: Optional[ConeState], ls) -> None:
+        """推进锥桶相位机（触发 → 换段 → 收尾/中止）。只动相位与计时，不碰舵/油门。"""
+        if self.cone_phase is not None:
+            if ls.phase != "fresh":           # 读数断（hold/lost）→ 中止：方向盘交回丢线阶梯
+                self._cone_finish(now, f"读数中断（{ls.phase}）")
+                return
+            t = self._cone_t0 if self._cone_t0 is not None else now
+            if self.cone_phase == "avoid1" and (now - t) >= self.cone_avoid_s:
+                self._cone_enter("resume", now)
+                print(f"[LANE] → S 型：回正直行 {self.cone_segue_s:.1f}s（目标点归零）")
+            elif self.cone_phase == "resume" and (now - t) >= self.cone_segue_s:
+                self._cone_enter("avoid2", now)
+                print(f"[LANE] → S 型：反向绕 {self.cone_avoid_s:.1f}s"
+                      f"（目标点 {self.cone_target_offset():+.0f}px）")
+            elif self.cone_phase == "avoid2" and (now - t) >= self.cone_avoid_s:
+                self._cone_finish(now, "S 型避让结束")
+            return
+        # ---- 触发：防抖成立 + 有可信读数（与"中止"同一把尺子）+ 在车道线内 + 不在冷却 ----
+        if cone is None or not cone.present or ls.phase != "fresh":
+            return
+        if now < self._cone_cooldown_until:
+            return
+        if not self._cone_in_lane(r, cone):
+            self.cone_out_lane += 1                 # 见到锥桶、但不在车道带内 → 只计数不入相位
+            return
+        # ★ 只对"前方"的锥桶起绕：框底（接地点）已经很低 = 贴到车头/已经绕过 → 绕也没用
+        #   （2026-10-16 实验室实测：画面底部角落的蓝色物会被判"在车道内"并点着 3.2s 的 S 型）
+        if 0 < self.cone_max_bottom_y < (cone.bottom_y or 0.0):
+            self.cone_too_near += 1
+            return
+        left, side_txt = self._cone_side(cone)
+        self._cone_left = left
+        self.cone_triggers += 1
+        self._cone_enter("avoid1", now)
+        cx = "—" if cone.center_x is None else f"{cone.center_x:.0f}"
+        print(f"[LANE] 🚩 锥桶（{side_txt}，x={cx} vs 中线 {self.det.target_x:.0f}）"
+              f"→ 往{'左' if left else '右'}绕：目标点 {self.cone_target_offset():+.0f}px，"
+              f"{self.cone_avoid_s:.1f}s 后回正（速度 {self.cone_speed_us:.0f}us）")
+
+    def _cone_in_lane(self, r: Reading, cone: ConeState) -> bool:
+        """★ "锥桶只在两条车道线之间"先验（2026-10-16，用户给的场地事实）。
+
+        为什么需要它：**要尽早发现锥桶，就必然在画面最上面几行找它**——而那一带正是"赛道尽头之外"
+        的远景（塑料膜边、墙/树影、远处的人）出现的地方，ROI 上沿开得越早、误检越多。这条先验是
+        ROI 之外的第二道闸门：锥桶框在**顶行与底行**都必须落在车道带内（带 = 左右线在该行的 x 之间，
+        由当前帧的 lane 读数外推）。**两行都要**是关键 —— 只查底边几乎滤不掉（外推的车道带越往下越宽，
+        2026-10-16 实测只滤 11~31%）；两行都查时：当前机位空赛道 2.mp4 的远景误检被滤掉 **100%**
+        （ROI 0.05：93 框→0、触发 5→0），合成"车道中间锥桶"20/20 全过；
+        但 1.mp4（10-13 傍晚，画面顶部有远处的人）只滤 17% ⇒ **它不是银弹**，ROI 上沿怎么开
+        必须用当天视频量（`scripts/diag/cone_calibrate.py` 同时给"带先验/不带先验"两列）。
+
+        读数不可信（单侧帧 / 没有 k）时**不拦**：拦错 = 漏锥 = 撞锥，比误检更贵（宁可让 ROI 去拦）。
+        ⚠️ 入口还必须在**喂防抖器之前**用同一个函数过滤框（`cone_in_lane`），否则"3 帧防抖"数的是
+        未过先验的原始检出（实测：43 帧连续误检里有 1 帧恰好落在带内 → 照样触发）。
+        """
+        if not self.cone_in_lane:
+            return True
+        return cone_in_lane(r, cone, self.det.y_ref, self.cone_in_lane_tol_px)
+
+    def _cone_side(self, cone: ConeState) -> Tuple[bool, str]:
+        """选绕行侧（返回 (是否往左绕, 文字说明)）：锥偏左→往右绕、偏右→往左绕。
+
+        容差内 = "居中" → 用 `--cone-first-dir` 定的默认侧（现场按 S 型的第一个锥摆位定）。
+        """
+        cx = cone.center_x
+        if cx is None:
+            return self.cone_first_left, "位置未知"
+        d = cx - self.det.target_x
+        if d < -self.cone_side_tol_px:
+            return False, f"偏左 {abs(d):.0f}px"
+        if d > self.cone_side_tol_px:
+            return True, f"偏右 {d:.0f}px"
+        return self.cone_first_left, "居中"
+
+    def _cone_enter(self, phase: str, now: float) -> None:
+        """进入/切换绕行段：清掉护栏与单侧计时的旧账（绕行是刻意的，别让旧累积立刻触发）。"""
+        self.cone_phase = phase
+        self._cone_t0 = float(now)
+        self.big_err.reset()
+        self.osc.reset()
+        self._single_since = None
+
+    def _cone_finish(self, now: float, why: str, announce: bool = True) -> None:
+        """收尾/中止绕行：交回循迹 + 进冷却（防同一个锥二进宫）。"""
+        aborted = self.cone_phase != "avoid2"      # 只有走完 avoid2 才算"完成"
+        self.cone_phase = None
+        self._cone_t0 = None
+        self._cone_off_used = None      # 回到循迹时把微分预置到"无偏移"的误差（防踢腿）
+        self._single_since = None
+        self.big_err.reset()
+        self.osc.reset()
+        self._cone_cooldown_until = float(now) + self.cone_cooldown_s
+        if aborted:
+            self.cone_aborts += 1
+        if announce:
+            print(f"[LANE] {'⚠️ ' if aborted else ''}S 型避让"
+                  f"{'中止' if aborted else '完成'}（{why}）→ 回到循迹"
+                  f"（冷却 {self.cone_cooldown_s:.1f}s）")
+
     def _guard_check(self, now: float, angle: float, err_filt: Optional[float],
                      err_raw: Optional[float]) -> bool:
         """返回 True = 本帧触发护栏（调用方应立刻回中位停车）。"""
@@ -750,12 +1021,22 @@ class LaneRunner:
 
 # ================================================================ 叠加图 / 记录
 def annotate(frame: np.ndarray, r: Optional[Reading], det: LaneFinalDetector,
-             phase: str = "", extra: str = "") -> np.ndarray:
+             phase: str = "", extra: str = "", cones: Optional[Sequence[ConeBox]] = None,
+             target_px: Optional[float] = None) -> np.ndarray:
     vis = frame.copy()
     h, w = vis.shape[:2]
     for y, color in ((det.y_top, (255, 128, 0)), (det.y_bot, (255, 128, 0)),
                      (det.look_top, (0, 200, 255)), (det.look_bot, (0, 200, 255))):
         cv2.line(vis, (0, int(y)), (w, int(y)), color, 1)
+    if cones:
+        for c in cones:                      # 锥桶候选框（橙）+ 中心/底边（选绕行侧与估距用）
+            x0, y0, x1, y1 = (int(v) for v in c.xyxy)
+            cv2.rectangle(vis, (x0, y0), (x1, y1), (0, 165, 255), 2)
+            cv2.circle(vis, (int(c.center_x), y0), 3, (0, 165, 255), -1)
+            cv2.putText(vis, f"{c.center_x:.0f}/yb{c.bottom_y:.0f}/c{c.conf:.2f}",
+                        (x0, max(10, y0 - 4)), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 0), 2)
+            cv2.putText(vis, f"{c.center_x:.0f}/yb{c.bottom_y:.0f}/c{c.conf:.2f}",
+                        (x0, max(10, y0 - 4)), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 165, 255), 1)
     if r is not None:
         for k, x_ref, color in ((r.left_k, r.left_x, (255, 80, 80)),
                                 (r.right_k, r.right_x, (80, 80, 255))):
@@ -766,6 +1047,9 @@ def annotate(frame: np.ndarray, r: Optional[Reading], det: LaneFinalDetector,
                 xb = x_ref + (y1 - det.y_ref) / k
                 cv2.line(vis, (int(xa), int(y0)), (int(xb), int(y1)), color, 2)
         cv2.line(vis, (int(det.target_x), 0), (int(det.target_x), h), (0, 200, 0), 1)
+        if target_px is not None and abs(target_px - det.target_x) > 0.5:
+            # 绕行期的**有效目标点**（目标点偏移）：洋红线，一眼看出车在往哪条线贴
+            cv2.line(vis, (int(target_px), 0), (int(target_px), h), (255, 0, 255), 1)
         if r.center_x is not None:
             ym = int((det.look_top + det.look_bot) * 0.5)
             cv2.circle(vis, (int(r.center_x), ym), 6, (0, 255, 255), 2)
@@ -844,6 +1128,128 @@ class Recorder:
             self._fh.close()
         except Exception:
             pass
+
+
+# ================================================================ 锥桶相位的入口侧（检测/防抖/统计）
+def parse_hsv3(text: str) -> Optional[Tuple[int, int, int]]:
+    """'H,S,V' → (h, s, v)；空串 → None（= 用 settings 默认）。现场覆盖 HSV 用。"""
+    if not text:
+        return None
+    try:
+        parts = [int(float(v)) for v in text.replace(" ", "").split(",")]
+    except ValueError as exc:
+        raise SystemExit(f"[LANE] HSV 参数要 3 个数（H,S,V），实得 {text!r}：{exc}")
+    if len(parts) != 3:
+        raise SystemExit(f"[LANE] HSV 参数要 3 个数（H,S,V），实得 {text!r}")
+    return (parts[0], parts[1], parts[2])
+
+
+def cone_setup(args) -> Tuple[Optional[ConeDetector], Optional[ConeTracker]]:
+    """按 CLI/settings 建锥桶检测器与防抖器（`--cone` 关时返回 (None, None) = 零开销）。
+
+    检测器**复用** `vision/cone_detect.py`（不复制）：HSV 蓝色连通域 → 尺寸/面积/扁平闸门；
+    防抖 = `ConeTracker`（连续 3 帧进、2 帧出）。ROI/HSV/最小框高都留了现场覆盖参数。
+    """
+    if not getattr(args, "cone", False):
+        return None, None
+    roi = (float(settings.CONE_GATE_ROI[0]), float(settings.CONE_GATE_ROI[1]),
+           float(args.cone_roi_top), float(settings.CONE_GATE_ROI[3]))
+    det = ConeDetector(method="hsv", roi=roi,
+                       hsv_low=parse_hsv3(args.cone_hsv_low),
+                       hsv_high=parse_hsv3(args.cone_hsv_high),
+                       min_h=args.cone_min_h)
+    trk = ConeTracker()
+    crop_y = int(getattr(settings, "FRAME_CROP_LINE_Y", 0) or 0)
+    print(f"[LANE] 锥桶检测：HSV ROI x{roi[0]:.2f}~{roi[1]:.2f} / y{roi[2]:.2f}~{roi[3]:.2f}"
+          + (f"（= 裁剪后画面 y{int(roi[2] * crop_y)} 起）" if crop_y else "")
+          + f" | 防抖 {trk.enter_frames}/{trk.exit_frames} 帧 | 最小框高 "
+          f"{args.cone_min_h if args.cone_min_h is not None else settings.CONE_MIN_H}px"
+          f" | 最小框宽 {settings.CONE_MIN_W}px")
+    return det, trk
+
+
+def cone_in_lane(r: Optional[Reading], cone, y_ref: float, tol_px: float = CONE_IN_LANE_TOL_PX0) -> bool:
+    """★ "锥桶只在两条车道线之间"先验（用户给的场地事实）——**唯一实现**，入口与相位机共用。
+
+    传入 `cone` 只要有 `center_x` / `top_y` / `bottom_y`（`ConeBox` 与 `ConeState` 都满足；
+    ⚠️ 别用 getattr 兜底——`ConeBox` 早期没有 `top_y`，兜底会**静默退化成"只查底边"**，
+    那样几乎滤不掉任何东西（2026-10-16 实测踩过：93 框只滤 2 个、照样触发）。
+    规则：把左右车道线外推到锥桶框的**顶行与底行**，框中心两行都要落在带内（±容差）。
+    **读数不可信（无读数 / 单侧 / 没有斜率）→ 返回 False（这一帧不算锥桶证据）**：
+    绕行本来就是"相对车道中心"的动作，读数不可信时不该主动绕（2026-10-16 实测：2.mp4 那 93 个远景
+    误检里 79 个双侧帧被带先验滤掉、剩 14 个**全在单侧帧**——单侧帧放行就会 5 帧连续点着一次避让）。
+    `--no-cone-in-lane` 关掉本先验时才回到"单侧帧也能触发"的老行为。
+
+    实测（2026-10-16，本机复跑）：当前机位空赛道 2.mp4 远景误检 93 框→0、触发 5→0（ROI 0.05 时），
+    合成"车道中间锥桶"20/20 全过；1.mp4（10-13 傍晚，画面顶部有远处的人）只滤 17% ⇒ 不是银弹。
+    """
+    if r is None or not r.both_sides or not r.left_k or not r.right_k \
+            or r.left_x is None or r.right_x is None:
+        return False          # 读数不可信：这一帧不提供锥桶证据（见 docstring）
+    cx = cone.center_x
+    top, bot = cone.top_y, cone.bottom_y
+    if cx is None or bot is None:
+        return True
+    rows = (bot,) if top is None else (top, bot)
+    for y in rows:
+        xl = r.left_x + (y - y_ref) / r.left_k
+        xr = r.right_x + (y - y_ref) / r.right_k
+        lo, hi = (xl, xr) if xl <= xr else (xr, xl)
+        if not (lo - tol_px <= cx <= hi + tol_px):
+            return False
+    return True
+
+
+def cone_state_of(tracker: Optional[ConeTracker],
+                  cones: Sequence[ConeBox]) -> Optional[ConeState]:
+    """本帧的锥桶证据（防抖结论 + 最可信那只的中心/行号/置信度）；没开 = None。"""
+    if tracker is None:
+        return None
+    present = tracker.update(cones)
+    last = tracker.last
+    return ConeState(present=present,
+                     center_x=(last.center_x if last is not None else None),
+                     top_y=(last.xyxy[1] if last is not None else None),
+                     bottom_y=(last.bottom_y if last is not None else None),
+                     n_boxes=len(cones),
+                     conf=(last.conf if last is not None else 0.0))
+
+
+def cone_filter_in_lane(r: Optional[Reading], cones: Sequence[ConeBox],
+                        y_ref: float, tol_px: float) -> Tuple[List[ConeBox], int]:
+    """把"不在车道线之间"的框**在喂防抖器之前**滤掉（返回 (留下的框, 滤掉几个)）。
+
+    为什么必须在防抖之前：否则 3 帧防抖数的是未过先验的原始检出 —— 实测（2.mp4，ROI 0.05）
+    43 帧连续误检里恰好有 1 帧的框落进带内，照样点着了避让。
+    """
+    kept = [c for c in cones if cone_in_lane(r, c, y_ref, tol_px)]
+    return kept, len(cones) - len(kept)
+
+
+def cone_summary_line(flags: Sequence[bool], n_boxes: int, runner: "LaneRunner",
+                      rejected: int = 0) -> str:
+    """锥桶统计一行（§2.8 的"空赛道零触发"验收就看这一行的"相位触发 N 次"）。"""
+    n = len(flags)
+    hits = sum(1 for f in flags if f)
+    runs, cur = [], 0
+    for f in flags:
+        if f:
+            cur += 1
+        else:
+            if cur:
+                runs.append(cur)
+            cur = 0
+    if cur:
+        runs.append(cur)
+    tail = ("  ✅ 零触发（空赛道验收看这个）" if runner.cone_triggers == 0
+            else "  ⚠️ 有触发：空赛道=误检要收紧 ROI/HSV；有锥桶=应当触发")
+    out_lane = (f" | 车道外拦截 {rejected + runner.cone_out_lane} 个框"
+                if (rejected or runner.cone_out_lane) else "")
+    too_near = (f" | 太近跳过 {runner.cone_too_near} 次" if runner.cone_too_near else "")
+    return (f"[LANE] 锥桶（--cone）：命中 {hits}/{n} 帧（{hits / max(1, n) * 100:.1f}%）"
+            f" | 检出框 {n_boxes} 个 | 最长连续 {max(runs) if runs else 0} 帧"
+            f" | 相位触发 {runner.cone_triggers} 次 / 中止 {runner.cone_aborts} 次"
+            f"{out_lane}{too_near}{tail}")
 
 
 # ================================================================ 离线模式（不碰硬件）
@@ -1001,6 +1407,10 @@ def run_offline(args, det: LaneFinalDetector, center_deg: float, sign: float,
     os.makedirs(out_dir, exist_ok=True)
     rec = Recorder(os.path.join(out_dir, "run.csv"), os.path.join(out_dir, "frames"),
                    args.save_every_s if args.save_every_s > 0 else 0.0, args.save_max)
+    cone_det, cone_tracker = cone_setup(args)
+    cone_flags: List[bool] = []
+    cone_boxes_total = 0
+    cone_rejected = 0
     montage_every = args.montage
     thumbs: List[np.ndarray] = []
     sheet_no = 0
@@ -1011,9 +1421,17 @@ def run_offline(args, det: LaneFinalDetector, center_deg: float, sign: float,
     for k, (idx, frame) in enumerate(items):
         t_frame = time.perf_counter()
         r = det.detect(frame)
+        cones = cone_det.detect(frame) if cone_det is not None else []
+        if cone_det is not None and runner.cone_in_lane:
+            cones, _rej = cone_filter_in_lane(r, cones, det.y_ref, runner.cone_in_lane_tol_px)
+            cone_rejected += _rej
         det_ms.append(time.perf_counter() - t_frame)
         now = k / fps                       # 离线时间轴（秒）
-        co = runner.step(now, r, allowed=True)
+        ci = cone_state_of(cone_tracker, cones)
+        if ci is not None:
+            cone_flags.append(bool(cones))
+            cone_boxes_total += len(cones)
+        co = runner.step(now, r, allowed=True, cone=ci)
         rows.append(r)
         centers.append(r.center_x)
         phases.append(co.phase)
@@ -1022,13 +1440,16 @@ def run_offline(args, det: LaneFinalDetector, center_deg: float, sign: float,
         if args.print_every and k % args.print_every == 0:
             print(f"[LANE] f{idx:06d} {co.phase:12s} L={r.n_l:2d}({r.score_l:4.1f}) "
                   f"R={r.n_r:2d}({r.score_r:4.1f}) c={_fmt(r.center_x) or '—':>5} "
-                  f"err={_fmt(r.error) or '—':>6} ang={co.angle:.1f} us={co.out_us:.0f} {r.tag}")
+                  f"err={_fmt(r.error) or '—':>6} ang={co.angle:.1f} us={co.out_us:.0f} {r.tag}"
+                  + (f" cone={len(cones)}{'*' if ci and ci.present else ''}"
+                     if cone_det is not None else ""))
+        ann = (lambda fr: annotate(fr, r, det, co.phase, cones=cones,
+                                   target_px=det.target_x + runner.cone_target_offset()))
         if args.every and idx % args.every == 0:
-            cv2.imwrite(os.path.join(out_dir, f"f_{idx:06d}.jpg"),
-                        annotate(frame, r, det, co.phase), [cv2.IMWRITE_JPEG_QUALITY, 90])
+            cv2.imwrite(os.path.join(out_dir, f"f_{idx:06d}.jpg"), ann(frame),
+                        [cv2.IMWRITE_JPEG_QUALITY, 90])
         if montage_every and idx % montage_every == 0:
-            thumbs.append(cv2.resize(annotate(frame, r, det, co.phase), (320, 240),
-                                     interpolation=cv2.INTER_AREA))
+            thumbs.append(cv2.resize(ann(frame), (320, 240), interpolation=cv2.INTER_AREA))
             if len(thumbs) == 20:
                 _save_sheet(out_dir, sheet_no, thumbs)
                 sheet_no += 1
@@ -1037,6 +1458,8 @@ def run_offline(args, det: LaneFinalDetector, center_deg: float, sign: float,
         _save_sheet(out_dir, sheet_no, thumbs)
 
     lines = summarize(rows, centers, phases, det_ms)
+    if cone_tracker is not None:
+        lines.append(cone_summary_line(cone_flags, cone_boxes_total, runner, cone_rejected))
     if runner.guard_trips:
         lines.append(f"[LANE] 护栏/超时触发：{runner.guard_trips} 次"
                      f"（画龙/跑偏/探路超时；离线复跑用于回归）")
@@ -1085,6 +1508,9 @@ def run_online_calibrate(args, det: LaneFinalDetector) -> int:
     取决于"车摆在哪"（标定时车必须在车道中间、车头对着行进方向）。
     """
     rows: List[Reading] = []
+    cone_det, cone_tracker = cone_setup(args)        # --calibrate --cone：看锥桶落在画面哪几行
+    cone_flags: List[bool] = []
+    cone_pick: List[ConeBox] = []
     with camera_exclusive(services=("ffmpeg-stream-sub.service",)):
         cap = open_camera(args.cam, settings.IMG_W, settings.IMG_H, fourcc="MJPG")
         if cap is None:
@@ -1093,13 +1519,25 @@ def run_online_calibrate(args, det: LaneFinalDetector) -> int:
         t0 = time.monotonic()
         try:
             while (time.monotonic() - t0) < args.calibrate_s:
+                # 标定也在"停车按钮"的管辖里：相机若卡死，这一路同样要能被人叫停
+                if stop_file_active(getattr(args, "stop_file", "")):
+                    print("[LANE] ⛔ 检测到停止文件 → 提前结束标定")
+                    break
                 ok, frame = cap.read()
                 if not ok or frame is None:
                     time.sleep(0.02)
                     continue
-                rows.append(det.detect(crop_frame(frame)))
+                frame = crop_frame(frame)
+                rows.append(det.detect(frame))
+                if cone_det is not None:
+                    cones = cone_det.detect(frame)
+                    cone_state_of(cone_tracker, cones)
+                    cone_flags.append(bool(cones))
+                    if cones:
+                        cone_pick.append(cones[0])
         finally:
             cap.release()
+    clear_stop_file(getattr(args, "stop_file", ""), "标定结束")
     if not rows:
         print("[LANE] 一帧都没读到")
         return 1
@@ -1122,6 +1560,25 @@ def run_online_calibrate(args, det: LaneFinalDetector) -> int:
         print(f"[LANE] 配对宽中位 {np.median(ws):.0f}px（半宽 {np.median(ws) / 2:.0f}）"
               f" | k 中位 左 {np.median(kl):+.2f} / 右 {np.median(kr):+.2f}")
     print(f"[LANE] ⇒ 跑车命令直接用：--target-x {med:.0f}")
+    if cone_det is not None:
+        n_hit, n_tot = sum(1 for f in cone_flags if f), max(1, len(cone_flags))
+        print(f"[LANE] 锥桶读数（--cone）：命中 {n_hit}/{n_tot} 帧"
+              f"（{n_hit / n_tot * 100:.0f}%）"
+              + ("——画面里真没锥桶就别在意；**有锥桶却 0 命中** = ROI/HSV/框高要现场重标"
+                 if n_hit == 0 else ""))
+        if cone_pick:
+            tops = np.asarray([c.xyxy[1] for c in cone_pick], dtype=float)
+            bots = np.asarray([c.bottom_y for c in cone_pick], dtype=float)
+            hs = np.asarray([c.height for c in cone_pick], dtype=float)
+            xs = np.asarray([c.center_x for c in cone_pick], dtype=float)
+            crop_y = int(getattr(settings, "FRAME_CROP_LINE_Y", 0) or cone_pick[0].xyxy[1] + 1)
+            print(f"[LANE]   框顶 y 中位 {np.median(tops):.0f}（最低 {tops.min():.0f}）"
+                  f" | 底边 y {np.median(bots):.0f} | 高 {np.median(hs):.0f}px"
+                  f" | 中心 x {np.median(xs):.0f}（车道中心：本次测得 {med:.0f} / "
+                  f"运行时 target {det.target_x:.0f}——绕行侧就是拿「锥桶 x vs 中线」判的）")
+            print(f"[LANE]   ⇒ ROI 上沿建议 ≤ {(tops.min() - 8) / max(1, crop_y):.2f}"
+                  f"（= (最低框顶 {tops.min():.0f} − 余量 8)/{crop_y}）"
+                  f"；当前 --cone-roi-top {args.cone_roi_top}")
     if args.save_site:
         try:
             from config import site as _site
@@ -1132,14 +1589,111 @@ def run_online_calibrate(args, det: LaneFinalDetector) -> int:
     return 0
 
 
+# ================================================================ 停车通道（信号 / 停止文件）
+def stop_file_active(path: str) -> bool:
+    """停止文件是否在（调试期"停车按钮"：`touch` 一下就停）。"""
+    return bool(path) and os.path.exists(path)
+
+
+def stop_requested(state: dict, stop_file: str) -> str:
+    """主循环每帧调它 —— 把"信号"和"停止文件"两条停车通道合成一个出口。
+
+    返回停止原因（'' = 继续跑）。信号那条路由 `install_signal_guard` 置 `state["stopped"]`；
+    文件这条路由这里置位并存下原因，方便日志/`session.json` 说清"到底是谁停的"。
+    """
+    if state.get("stopped"):
+        return state.get("stop_by") or "signal"
+    if stop_file_active(stop_file):
+        state["stopped"] = True
+        state["stop_by"] = "stop-file"
+        print(f"[LANE] ⛔ 检测到停止文件 {stop_file} → 安全停车"
+              f"（电调归零、舵机回中、释放摄像头）", flush=True)
+    return state.get("stop_by") or ""
+
+
+def launch_selfcheck() -> dict:
+    """启动自检：这个进程的**按键路径**到底通不通（决定 Ctrl+C 有没有可能停车）。
+
+    判据用内核口径：`/proc/self/stat` 的 pgrp(第 5 字段)/tpgid(第 8 字段)——有控制终端
+    且 `tpgid == pgrp` 才是"那个终端的前台作业"（只有前台作业才收得到键盘 ^C）。
+    查不到（非 Linux/无 /proc）时返回未知，不抛。
+    """
+    info = {"tty": "", "pgid": -1, "tpgid": -1, "keyboard_reaches": False, "known": False}
+    try:
+        # os.ttyname 是 Unix 专有（Windows 上**没有这个属性**——本机测试就是这么抓到的），
+        # 所以用 getattr 取，别直接调。
+        _ttyname = getattr(os, "ttyname", None)
+        info["tty"] = _ttyname(0) if (_ttyname is not None and os.isatty(0)) else ""
+    except (OSError, ValueError):
+        info["tty"] = ""
+    try:
+        with open("/proc/self/stat", "r", encoding="utf-8", errors="replace") as fh:
+            tail = fh.read().rsplit(") ", 1)[-1].split()
+        info["pgid"], info["tpgid"] = int(tail[2]), int(tail[5])
+        info["known"] = True
+        info["keyboard_reaches"] = bool(info["tty"]) and info["tpgid"] == info["pgid"] > 0
+    except (OSError, IndexError, ValueError):
+        pass
+    return info
+
+
+def clear_stop_file(path: str, why: str) -> None:
+    """删停止文件；顺手留一行日志（"上一趟的残留"要看得见，不然人会以为脚本抽风）。"""
+    if not path:
+        return
+    try:
+        existed = os.path.exists(path)
+        if existed:
+            os.unlink(path)
+        if existed and why:
+            print(f"[LANE] 🧹 清掉停止文件 {path}（{why}）")
+    except OSError as exc:
+        print(f"[LANE] ⚠️ 删停止文件 {path} 失败（不影响跑车）：{exc}")
+
+
+def _try(fn, *a, what: str = "", **k):
+    """收尾步骤的"绝不抛"包装：任何一步失败都不许挡住后面的步骤。
+
+    为什么要有（2026-10-16 的洞）：收尾链每一步都要 print，而 stdout 可能是一条**已经断掉的
+    管道**（SIGPIPE 被忽略 → print 抛 BrokenPipeError）。抛在第 1 步，后面的
+    `wd.stop()` 与 `session.json` 落盘就全被跳过 —— 那两样恰好是复盘时要用的证据。
+    """
+    try:
+        return fn(*a, **k)
+    except Exception as exc:                       # noqa: BLE001
+        try:
+            sys.stderr.write(f"[LANE] ⚠️ 收尾步骤({what or getattr(fn, '__name__', '?')})异常"
+                             f"（继续收尾）：{exc}\n")
+        except Exception:                          # noqa: BLE001
+            pass
+        return None
+
+
 # ================================================================ 在线模式（摄像头 + 可选电机）
 def run_online(args, det: LaneFinalDetector, center_deg: float, sign: float,
                runner: LaneRunner) -> int:
     from scripts.bench_common import MotorSession, install_signal_guard, restore_remote_stage
 
     use_motor = bool(args.allow_motion)
-    state = {"stopped": False, "driver": None, "restored": False, "used_motor": use_motor}
+    state = {"stopped": False, "stop_by": "", "driver": None, "restored": False,
+             "used_motor": use_motor}
     install_signal_guard(state)
+
+    # ★ 停车通道（2026-10-17，调试期）：Ctrl+C 只在"本进程是那个终端的前台作业"时才是信号
+    #   （10-16 现场 7 趟零「收到信号」就是按键没到）。所以除了信号，再加一条**不依赖终端**的
+    #   通道：停止文件。启动时先清残留（免得上一趟的文件把这一趟当场停掉），退出时也清。
+    stop_file = str(getattr(args, "stop_file", "") or "")
+    clear_stop_file(stop_file, "上一趟的残留；本趟启动时清掉，之后 touch 才有效")
+    selfchk = launch_selfcheck()
+    if stop_file:
+        kb = ("✅ 能到车（本进程是该终端的前台作业）" if selfchk["keyboard_reaches"]
+              else "❌ 到不了车（无控制终端 / 不是前台进程组）→ 用下面的停止文件或 stop_run.sh")
+        print(f"[LANE] 停车通道：Ctrl+C {kb}"
+              f"（tty={selfchk['tty'] or '—'} pgid={selfchk['pgid']} tpgid={selfchk['tpgid']}）")
+        print(f"[LANE] 停车通道：停止文件 = {stop_file}（任何通道 `touch {stop_file}` 即安全停车）"
+              f"  | 也可 `bash /root/dev/scripts/stop_run.sh` / `pkill -TERM -f lane_final_test.py`")
+    else:
+        print("[LANE] 停车通道：停止文件已关（--stop-file ''）——只剩信号/护栏两条路")
 
     # ★ 电调看门狗（2026-10-15 事故修复）：**独立进程**，主控卡死/被杀时由它把电调拉回
     #   1500us。为什么必须有：PCA9685 会一直输出最后一次写进去的脉宽 —— 相机 UVC 卡死让
@@ -1150,7 +1704,9 @@ def run_online(args, det: LaneFinalDetector, center_deg: float, sign: float,
         try:
             from scripts.esc_watchdog import WatchdogClient
             wd = WatchdogClient(timeout_s=args.watchdog_s)
-            wd.start()
+            # 看门狗自己的日志落在会话目录里（跟 run.csv/session.json 一起拉回来；它独立会话、
+            # 不继承我们的 stdout —— 见 esc_watchdog 的 docstring）
+            wd.start(log_path=os.path.join(args.save_dir, "esc_watchdog.log") if args.save_dir else "")
         except Exception as exc:                       # noqa: BLE001
             wd = None
             print(f"[LANE] ⚠️ 电调看门狗没起来（{exc}）——跑动期间请人守着、手边留断电开关！")
@@ -1158,6 +1714,10 @@ def run_online(args, det: LaneFinalDetector, center_deg: float, sign: float,
     gate = None if args.no_start_gate else StartGate()
     rec = Recorder(args.log_csv or os.path.join(args.save_dir, "run.csv"), args.save_dir,
                    args.save_every_s, args.save_max)
+    cone_det, cone_tracker = cone_setup(args)      # --cone 关 → (None, None)，零开销
+    cone_flags: List[bool] = []
+    cone_boxes_total = 0
+    cone_rejected = 0
     if args.save_every_s > 0:
         print(f"[LANE] 存图：每 {args.save_every_s:.1f}s 一张（最多 {args.save_max} 张 → "
               f"覆盖 {args.save_every_s * args.save_max:.0f}s；不够就调 --save-max）")
@@ -1180,9 +1740,24 @@ def run_online(args, det: LaneFinalDetector, center_deg: float, sign: float,
             "watchdog_s": args.watchdog_s, "watchdog": wd is not None, "cam": args.cam,
             "max_seconds": args.max_seconds, "save_every_s": args.save_every_s,
             "save_max": args.save_max, "allow_motion": use_motor,
+            "stop_file": stop_file, "launch": selfchk,
+            "cone": {"enabled": bool(args.cone)},
         },
         "result": None,
     }
+    if args.cone:
+        sess["params"]["cone"].update({
+            "roi_top": args.cone_roi_top, "offset_px": runner.cone_offset_px,
+            "avoid_s": runner.cone_avoid_s, "segue_s": runner.cone_segue_s,
+            "speed_us": runner.cone_speed_us, "cooldown_s": runner.cone_cooldown_s,
+            "side_tol_px": runner.cone_side_tol_px,
+            "first_dir": "left" if runner.cone_first_left else "right",
+            "in_lane": runner.cone_in_lane, "in_lane_tol_px": runner.cone_in_lane_tol_px,
+            "max_bottom_y": runner.cone_max_bottom_y,
+            "hsv_low": args.cone_hsv_low or list(settings.CONE_BLUE_HSV_LOW),
+            "hsv_high": args.cone_hsv_high or list(settings.CONE_BLUE_HSV_HIGH),
+            "min_h": args.cone_min_h if args.cone_min_h is not None else settings.CONE_MIN_H,
+        })
     phase_counts: dict = {}
 
     def _dump_sess() -> None:
@@ -1206,6 +1781,18 @@ def run_online(args, det: LaneFinalDetector, center_deg: float, sign: float,
     print(f"[LANE] 丢线阶梯：维持 {runner.loss.hold_s:.1f}s（误差衰减回中位）→ 停车；"
           f"发车后 {runner.acquire_s:.1f}s 没见线按探路低速")
     print(f"[LANE] 落盘：{rec.csv_path}（每 {args.save_every_s:.1f}s 存一帧到 {args.save_dir}）")
+    if args.cone:
+        print(f"[LANE] 锥桶相位：开（目标点偏移 ±{runner.cone_offset_px:.0f}px | "
+              f"绕行 {runner.cone_avoid_s:.1f}s / 回正 {runner.cone_segue_s:.1f}s / "
+              f"冷却 {runner.cone_cooldown_s:.1f}s | 绕行油门 {runner.cone_speed_us:.0f}us | "
+              f"容差 ±{runner.cone_side_tol_px:.0f}px | 居中先往"
+              f"{'左' if runner.cone_first_left else '右'}"
+              + (f" | 只绕框底 <{runner.cone_max_bottom_y:.0f}px 的前方锥桶" if runner.cone_max_bottom_y > 0 else "") + "）")
+        print("[LANE] ⚠️ 检测档 = 2026-10-16 现场锥桶视频定档（上沿 0.10）：锥桶首帧 y≈50~72 时能检出；"
+              "**手推会上浮摄像头上浮、真跑车头更低** → 首次真跑后用 --no-motor --cone 存图复核"
+              "（首帧被切就 --cone-roi-top 0.05）；现场顺序照 doc §2.8（架空看读数 → 场地慢速 → 才开默认）")
+    else:
+        print("[LANE] 锥桶相位：关（--cone 打开；不开 = 与 10-15 现场验证过的版本一致）")
     _crop = int(getattr(settings, "FRAME_CROP_LINE_Y", 0) or 0)
     print(f"[LANE] 画面裁剪：保留 y<{_crop}（车盖不入画；闸门/检测/存图同源）"
           if _crop else "[LANE] 画面裁剪：关闭（settings.FRAME_CROP_LINE_Y=0）")
@@ -1214,7 +1801,10 @@ def run_online(args, det: LaneFinalDetector, center_deg: float, sign: float,
           "控制律按实测 dt 折算，两者都不影响手感")
     if use_motor:
         print("[LANE] ⚠️ 用法：车摆正在车道里 → 启动 → 看到「自检完成」→ 蓝板挡到下摄正前方"
-              "（先看到→再移开=发车）→ 想停就把板挡回去 / Ctrl+C")
+              "（先看到→再移开=发车）→ 想停：`touch` 停止文件（见上面那行停车通道）"
+              "或 Ctrl+C（只在「本进程是该终端前台作业」时有效）"
+              "（闸门发车后即闩锁，板挡回去**不是**「再见板即停」；挡住画面能停是靠丢线，会滑一段）；"
+              "车不停先断电")
     else:
         print("[LANE] dry-run（--no-motor）：只看读数、不动电机；加 --allow-motion 才动车")
 
@@ -1247,7 +1837,7 @@ def run_online(args, det: LaneFinalDetector, center_deg: float, sign: float,
                         frame, t_frame, seq = reader.latest()
                         if seq == last_seq:                 # 还没有新帧
                             now = time.monotonic()
-                            if state.get("stopped"):
+                            if stop_requested(state, stop_file):
                                 break
                             if t_frame and now - t_frame > args.read_fail_s:
                                 print(f"[LANE] ❌ 摄像头 {now - t_frame:.1f}s 没出新帧"
@@ -1271,7 +1861,16 @@ def run_online(args, det: LaneFinalDetector, center_deg: float, sign: float,
                             st = gate.update(frame, now)
                             allowed = st.released
                         r = det.detect(frame)
-                        co = runner.step(now, r, allowed)
+                        cones = cone_det.detect(frame) if cone_det is not None else []
+                        if cones and runner.cone_in_lane:
+                            cones, _rej = cone_filter_in_lane(r, cones, det.y_ref,
+                                                              runner.cone_in_lane_tol_px)
+                            cone_rejected += _rej
+                        ci = cone_state_of(cone_tracker, cones)
+                        if ci is not None:
+                            cone_flags.append(bool(cones))
+                            cone_boxes_total += len(cones)
+                        co = runner.step(now, r, allowed, cone=ci)
                         if use_motor and pca is not None:
                             pca.set_steering_angle(co.angle)
                             pca.write_us(pca.CH_ESC, co.out_us)
@@ -1281,7 +1880,10 @@ def run_online(args, det: LaneFinalDetector, center_deg: float, sign: float,
                         # ★ 叠加图只在该存图时才画（2026-10-15：每帧全帧绘制在 Pi 上是 ~10ms 级，
                         #   把主循环从 ~25fps 拖到 ~15fps；存图频率本来就是 1s 一张）
                         if rec.wants_save(t_rel):
-                            vis = annotate(frame, r, det, co.phase, extra=f"ang={co.angle:.1f} esc={co.out_us:.0f}")
+                            vis = annotate(frame, r, det, co.phase,
+                                           extra=f"ang={co.angle:.1f} esc={co.out_us:.0f}",
+                                           cones=cones,
+                                           target_px=det.target_x + runner.cone_target_offset())
                             last_vis = vis
                             rec.maybe_save(t_rel, frame, vis)
                         frames += 1
@@ -1290,8 +1892,10 @@ def run_online(args, det: LaneFinalDetector, center_deg: float, sign: float,
                         if frames % max(1, args.print_every) == 0:
                             print(f"[LANE] t={t_rel:5.1f}s fps={fps:4.1f} {co.phase:12s} "
                                   f"c={_fmt(r.center_x) or '—':>5} err={_fmt(r.error) or '—':>6} "
-                                  f"ang={co.angle:.1f} us={co.out_us:.0f} q={r.quality:.2f} {r.tag}")
-                        if state.get("stopped"):
+                                  f"ang={co.angle:.1f} us={co.out_us:.0f} q={r.quality:.2f} {r.tag}"
+                                  + (f" cone={len(cones)}{'*' if ci and ci.present else ''}"
+                                     if cone_det is not None else ""))
+                        if stop_requested(state, stop_file):
                             break
                         if args.max_seconds > 0 and t_rel >= args.max_seconds:
                             print(f"[LANE] 到达 --max-seconds {args.max_seconds:.0f}s → 停车退出")
@@ -1310,28 +1914,39 @@ def run_online(args, det: LaneFinalDetector, center_deg: float, sign: float,
     except KeyboardInterrupt:
         print("[LANE] Ctrl+C → 安全停车")
     finally:
-        rec.close()
+        # ★ 收尾链每一步都包一层（绝不抛）：stdout 可能是断掉的管道（SIGPIPE 已忽略），
+        #   抛在第 1 步就会把后面的看门狗收掉/session.json 落盘全跳过（见 _try 的注释）。
+        clear_stop_file(stop_file, "本趟结束")
+        _try(rec.close, what="关 CSV")
         if use_motor:
-            restore_remote_stage(state, "run_online 退出")
+            _try(restore_remote_stage, state, "run_online 退出", what="恢复远程控制阶段")
         if wd is not None:
-            wd_code = wd.stop()                        # 电机已安全 → 再解除看门狗
+            wd_code = _try(wd.stop, what="收掉看门狗")  # 电机已安全 → 再解除看门狗
             wd_tripped = wd_code in (2, 3)              # 2/3 = 心跳停过并写了安全值
         # 结果落进 session.json（含着陆原因、相位分布、末帧读数）——复盘不依赖 stdout
         sess["result"] = {
             "ended": time.strftime("%Y-%m-%d %H:%M:%S"), "rc": rc, "frames": frames,
             "frames_ok": runner.frames_ok, "guard_trips": runner.guard_trips,
             "stop_reason": runner.stop_reason or "—", "fps_end": round(runner.rate.fps, 1),
+            "stopped_by": state.get("stop_by") or "—",   # signal / stop-file / —
             "phases": dict(sorted(phase_counts.items())),
             "last": {"center_x": runner.last_center, "error_px": last_err,
                      "angle_deg": last_ang, "esc_us": last_us},
             "watchdog_tripped": wd_tripped,
+            "cone": {"frames": len(cone_flags),
+                     "hits": sum(1 for f in cone_flags if f),
+                     "triggers": runner.cone_triggers, "aborts": runner.cone_aborts,
+                     "out_lane": runner.cone_out_lane + cone_rejected,
+                     "too_near": runner.cone_too_near},
         }
-        _dump_sess()
+        _try(_dump_sess, what="落 session.json")
     fps_end = runner.rate.fps
     print(f"[LANE] 结束：{frames} 帧 | 有效跟线 {runner.frames_ok} 帧 "
           f"| 护栏/超时 {runner.guard_trips} 次 | 末帧率 {fps_end:.1f}")
     print(f"[LANE] 末态：停机原因={runner.stop_reason or '—'}"
           f"（osc=画龙 / big-err=跑偏 / lost=丢线）| 相位分布={dict(sorted(phase_counts.items()))}")
+    if args.cone:
+        print(cone_summary_line(cone_flags, cone_boxes_total, runner, cone_rejected))
     if wd_tripped:
         print("[LANE] ⚠️ 这一趟看门狗触发过（主控卡死/被杀）——务必看它打印的 🔛 那几行！")
     print(f"[LANE] 回实验室看：{rec.csv_path} + session.json"
@@ -1420,6 +2035,38 @@ def build_parser() -> argparse.ArgumentParser:
                      help=f"舵机中位角（默认 settings.SERVO_CENTER_ANGLE="
                           f"{settings.SERVO_CENTER_ANGLE:.1f}）")
 
+    cn = ap.add_argument_group("锥桶相位（--cone；检测器复用 vision/cone_detect.py；默认关）")
+    cn.add_argument("--cone", action="store_true",
+                    help="打开锥桶 S 型避让相位（默认关；不开 = 与 10-15 现场验证过的版本一致）")
+    cn.add_argument("--cone-offset-px", type=float, default=CONE_OFFSET_PX0,
+                    help="绕行期 PD 目标点偏移（px；绕行侧自动带符号，到时归零）")
+    cn.add_argument("--cone-avoid-s", type=float, default=CONE_AVOID_S0,
+                    help="单段绕行时长（秒）")
+    cn.add_argument("--cone-segue-s", type=float, default=CONE_SEGUE_S0,
+                    help="S 型两段之间的回正直行（秒）")
+    cn.add_argument("--cone-cooldown-s", type=float, default=CONE_COOLDOWN_S0,
+                    help="一轮避让结束后的冷却（秒；防同一个锥二进宫）")
+    cn.add_argument("--cone-speed-us", type=float, default=CONE_SPEED_US0,
+                    help="绕行期油门脉宽（必须 > 死区；现场 A/B 档 1585/1580/1575/1570）")
+    cn.add_argument("--cone-side-tol-px", type=float, default=CONE_SIDE_TOL_PX0,
+                    help="|锥桶 x − 车道中心| ≤ 它算'居中'（用 --cone-first-dir 的方向）")
+    cn.add_argument("--cone-first-dir", choices=("left", "right"), default=CONE_FIRST_DIR0,
+                    help="锥桶居中时先往哪边绕；锥偏左→往右绕、偏右→往左绕，第二段自动反向")
+    cn.add_argument("--cone-in-lane", dest="cone_in_lane", action="store_true", default=True,
+                    help="锥桶必须落在**两条车道线之间**才触发（默认开；见 _cone_in_lane 的实测）")
+    cn.add_argument("--no-cone-in-lane", dest="cone_in_lane", action="store_false",
+                    help="关掉'在车道线内'先验（只在它误杀真锥桶时用；关掉后 ROI 上沿要更保守）")
+    cn.add_argument("--cone-in-lane-tol-px", type=float, default=CONE_IN_LANE_TOL_PX0,
+                    help="'在车道线内'的容差（px；车道线读数本身有噪声，留一点余量）")
+    cn.add_argument("--cone-max-bottom-y", type=float, default=CONE_MAX_BOTTOM_Y0,
+                    help="只对框底高于这一行（= 前方）的锥桶起绕（裁剪后 px；0=关）")
+    cn.add_argument("--cone-roi-top", type=float, default=CONE_ROI_TOP0,
+                    help="锥桶 ROI 上沿（**裁剪后**画面比例；2026-10-16 现场视频定档 0.10：锥桶首帧 y≈50~72 不被切、空赛道零触发）")
+    cn.add_argument("--cone-hsv-low", default="", help="覆盖锥桶蓝 HSV 下限，格式 'H,S,V'")
+    cn.add_argument("--cone-hsv-high", default="", help="覆盖锥桶蓝 HSV 上限，格式 'H,S,V'")
+    cn.add_argument("--cone-min-h", type=int, default=None,
+                    help=f"锥桶框最小高（px；默认 settings.CONE_MIN_H={settings.CONE_MIN_H}）")
+
     hw = ap.add_argument_group("硬件/在线")
     hw.add_argument("--cam", type=int, default=2, help="摄像头 index（巡线固定 2=下摄）")
     hw.add_argument("--no-motor", action="store_true", help="只跑视觉，不动电机（默认行为）")
@@ -1431,6 +2078,10 @@ def build_parser() -> argparse.ArgumentParser:
     hw.add_argument("--read-fail-s", type=float, default=8.0)
     hw.add_argument("--watchdog-s", type=float, default=1.0,
                     help="电调看门狗超时（秒；0=关。主控卡死/被杀时由独立进程强制停车）")
+    hw.add_argument("--stop-file", default=STOP_FILE0,
+                    help=f"停止文件路径（**文件存在 = 安全停车**；默认 {STOP_FILE0}，"
+                         f"空串=关）。调试期停车按钮：任何通道 `touch <文件>` 即停；"
+                         f"启动时清残留、退出时也清")
 
     out = ap.add_argument_group("输出/记录")
     out.add_argument("--out", default="", help="离线产物目录（默认 1014_lane_final/run）")
@@ -1453,6 +2104,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if min(args.start_us, args.speed_us) < settings.ESC_DEADBAND_US:
             print(f"[LANE] ❌ 脉宽低于电调死区（{settings.ESC_DEADBAND_US}us）："
                   f"start={args.start_us:.0f} speed={args.speed_us:.0f} —— 车不会动，拒绝运行")
+            return 2
+        if args.cone and args.cone_speed_us <= settings.ESC_DEADBAND_US:
+            print(f"[LANE] ❌ --cone-speed-us {args.cone_speed_us:.0f} 不高于电调死区"
+                  f"（{settings.ESC_DEADBAND_US}us）：绕行期会**停在锥桶前面**，拒绝运行")
             return 2
     else:
         if offline is False:
@@ -1501,7 +2156,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         args.hold_s, args.acquire_s, args.err_stop_px, args.err_stop_s, REF_FPS,
         use_filter=not args.no_filter, filter_window=args.filter_window,
         filter_outlier_px=args.filter_outlier, observe_only=offline,
-        single_max_s=args.single_max_s)
+        single_max_s=args.single_max_s,
+        cone_enabled=bool(args.cone), cone_offset_px=args.cone_offset_px,
+        cone_avoid_s=args.cone_avoid_s, cone_segue_s=args.cone_segue_s,
+        cone_speed_us=args.cone_speed_us, cone_cooldown_s=args.cone_cooldown_s,
+        cone_side_tol_px=args.cone_side_tol_px, cone_first_dir=args.cone_first_dir,
+        cone_in_lane=args.cone_in_lane, cone_in_lane_tol_px=args.cone_in_lane_tol_px,
+        cone_max_bottom_y=args.cone_max_bottom_y)
 
     print(f"[LANE] 增益（登记 {REF_FPS:.0f}fps）：kp={kp:.3f} ki={ki:.3f} kd={kd:.3f}"
           f"；30fps 逐帧等效 " + "ki=%.3f kd=%.3f" % runner.pid.frame_equivalent(30.0))

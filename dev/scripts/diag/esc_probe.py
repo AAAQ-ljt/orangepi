@@ -206,8 +206,8 @@ def run_plan(steps: Sequence[Step], write_us: Callable[[float], None],
             except EOFError:                       # 无 TTY（ssh "命令" / 重定向）→ 退回自动
                 printer("[ESC] ⚠️ 没有终端可等待（input 失败）→ 退回自动节奏")
                 manual = False
-        printer(f"[ESC] t={time.monotonic() - t0:5.1f}s  写 {st.us:.0f}us × {st.dwell_s:.1f}s"
-                f"  —— {st.label}")
+        printer(f"[ESC] {time.strftime('%H:%M:%S')} t={time.monotonic() - t0:5.1f}s  "
+                f"写 {st.us:.0f}us × {st.dwell_s:.1f}s  —— {st.label}")
         write_us(st.us)
         n += 1
         # 把长档切成小片，每片喂一次看门狗（心跳不能等一整档）
@@ -359,10 +359,25 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                          should_stop=lambda: bool(state.get("stopped"))
                          or bool(args.stop_file and os.path.exists(args.stop_file)))
                 pca.write_us(pca.CH_ESC, NEUTRAL_US)             # 收尾再明确回一次中位
+                # ★ 跑完了就**立刻解除看门狗**：恢复远程阶段（停/起服务 + 校验推流）要好几秒，
+                #   那期间没人喂心跳 ⇒ 它必然"触发"一次并写 1500（无害，但退出码 2 会让人
+                #   误以为"跑动中卡过"——2026-10-17 两次实测都踩到这个假警告，日志时间戳已证实
+                #   触发点落在收尾窗口）。此刻电调已经写回 1500，不需要它再兜底。
+                if wd is not None:
+                    try:
+                        code = wd.stop()
+                        wd = None
+                        if code in (2, 3):
+                            say("[ESC] ⚠️ 看门狗在**跑动期间**触发过（主控真的卡过）——看它的日志")
+                        else:
+                            say("[ESC] ✅ 看门狗正常解除（跑动期间一次都没触发）")
+                    except Exception as exc:                    # noqa: BLE001
+                        wd = None
+                        say(f"[ESC] ⚠️ 解除看门狗失败：{exc}")
         except KeyboardInterrupt:
             say("[ESC] Ctrl+C → 回中位 + 收尾（电调 1500）")
         finally:
-            if wd is not None:
+            if wd is not None:                              # 只在异常路径下才还挂着
                 try:
                     code = wd.stop()
                     if code in (2, 3):

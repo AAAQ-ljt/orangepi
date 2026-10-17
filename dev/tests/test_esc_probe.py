@@ -29,12 +29,47 @@ FLOOR, CEIL = 1300.0, 1600.0
 
 # ---------------------------------------------------------------- 计划（纯函数）
 def test_every_plan_is_neutral_start_and_end() -> None:
-    for name in ("reverse", "neutral", "double", "brake", "all"):
+    for name in ("reverse", "fwd-rev", "neutral", "double", "brake", "all"):
         steps = ep.build_plan(name)
         assert steps[0].us == ep.NEUTRAL_US, f"{name} 必须从中位开始：{steps[0]}"
         assert steps[-1].us == ep.NEUTRAL_US, f"{name} 必须回中位结束：{steps[-1]}"
         assert len(steps) >= 3, f"{name} 太短：{len(steps)}"
         ep.check_plan(steps, FLOOR, CEIL)          # 不抛 = 合规
+
+
+def test_fwd_rev_plan_forward_then_brake_then_ramp_then_deep_hold() -> None:
+    """★ "先前进 → 刹车 → 回中松开 → 平滑下压 → 压到底"—— 这一段的意义全在**顺序**上，逐条钉住。
+
+    为什么单列：官方网页（/var/www/orangepi-rc）的倒车带就是 1400~1500us（前端 min/center/max =
+    1400/1500/1600、LT 或摇杆向下=倒车），而 --plan reverse 把 1460/1420 都写过、轮子不动 ⇒
+    剩下的差别是顺序（车用电调常见互锁：反向只在"刚前进过/刹住过"之后放行；或要求平滑压过去）。
+    """
+    steps = ep.build_plan("fwd-rev")
+    us = [s.us for s in steps]
+    assert us[0] == ep.NEUTRAL_US and us[-1] == ep.NEUTRAL_US
+    # 注意取**最后一次**出现的最深值：平滑下压的最后一档也是 deep，之后才是"压住保持"那一档
+    i_fwd = us.index(1600.0)
+    i_brake = us.index(1450.0)
+    i_deep = len(us) - 1 - us[::-1].index(min(us))
+    assert i_fwd < i_brake < i_deep, f"顺序必须是 前进→刹车→下压：{us}"
+    assert ep.NEUTRAL_US in us[i_brake + 1:i_deep], f"刹车后要有中位「松手」窗口：{us[i_brake:i_deep]}"
+    # 平滑下压段（"松手"那一档**之后**到压到底之前）不许夹中位 —— 跳变会被电调当刹车
+    i_pause = us.index(ep.NEUTRAL_US, i_brake + 1)
+    ramp = us[i_pause + 1:i_deep]
+    assert ep.NEUTRAL_US not in ramp, f"下压途中不该回中位：{ramp}"
+    assert ramp == sorted(ramp, reverse=True) and len(ramp) >= 5, f"要平滑单调下压：{ramp}"
+    assert steps[i_deep].dwell_s >= 2.0, "压到底要**保持**一会儿（很多电调要持续才认）"
+    ep.check_plan(steps, FLOOR, CEIL)
+
+
+def test_reverse_sweep_is_generated_and_monotonic() -> None:
+    """反向扫改"生成式"：从 1480 一路到 --rev-deep、步长 --rev-step，档档单调下降（便于扫更深）。"""
+    steps = ep.build_plan("reverse", deep_us=1200.0, floor_us=1100.0, rev_step=50.0)
+    vals = [s.us for s in steps if s.us < ep.NEUTRAL_US]
+    assert vals == sorted(vals, reverse=True) and vals[-1] == 1200.0, vals
+    assert 1480.0 in vals
+    assert len(vals) == 7, f"1480→1200 步长 50 应为 1480,1430,…,1200 共 7 档：{vals}"
+    ep.check_plan(steps, 1100.0, CEIL)
 
 
 def test_reverse_scan_pauses_at_neutral_between_reverse_steps() -> None:

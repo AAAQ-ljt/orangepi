@@ -58,10 +58,18 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 from config import settings            # noqa: E402
 
 NEUTRAL_US = float(settings.ESC_STOP_US)   # 中位/停（1500）—— 一切收尾都回到它
-REV_DEEP0 = 1300.0                     # 反向扫到的最深脉宽（硬地板；不要再往下）
+REV_DEEP0 = 1300.0                     # 反向扫到的最深脉宽（地板由 --min-us 再卡一道）
+REV_TOP0 = 1480.0                      # 反向扫的起点（刚过中位；官方网页的倒车带是 1400~1500）
+REV_STEP0 = 40.0                       # 反向扫的步长（40us ≈ 官方网页 100 档里的 8 档）
 UP_SCAN = (1505, 1510, 1520, 1530, 1540, 1545, 1550, 1560)   # 上扫档（找起转点）
-REV_SCAN = (1460, 1420, 1380, 1340)    # 下扫档（REV_DEEP0 由 --rev-deep 覆盖）
 PAUSE_S = 0.6                          # 档间回中位时长（电调需要"看到中位"才肯换向）
+
+# 官方网页（/var/www/orangepi-rc/index.html + /root/opi-control）的倒车口径，2026-10-17 回原码核实：
+#   前端默认 min=1400 / center=1500 / max=1600（页面设置面板里可改，**每条 drive 消息都带着这三个值**）；
+#   手柄"扳机模式"油门 = RT − LT（LT=后退）、"摇杆模式" = −(左摇杆 Y)（向下=后退）；
+#   后端 percent<0 → 脉宽 = center + (p/100)×(center − min) ⇒ **倒车带 = 1400~1500us，最深 1400**。
+#   ⇒ 用户"网页端低于 1500 能倒退（两次）"就发生在这条带里，而我们的 --plan reverse 把 1460/1420
+#     都写过了却没动静 ⇒ 差别多半在**顺序**（先前进→刹住→回中→再压），所以加了 --plan fwd-rev。
 
 
 @dataclass(frozen=True)
@@ -74,18 +82,46 @@ class Step:
 
 # ================================================================ 计划（纯函数，单测直接钉住）
 def build_plan(name: str, deep_us: float = REV_DEEP0, floor_us: float = 1300.0,
-               dwell_s: float = 1.5, up_scan: Sequence[float] = UP_SCAN) -> List[Step]:
+               dwell_s: float = 1.5, up_scan: Sequence[float] = UP_SCAN,
+               rev_step: float = REV_STEP0) -> List[Step]:
     """按名字生成脉宽序列（**首尾必是中位**；反向档之间必夹一个中位档）。"""
     deep = max(float(floor_us), float(deep_us))
     steps: List[Step] = [Step(NEUTRAL_US, 1.0, "回中位（电调解锁/清状态）")]
 
     def rev_scan() -> List[Step]:
+        """从 1480 一路扫到 deep（步长 rev_step）：每档前先回中位（多数电调要先「看到中位」）。"""
+        vals, v = [], float(REV_TOP0)
+        while v > deep + 1e-6:
+            vals.append(round(v))
+            v -= max(1.0, float(rev_step))
+        vals.append(round(deep))
         out: List[Step] = []
-        for us in list(REV_SCAN) + [deep]:
+        for us in vals:
             if us < floor_us:
                 continue
             out.append(Step(NEUTRAL_US, PAUSE_S, "中位（换向前的停顿）"))
             out.append(Step(float(us), dwell_s, f"反向档 {us:.0f}us —— 看轮子是不是**反着转**"))
+        return out
+
+    def fwd_rev() -> List[Step]:
+        """★ 先前进 → 带刹车 → 回中 → **平滑下压** → 压到底保持（照官方网页那次"能倒"的顺序）。
+
+        为什么单列这一段：官方网页的倒车带宽就是 1400~1500us，而 --plan reverse 把 1460/1420 都写过、
+        轮子不动 ⇒ 剩下的最大差别是**顺序**。车用电调常见的互锁：① 反向只在"刚前进过/刹住过"之后才放行；
+        ② 反向要求油门**平滑压过去**（跳变只认成刹车）。这一段把两种都覆盖：
+        1600 前进 → 1450 停一下（若在刹车带上会刹）→ 回中 0.5s → 从 1480 每档 0.35s 平滑压到 deep → 压住 2.5s。
+        """
+        out = [
+            Step(1600.0, 2.0, "前进 1600us × 2s（先真的往前转起来 —— 很多电调的反向互锁要这一步）"),
+            Step(1450.0, 1.5, "收到 1450us（若在刹车带上=刹住；不在=什么都没发生）"),
+            Step(NEUTRAL_US, 0.5, "回中位（松开一下，给电调一个「换向窗口」）"),
+        ]
+        n = 6
+        for i in range(n + 1):
+            us = REV_TOP0 + (deep - REV_TOP0) * (i / n)      # 平滑下压，中途不回中位
+            out.append(Step(round(us), 0.35,
+                            f"下压 {us:.0f}us（第 {i + 1}/{n + 1} 档，0.35s 一档，中途不回中位）"))
+        out.append(Step(deep, 2.5, f"压到底 {deep:.0f}us × 2.5s —— 看轮子是不是**反着转**（并保持住）"))
         return out
 
     def neutral_scan() -> List[Step]:
@@ -112,13 +148,15 @@ def build_plan(name: str, deep_us: float = REV_DEEP0, floor_us: float = 1300.0,
 
     plan = {
         "reverse": rev_scan,
+        "fwd-rev": fwd_rev,
         "neutral": neutral_scan,
         "double": double_tap,
         "brake": brake_test,
-        "all": lambda: rev_scan() + double_tap() + neutral_scan() + brake_test(),
+        "all": lambda: rev_scan() + fwd_rev() + double_tap() + neutral_scan() + brake_test(),
     }.get(name)
     if plan is None:
-        raise SystemExit(f"[ESC] 未知计划 {name!r}（可选 reverse/neutral/double/brake/all）")
+        raise SystemExit(f"[ESC] 未知计划 {name!r}"
+                         f"（可选 reverse/fwd-rev/neutral/double/brake/all）")
     steps += plan()
     steps.append(Step(NEUTRAL_US, 1.0, "结束回中位"))
     return steps
@@ -197,8 +235,12 @@ def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
         description="电调反向/刹车探针（台架：四轮必须悬空；默认 dry-run 不写任何脉宽）",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    ap.add_argument("--plan", choices=("reverse", "neutral", "double", "brake", "all"),
-                    default="reverse", help="跑哪一段（见文件头的判读说明）")
+    ap.add_argument("--plan", choices=("reverse", "fwd-rev", "neutral", "double", "brake", "all"),
+                    default="reverse",
+                    help="跑哪一段（见文件头判读说明；★ fwd-rev = 先前进→刹车→平滑下压，"
+                         "照官方网页「能倒」的顺序）")
+    ap.add_argument("--rev-step", type=float, default=REV_STEP0,
+                    help="反向扫步长（us；从 1480 往下扫到 --rev-deep）")
     ap.add_argument("--rev-deep", type=_readable_int, default=int(REV_DEEP0),
                     help="反向扫到的最深脉宽（us；硬地板见 --min-us）")
     ap.add_argument("--min-us", type=_readable_int, default=1300, help="允许写出的最小脉宽（硬地板）")
@@ -252,7 +294,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     say = _Tee(log_path)
     try:
         steps = build_plan(args.plan, deep_us=args.rev_deep, floor_us=args.min_us,
-                           dwell_s=args.dwell_s)
+                           dwell_s=args.dwell_s, rev_step=args.rev_step)
         check_plan(steps, args.min_us, args.max_us)
         say("=" * 78)
         say(f"[ESC] 电调反向/刹车探针 | 计划={args.plan} | {len(steps)} 档"

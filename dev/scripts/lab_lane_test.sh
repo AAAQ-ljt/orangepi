@@ -134,6 +134,8 @@ if ! confirm "⚠️ 即将【真正动电机】：速度 ${SPEED}us、闸门在
 fi
 
 echo "[2/2] 真跑：蓝板挡到下摄正前方 → 移开 = 发车；想停：touch /dev/shm/lane_stop（首选）"
+echo "      ⚠️ 按了 Ctrl+C 之后**盯日志 3 秒**：必须看到「[BENCH] 收尾（…）：电调已归零、舵机回中」；"
+echo "         没有 / 出现 退出码 134 / 出现「电调归零失败 → 不解除看门狗」→ 立刻 touch 停止文件；车还在动就断电。"
 set +e
 python3 -u "$LANE" --allow-motion ${SPEED_ARGS[@]+"${SPEED_ARGS[@]}"} \
   --max-seconds "${MAX_SECONDS:-60}" \

@@ -1,0 +1,2316 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>室外5G远程控制网站</title>
+    <link rel="icon" type="image/png" sizes="256x256" href="favicon.png" />
+    <link rel="shortcut icon" href="favicon.png" />
+    <link rel="apple-touch-icon" href="favicon.png" />
+    <style>
+      :root {
+        --panel-bg: rgba(255, 255, 255, 0.18);
+        --panel-border: rgba(255, 255, 255, 0.22);
+        --text-light: #ffffff;
+        --chip-bg: rgba(255, 255, 255, 0.9);
+        --chip-text: #222;
+        --blue: #1976d2;
+        --gray: #455a64;
+        --red: #d32f2f;
+        --green: #2e7d32;
+        --orange: #ed6c02;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        overflow: hidden;
+        font-family: Arial, sans-serif;
+        background: #000;
+        color: var(--text-light);
+      }
+
+      .stage {
+        position: relative;
+        width: 100vw;
+        height: 100vh;
+        overflow: hidden;
+        background: #000;
+      }
+
+      .control-group {
+        display: flex;
+        align-items: center;
+        background: rgba(255, 255, 255, 0.1);
+        padding: 0 10px;
+        border-radius: 12px;
+        height: 38px;
+        border: 1px solid rgba(255, 255, 255, 0.2);
+      }
+
+      .stage-video {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        display: block;
+        background: #000;
+      }
+
+      .top-left,
+      .top-right {
+        position: absolute;
+        z-index: 100;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        align-items: center;
+      }
+
+      .top-left {
+        top: 16px;
+        left: 16px;
+      }
+
+      .top-right {
+        top: 16px;
+        right: 16px;
+        justify-content: flex-end;
+        max-width: calc(100vw - 32px);
+      }
+
+      .status-chip {
+        background: var(--chip-bg);
+        color: var(--chip-text);
+        padding: 8px 12px;
+        border-radius: 999px;
+        font-size: 14px;
+        font-weight: 700;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+      }
+
+      button {
+        border: 0;
+        border-radius: 12px;
+        padding: 10px 14px;
+        font-size: 14px;
+        cursor: pointer;
+        color: #fff;
+        background: var(--blue);
+      }
+
+      button.secondary {
+        background: var(--gray);
+      }
+
+      button.stop {
+        background: var(--red);
+      }
+
+      button.talk {
+        background: var(--green);
+      }
+
+      button.warn {
+        background: var(--orange);
+      }
+
+      button:disabled {
+        opacity: 0.55;
+        cursor: not-allowed;
+      }
+
+      .floating-widget {
+        position: absolute;
+        z-index: 60;
+        background: var(--panel-bg);
+        border: 1px solid var(--panel-border);
+        border-radius: 24px;
+        padding: 14px;
+        backdrop-filter: blur(10px);
+        box-shadow: 0 10px 28px rgba(0, 0, 0, 0.22);
+        user-select: none;
+        touch-action: none;
+      }
+
+      .widget-title {
+        text-align: center;
+        font-size: 18px;
+        font-weight: 700;
+        color: #fff;
+        margin-bottom: 10px;
+        cursor: grab;
+      }
+
+      .widget-title.dragging {
+        cursor: grabbing;
+      }
+
+      .throttle-widget {
+        width: 210px;
+        left: 24px;
+        bottom: 56px;
+      }
+
+      .steering-widget {
+        width: 430px;
+        right: 24px;
+        bottom: 56px;
+      }
+
+      .gimbal-widget {
+        width: 270px;
+        right: 24px;
+        top: 96px;
+      }
+
+      .vertical-widget {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 14px;
+        width: 100%;
+      }
+
+      .large-vertical {
+        writing-mode: vertical-lr;
+        direction: rtl;
+        display: block;
+        width: 78px;
+        height: 360px;
+        max-width: 78px;
+        margin: 0 auto;
+        border-radius: 18px;
+        accent-color: #4fc3f7;
+      }
+
+      .widget-value {
+        text-align: center;
+        font-size: 24px;
+        font-weight: 700;
+        color: #fff;
+      }
+
+      .horizontal-control {
+        display: flex;
+        flex-direction: column;
+        gap: 16px;
+        width: 100%;
+        align-items: stretch;
+      }
+
+      .large-horizontal {
+        width: 100%;
+        height: 56px;
+        margin: 0;
+        border-radius: 18px;
+        accent-color: #4fc3f7;
+      }
+
+      .slider-guides {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 14px;
+        color: #fff;
+        font-weight: 700;
+        font-size: 18px;
+      }
+
+      .slider-guides .value {
+        flex: 1;
+        text-align: center;
+        font-size: 28px;
+        font-weight: 800;
+      }
+
+      .hidden-range {
+        display: none;
+      }
+
+      .gimbal-body {
+        display: flex;
+        flex-direction: column;
+        gap: 14px;
+        align-items: center;
+      }
+
+      .gimbal-pad {
+        width: 200px;
+        height: 200px;
+        border-radius: 50%;
+        background: rgba(255, 255, 255, 0.9);
+        border: 4px solid rgba(180, 220, 255, 0.9);
+        box-shadow: inset 0 6px 20px rgba(0, 0, 0, 0.1);
+        position: relative;
+        overflow: hidden;
+        touch-action: none;
+      }
+
+      .gimbal-pad::before,
+      .gimbal-pad::after {
+        content: "";
+        position: absolute;
+        pointer-events: none;
+        background: rgba(106, 168, 216, 0.35);
+      }
+
+      .gimbal-pad::before {
+        width: 2px;
+        top: 16px;
+        bottom: 16px;
+        left: 50%;
+        transform: translateX(-50%);
+      }
+
+      .gimbal-pad::after {
+        height: 2px;
+        left: 16px;
+        right: 16px;
+        top: 50%;
+        transform: translateY(-50%);
+      }
+
+      .gimbal-ring {
+        position: absolute;
+        inset: 18px;
+        border-radius: 50%;
+        border: 1px dashed rgba(106, 168, 216, 0.55);
+        pointer-events: none;
+      }
+
+      .gimbal-knob {
+        position: absolute;
+        width: 58px;
+        height: 58px;
+        left: 50%;
+        top: 50%;
+        transform: translate(-50%, -50%);
+        border-radius: 50%;
+        background: radial-gradient(circle at 30% 30%, #7dd3fc, #1976d2);
+        border: 2px solid rgba(255, 255, 255, 0.9);
+        box-shadow: 0 6px 14px rgba(0, 0, 0, 0.28);
+      }
+
+      .gimbal-tip {
+        color: #fff;
+        font-size: 13px;
+        line-height: 1.4;
+        text-align: center;
+      }
+
+      .gimbal-values {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 10px;
+        width: 100%;
+      }
+
+      .gimbal-value-card {
+        background: rgba(255, 255, 255, 0.14);
+        border: 1px solid rgba(255, 255, 255, 0.18);
+        border-radius: 14px;
+        padding: 10px;
+        text-align: center;
+        color: #fff;
+      }
+
+      .gimbal-value-card strong {
+        display: block;
+        font-size: 13px;
+        opacity: 0.92;
+        margin-bottom: 6px;
+      }
+
+      .gimbal-value-card span {
+        font-size: 22px;
+        font-weight: 700;
+      }
+
+      .gimbal-actions {
+        display: flex;
+        justify-content: center;
+        width: 100%;
+      }
+
+      .config-panel {
+        position: absolute;
+        z-index: 80;
+        top: 72px;
+        left: 16px;
+        width: 860px;
+        max-width: calc(100vw - 32px);
+        background: rgba(16, 18, 24, 0.84);
+        border: 1px solid rgba(255, 255, 255, 0.16);
+        border-radius: 20px;
+        padding: 16px;
+        backdrop-filter: blur(14px);
+        box-shadow: 0 16px 36px rgba(0, 0, 0, 0.28);
+        display: none;
+      }
+
+      .config-panel.show {
+        display: block;
+      }
+
+      .config-layout {
+        display: grid;
+        grid-template-columns: minmax(360px, 1.05fr) minmax(320px, 0.95fr);
+        gap: 16px;
+        align-items: start;
+      }
+
+      .config-col {
+        min-width: 0;
+      }
+
+      .config-section-card {
+        background: rgba(255, 255, 255, 0.06);
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        border-radius: 16px;
+        padding: 12px;
+      }
+
+      .config-section-title {
+        font-size: 14px;
+        font-weight: 700;
+        margin: 0 0 10px;
+        color: #fff;
+      }
+
+      .config-panel h3 {
+        margin: 0 0 12px;
+        font-size: 16px;
+      }
+
+      .config-row {
+        display: grid;
+        grid-template-columns: 98px 1fr;
+        gap: 10px;
+        align-items: center;
+        margin-bottom: 10px;
+      }
+
+      .config-row input,
+      .config-row select {
+        width: 100%;
+        padding: 8px 10px;
+        border-radius: 10px;
+        border: 1px solid rgba(255, 255, 255, 0.2);
+        background: rgba(255, 255, 255, 0.1);
+        color: #fff;
+        outline: none;
+      }
+
+      .config-row select option {
+        color: #111;
+      }
+
+      .config-actions {
+        display: flex;
+        gap: 10px;
+        margin-top: 12px;
+        flex-wrap: wrap;
+      }
+
+      .config-actions button,
+      .gamepad-debug-actions button,
+      .learn-mapping-grid button {
+        min-height: 38px;
+      }
+
+      .config-help {
+        margin-top: 8px;
+        color: #ddd;
+        font-size: 12px;
+        line-height: 1.5;
+      }
+
+      .gamepad-debug-panel {
+        margin-top: 12px;
+        padding: 10px;
+        border-radius: 14px;
+        border: 1px solid rgba(255, 255, 255, 0.18);
+        background: rgba(255, 255, 255, 0.08);
+        color: #fff;
+      }
+
+      .gamepad-debug-title {
+        font-size: 14px;
+        font-weight: 700;
+        margin-bottom: 8px;
+      }
+
+      .gamepad-debug-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 8px;
+        margin-bottom: 8px;
+      }
+
+      .gamepad-debug-item {
+        padding: 8px;
+        border-radius: 10px;
+        background: rgba(255, 255, 255, 0.08);
+        font-size: 12px;
+        line-height: 1.5;
+      }
+
+      .gamepad-debug-item strong {
+        display: block;
+        margin-bottom: 4px;
+        font-size: 12px;
+      }
+
+      .learn-mapping-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 8px;
+        margin-bottom: 8px;
+      }
+
+      .learn-mapping-grid button {
+        padding: 8px 10px;
+        font-size: 12px;
+        border-radius: 10px;
+      }
+
+      .gamepad-debug-actions {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+        margin-bottom: 8px;
+      }
+
+      .gamepad-debug-code {
+        margin: 0;
+        white-space: pre-wrap;
+        word-break: break-word;
+        font-size: 12px;
+        line-height: 1.45;
+        max-height: 180px;
+        overflow: auto;
+        background: rgba(0, 0, 0, 0.28);
+        border-radius: 10px;
+        padding: 8px;
+      }
+
+      .log-box {
+        position: absolute;
+        left: 16px;
+        bottom: 16px;
+        z-index: 50;
+        width: min(520px, calc(100vw - 32px));
+        max-height: 120px;
+        overflow: auto;
+        background: rgba(0, 0, 0, 0.58);
+        color: #7cfc00;
+        font-size: 12px;
+        line-height: 1.4;
+        border-radius: 14px;
+        padding: 10px 12px;
+        display: none;
+        white-space: pre-wrap;
+      }
+
+      .log-box.show {
+        display: block;
+      }
+
+      input[type="range"] {
+        -webkit-appearance: none;
+        appearance: none;
+        background: transparent;
+      }
+
+      .large-horizontal::-webkit-slider-runnable-track {
+        height: 18px;
+        border-radius: 999px;
+        background: linear-gradient(
+          90deg,
+          rgba(255, 255, 255, 0.25),
+          rgba(255, 255, 255, 0.65),
+          rgba(255, 255, 255, 0.25)
+        );
+        box-shadow: inset 0 2px 8px rgba(0, 0, 0, 0.25);
+      }
+
+      .large-horizontal::-webkit-slider-thumb {
+        -webkit-appearance: none;
+        width: 34px;
+        height: 34px;
+        margin-top: -8px;
+        border-radius: 50%;
+        background: radial-gradient(circle at 30% 30%, #7dd3fc, #1976d2);
+        border: 2px solid rgba(255, 255, 255, 0.95);
+        box-shadow: 0 4px 10px rgba(0, 0, 0, 0.28);
+      }
+
+      .large-vertical::-webkit-slider-runnable-track {
+        width: 20px;
+        border-radius: 999px;
+        background: linear-gradient(
+          180deg,
+          rgba(255, 255, 255, 0.25),
+          rgba(255, 255, 255, 0.65),
+          rgba(255, 255, 255, 0.25)
+        );
+        box-shadow: inset 0 2px 8px rgba(0, 0, 0, 0.25);
+      }
+
+      .large-vertical::-webkit-slider-thumb {
+        -webkit-appearance: none;
+        width: 34px;
+        height: 34px;
+        margin-left: -7px;
+        border-radius: 50%;
+        background: radial-gradient(circle at 30% 30%, #7dd3fc, #1976d2);
+        border: 2px solid rgba(255, 255, 255, 0.95);
+        box-shadow: 0 4px 10px rgba(0, 0, 0, 0.28);
+      }
+
+      .large-horizontal::-moz-range-track,
+      .large-vertical::-moz-range-track {
+        height: 18px;
+        border-radius: 999px;
+        background: linear-gradient(
+          90deg,
+          rgba(255, 255, 255, 0.25),
+          rgba(255, 255, 255, 0.65),
+          rgba(255, 255, 255, 0.25)
+        );
+        box-shadow: inset 0 2px 8px rgba(0, 0, 0, 0.25);
+      }
+
+      .large-horizontal::-moz-range-thumb,
+      .large-vertical::-moz-range-thumb {
+        width: 34px;
+        height: 34px;
+        border-radius: 50%;
+        background: radial-gradient(circle at 30% 30%, #7dd3fc, #1976d2);
+        border: 2px solid rgba(255, 255, 255, 0.95);
+        box-shadow: 0 4px 10px rgba(0, 0, 0, 0.28);
+      }
+
+      @media (max-width: 900px) {
+        .floating-widget {
+          transform: scale(0.9);
+          transform-origin: center;
+        }
+
+        .gimbal-widget {
+          width: 250px;
+        }
+
+        .steering-widget {
+          width: 340px;
+        }
+
+        .throttle-widget {
+          width: 180px;
+        }
+
+        .config-panel {
+          width: calc(100vw - 24px);
+          left: 12px;
+        }
+
+        .config-layout {
+          grid-template-columns: 1fr;
+        }
+
+        .top-left,
+        .top-right {
+          gap: 8px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="stage" id="stage">
+      <video
+        id="videoElement"
+        class="stage-video"
+        autoplay
+        playsinline
+        muted
+      ></video>
+
+      <div class="top-left">
+        <div class="status-chip">WS: <span id="wsState">未连接</span></div>
+        <div class="status-chip">
+          播放: <span id="playerState">未启动</span>
+        </div>
+        <div class="status-chip">armed: <span id="stArmed">false</span></div>
+        <div class="status-chip">estop: <span id="stEstop">false</span></div>
+        <div class="status-chip">throttle: <span id="stThrottle">0</span></div>
+        <div class="status-chip">steering: <span id="stSteering">90</span></div>
+      </div>
+
+      <div class="top-right">
+        <button id="configBtn" class="secondary">设置</button>
+        <button onclick="arm(true)">解锁</button>
+        <button class="secondary" onclick="arm(false)">上锁</button>
+        <button class="stop" onclick="estop()">急停</button>
+        <button class="secondary" onclick="clearEstop()">清除急停</button>
+        <button id="audioToggleBtn" class="warn" onclick="toggleRemoteAudio()">
+          打开声音
+        </button>
+        <button id="switchCamBtn" class="secondary" onclick="toggleCamera()">
+          摄像头: 主
+        </button>
+        <button
+          id="gamepadBtn"
+          class="secondary"
+          onclick="toggleGamepadControl()"
+        >
+          手柄控制：关
+        </button>
+        <div class="control-group">
+          <span style="font-size: 13px; margin-right: 6px; font-weight: bold"
+            >音响</span
+          >
+          <input
+            id="opiVolume"
+            type="range"
+            min="0"
+            max="100"
+            value="80"
+            style="width: 80px; accent-color: var(--green)"
+          />
+        </div>
+        <button id="talkBtn" class="talk">按住说话</button>
+      </div>
+
+      <div class="config-panel" id="configPanel">
+        <h3>连接设置</h3>
+        <div class="config-layout">
+          <div class="config-col">
+            <div class="config-section-card">
+              <div class="config-section-title">连接与映射</div>
+              <div class="config-row">
+                <label for="mediaHostInput">媒体 Host</label
+                ><input id="mediaHostInput" />
+              </div>
+              <div class="config-row">
+                <label for="mediaPortInput">媒体 Port</label
+                ><input id="mediaPortInput" />
+              </div>
+              <div class="config-row">
+                <label for="streamPathInput">视频 Path</label
+                ><input id="streamPathInput" />
+              </div>
+              <div class="config-row">
+                <label for="streamPath2Input">副视频 Path</label
+                ><input id="streamPath2Input" />
+              </div>
+              <div class="config-row">
+                <label for="talkPathInput">对讲 Path</label
+                ><input id="talkPathInput" />
+              </div>
+              <div class="config-row">
+                <label for="gamepadModeSelect">手柄模式</label>
+                <select id="gamepadModeSelect">
+                  <option value="sticks">左摇杆转向+油门</option>
+                  <option value="triggers">左摇杆转向+LT/RT油门</option>
+                </select>
+              </div>
+              <div class="config-row">
+                <label for="steerAxisInput">方向轴</label
+                ><input id="steerAxisInput" type="number" step="1" />
+              </div>
+              <div class="config-row">
+                <label for="throttleAxisInput">油门轴</label
+                ><input id="throttleAxisInput" type="number" step="1" />
+              </div>
+              <div class="config-row">
+                <label for="throttlePosBtnInput">前进按钮</label
+                ><input id="throttlePosBtnInput" type="number" step="1" />
+              </div>
+              <div class="config-row">
+                <label for="throttleNegBtnInput">后退按钮</label
+                ><input id="throttleNegBtnInput" type="number" step="1" />
+              </div>
+              <div class="config-row">
+                <label for="steerCenterInput">舵机中值</label
+                ><input id="steerCenterInput" type="number" step="1" />
+              </div>
+              <div class="config-row">
+                <label for="throttleMinUsInput">油门最小值</label
+                ><input id="throttleMinUsInput" type="number" step="1" />
+              </div>
+              <div class="config-row">
+                <label for="throttleCenterUsInput">油门中值</label
+                ><input id="throttleCenterUsInput" type="number" step="1" />
+              </div>
+              <div class="config-row">
+                <label for="throttleMaxUsInput">油门最大值</label
+                ><input id="throttleMaxUsInput" type="number" step="1" />
+              </div>
+              <div class="config-row">
+                <label for="panAxisInput">云台左按钮</label
+                ><input id="panAxisInput" type="number" step="1" />
+              </div>
+              <div class="config-row">
+                <label for="tiltAxisInput">云台右按钮</label
+                ><input id="tiltAxisInput" type="number" step="1" />
+              </div>
+              <div class="config-row">
+                <label for="tiltUpBtnInput">云台上按钮</label
+                ><input id="tiltUpBtnInput" type="number" step="1" />
+              </div>
+              <div class="config-row">
+                <label for="tiltDownBtnInput">云台下按钮</label
+                ><input id="tiltDownBtnInput" type="number" step="1" />
+              </div>
+              <div class="config-help">
+                方向/油门可用轴。油门支持前端设置最小值/中值/最大值，UI
+                按归一化值控制实际输出。云台当前版本按 4 个按钮控制。
+              </div>
+              <div class="config-actions">
+                <button id="saveConfigBtn">保存设置</button>
+                <button class="secondary" id="reconnectBtn">
+                  重连视频/控制
+                </button>
+                <button class="secondary" id="toggleLogBtn">显示日志</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="config-col">
+            <div class="config-section-card">
+              <div class="config-section-title">手柄调试 / 一键学习</div>
+              <div class="gamepad-debug-panel">
+                <div class="gamepad-debug-grid">
+                  <div class="gamepad-debug-item">
+                    <strong>连接状态</strong
+                    ><span id="gpConnectedText">未检测到手柄</span>
+                  </div>
+                  <div class="gamepad-debug-item">
+                    <strong>手柄名称</strong><span id="gpNameText">-</span>
+                  </div>
+                  <div class="gamepad-debug-item">
+                    <strong>最后变化轴</strong
+                    ><span id="gpLastAxisText">-</span>
+                  </div>
+                  <div class="gamepad-debug-item">
+                    <strong>最后按键</strong
+                    ><span id="gpLastButtonText">-</span>
+                  </div>
+                </div>
+                <div class="learn-mapping-grid">
+                  <button
+                    type="button"
+                    class="secondary gp-learn-btn"
+                    data-target="steerAxisInput"
+                    data-kind="axis"
+                  >
+                    学习方向轴
+                  </button>
+                  <button
+                    type="button"
+                    class="secondary gp-learn-btn"
+                    data-target="throttleAxisInput"
+                    data-kind="axis"
+                  >
+                    学习油门轴
+                  </button>
+                  <button
+                    type="button"
+                    class="secondary gp-learn-btn"
+                    data-target="throttlePosBtnInput"
+                    data-kind="button"
+                  >
+                    学习前进按钮
+                  </button>
+                  <button
+                    type="button"
+                    class="secondary gp-learn-btn"
+                    data-target="throttleNegBtnInput"
+                    data-kind="button"
+                  >
+                    学习后退按钮
+                  </button>
+                  <button
+                    type="button"
+                    class="secondary gp-learn-btn"
+                    data-target="panAxisInput"
+                    data-kind="button"
+                  >
+                    学习云台左按钮
+                  </button>
+                  <button
+                    type="button"
+                    class="secondary gp-learn-btn"
+                    data-target="tiltAxisInput"
+                    data-kind="button"
+                  >
+                    学习云台右按钮
+                  </button>
+                  <button
+                    type="button"
+                    class="secondary gp-learn-btn"
+                    data-target="tiltUpBtnInput"
+                    data-kind="button"
+                  >
+                    学习云台上按钮
+                  </button>
+                  <button
+                    type="button"
+                    class="secondary gp-learn-btn"
+                    data-target="tiltDownBtnInput"
+                    data-kind="button"
+                  >
+                    学习云台下按钮
+                  </button>
+                </div>
+                <div class="gamepad-debug-actions">
+                  <button type="button" class="secondary" id="gpStartDebugBtn">
+                    开始调试
+                  </button>
+                  <button type="button" class="secondary" id="gpStopDebugBtn">
+                    停止调试
+                  </button>
+                </div>
+                <pre class="gamepad-debug-code" id="gpDebugOutput">
+点击“开始调试”后，摇动手柄或按键，这里会实时显示 axes / buttons 数值。也可以点上面的“学习…”按钮，随后拨动对应摇杆或按下对应键，页面会自动填入编号。</pre
+                >
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="floating-widget throttle-widget" id="throttleWidget">
+        <div class="widget-title">油门</div>
+        <div class="vertical-widget">
+          <input
+            id="throttle"
+            class="large-vertical"
+            type="range"
+            min="-100"
+            max="100"
+            value="0"
+          />
+          <div class="widget-value" id="throttleVal">停止</div>
+        </div>
+      </div>
+
+      <div class="floating-widget steering-widget" id="steeringWidget">
+        <div class="widget-title">方向</div>
+        <div class="horizontal-control">
+          <input
+            id="steerHuman"
+            class="large-horizontal"
+            type="range"
+            min="-100"
+            max="100"
+            value="0"
+          />
+          <div class="slider-guides">
+            <span>左</span>
+            <div class="value" id="steerHumanVal">方向</div>
+            <span>右</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="floating-widget gimbal-widget" id="gimbalWidget">
+        <div class="widget-title">云台</div>
+        <div class="gimbal-body">
+          <input
+            id="pan"
+            class="hidden-range"
+            type="range"
+            min="0"
+            max="180"
+            value="90"
+          />
+          <input
+            id="tilt"
+            class="hidden-range"
+            type="range"
+            min="0"
+            max="180"
+            value="90"
+          />
+          <div class="gimbal-pad" id="gimbalPad">
+            <div class="gimbal-ring"></div>
+            <div class="gimbal-knob" id="gimbalKnob"></div>
+          </div>
+          <div class="gimbal-tip">拖动摇杆控制云台。左右=水平，前后=俯仰。</div>
+          <div class="gimbal-values">
+            <div class="gimbal-value-card">
+              <strong>水平</strong><span id="panVal">90</span>
+            </div>
+            <div class="gimbal-value-card">
+              <strong>俯仰</strong><span id="tiltVal">90</span>
+            </div>
+          </div>
+          <div class="gimbal-actions">
+            <button type="button" class="secondary" id="gimbalCenterBtn">
+              云台回中
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div class="log-box" id="log"></div>
+    </div>
+
+    <script>
+      // ================= 数据初始化与配置 =================
+      // 1. 判断当前访问的是不是 IP 地址 (例如 192.168.x.x 或 127.0.0.1) 或者是 localhost
+      const hostname = window.location.hostname;
+      const isIP = /^[\d\.]+$/.test(hostname) || hostname === "localhost";
+      // 2. 提取子域名。如果是 IP，先给个默认值
+      const subName = isIP ? "default" : hostname.split(".")[0];
+
+      const smartStreamPath = `cam_${subName}`;
+      // 【新增】智能生成副摄像头默认路径
+      const smartStreamPath2 = `cam_${subName}_sub`;
+      const smartTalkPath = `talk_${subName}`;
+
+      const DEFAULT_CONFIG = window.DEVICE_CONFIG || {
+        // ... 默认的服务器地址与手柄映射配置
+        mediaHost: "82.157.204.126",
+        mediaPort: "17001",
+        streamPath: "cam_car0027", // 局域网访问时的默认初始值
+        streamPath2: "cam_car0027_sub", //副摄
+        talkPath: "talk_car0027",
+        gamepadMode: "sticks",
+        steerAxis: 0,
+        throttleAxis: 1,
+        throttlePosBtn: 7,
+        throttleNegBtn: 6,
+        panAxis: 2,
+        tiltAxis: 3,
+        steerCenter: 90, // 新增：舵机默认中值
+      };
+
+      function loadConfig() {
+        // 尝试从浏览器的 LocalStorage 中读取用户上次保存的配置
+        let finalConfig = { ...DEFAULT_CONFIG };
+        try {
+          const saved = JSON.parse(
+            localStorage.getItem("rc-ui-config") || "{}",
+          );
+          return { ...DEFAULT_CONFIG, ...saved };
+          // 【核心修复】：无论缓存里存的是什么妖魔鬼怪，
+          // 如果是局域网 IP 访问，这里就不会执行，从而保留 saved 里的手动配置
+          if (!isIP) {
+            finalConfig.streamPath = smartStreamPath;
+            finalConfig.streamPath2 = smartStreamPath2;
+            finalConfig.talkPath = smartTalkPath;
+          }
+        } catch (_) {
+          return finalConfig;
+        }
+      }
+
+      let CONFIG = loadConfig();
+      // 动态计算当前网页环境下的 WebSocket 和 WebRTC 请求地址
+      function getWsUrl() {
+        const wsProto = window.location.protocol === "https:" ? "wss" : "ws";
+        return `${wsProto}://${window.location.host}/ws`;
+      }
+      /* 获取 WHEP 图传拉流地址 */
+      function getWhepUrl() {
+        const httpProto =
+          window.location.protocol === "https:" ? "https" : "http";
+        // 【修改这里】：如果是 1 取 streamPath，如果是 2 取 streamPath2
+        const path =
+          activeCamera === 1
+            ? CONFIG.streamPath
+            : CONFIG.streamPath2 || CONFIG.streamPath;
+        return `${httpProto}://${window.location.host}/${path}/whep`;
+      }
+      /* 获取 WHIP 语音推流地址 */
+      function getTalkUrl() {
+        const httpProto =
+          window.location.protocol === "https:" ? "https" : "http";
+        return `${httpProto}://${window.location.host}/${CONFIG.talkPath}/whip`;
+      }
+
+      function getAbsoluteUrl(url) {
+        if (!url) return null;
+        if (url.startsWith("http://") || url.startsWith("https://")) {
+          try {
+            const u = new URL(url);
+            return `${window.location.protocol}//${window.location.host}${u.pathname}`;
+          } catch (_) {
+            return url;
+          }
+        }
+        if (url.startsWith("/")) {
+          return `${window.location.protocol}//${window.location.host}${url}`;
+        }
+        return `${window.location.protocol}//${window.location.host}/${url}`;
+      }
+      // 全局状态变量声明
+      let ws = null; // WebSocket 实例
+      let activeCamera = 1; // 1 表示主摄，2 表示副摄
+      let talkPc = null; // 发送语音的 WebRTC PeerConnection
+      let talkStream = null;
+      let talkSessionUrl = null;
+      let viewerPc = null; // 接收视频的 WebRTC PeerConnection
+      let viewerSessionUrl = null;
+      let remoteStream = null; // 图传媒体流
+      let remoteAudioEnabled = false;
+      // 手柄相关全局变量
+      let gamepadEnabled = false;
+      let gamepadLoopRunning = false; // 防止开启多个手柄轮询循环
+      let gamepadDebugEnabled = false;
+      let gamepadLearningTarget = null; // 用于记录当前正在一键学习哪个按键
+      let gamepadLearningKind = null;
+      let lastGamepadSendTime = 0;
+      let lastAxisSnapshot = [];
+      let lastButtonSnapshot = [];
+      const GAMEPAD_SEND_INTERVAL = 80; // 节流控制：手柄数据发送间隔 (80ms = 约12.5Hz)
+      const GAMEPAD_DEADZONE = 0.12; // 手柄摇杆物理死区，防止摇杆松弛时导致车子乱走
+      // 日志打印函数，打印到网页的调试面板中
+      function log(msg) {
+        const el = document.getElementById("log");
+        el.textContent += `[${new Date().toLocaleTimeString()}] ${msg}\n`;
+        el.scrollTop = el.scrollHeight;
+      }
+
+      function setWsState(text) {
+        document.getElementById("wsState").textContent = text;
+      }
+      function setPlayerState(text) {
+        document.getElementById("playerState").textContent = text;
+      }
+
+      function send(obj) {
+        // 将 JSON 对象发送至后端的 WebSocket 通道
+        if (!ws || ws.readyState !== WebSocket.OPEN) {
+          log("WebSocket 未连接");
+          return;
+        }
+        ws.send(JSON.stringify(obj));
+      }
+      // ================= 核心计算逻辑 =================
+
+      // 关键换算：将人类认知的 UI 百分比转化为舵机认识的角度
+      // UI 滑动条是 -100(左) 到 100(右)
+      // 假设舵机 90度是中，UI为 -100 时需要舵机转到 120度，UI为 100 时舵机转到 60度
+      // 换算公式: 90 - (value * 0.3)
+      function humanToServo(value) {
+        const center = parseInt(
+          document.getElementById("steerCenterInput")?.value ??
+            CONFIG.steerCenter ??
+            90,
+          10,
+        );
+        return Math.round(center - value * 0.3);
+      }
+
+      function formatSteerText(v) {
+        if (v === 0) return "方向";
+        if (v < 0) return `左${Math.abs(v)}`;
+        return `右${Math.abs(v)}`;
+      }
+
+      function clampNumber(v, min, max) {
+        return Math.max(min, Math.min(max, v));
+      }
+
+      function getThrottleConfig() {
+        const minUs = parseInt(
+          document.getElementById("throttleMinUsInput")?.value ??
+            CONFIG.throttleMinUs ??
+            1400,
+          10,
+        );
+        const centerUs = parseInt(
+          document.getElementById("throttleCenterUsInput")?.value ??
+            CONFIG.throttleCenterUs ??
+            1500,
+          10,
+        );
+        const maxUs = parseInt(
+          document.getElementById("throttleMaxUsInput")?.value ??
+            CONFIG.throttleMaxUs ??
+            1600,
+          10,
+        );
+        return { minUs, centerUs, maxUs };
+      }
+
+      function normalizeThrottleToActual(normalizedValue) {
+        // 将百分比油门换算回物理脉宽，仅用于前端 UI 文本显示，真正的电调换算在后端 Python 中完成
+        const { minUs, centerUs, maxUs } = getThrottleConfig();
+        const normalized = clampNumber(
+          parseInt(normalizedValue, 10) || 0,
+          -100,
+          100,
+        );
+        if (normalized === 0) return centerUs;
+        if (normalized > 0) {
+          return Math.round(centerUs + (normalized / 100) * (maxUs - centerUs));
+        }
+        return Math.round(centerUs + (normalized / 100) * (centerUs - minUs));
+      }
+
+      function centerThrottleUI(syncLabels = true) {
+        const throttle = document.getElementById("throttle");
+        if (!throttle) return;
+        throttle.value = 0;
+        if (syncLabels) updateLabels();
+      }
+
+      function formatThrottleText(v) {
+        const normalized = clampNumber(parseInt(v, 10) || 0, -100, 100);
+        const actualUs = normalizeThrottleToActual(normalized);
+        if (normalized === 0) return `停止 (${actualUs}us)`;
+        if (normalized > 0) return `前进${normalized}% (${actualUs}us)`;
+        return `后退${Math.abs(normalized)}% (${actualUs}us)`;
+      }
+
+      function buildDrivePayload(steering, throttleNormalized) {
+        // 构造下发给后端的驱动数据包
+        const normalized = clampNumber(
+          parseInt(throttleNormalized, 10) || 0,
+          -100,
+          100,
+        );
+        const { minUs, centerUs, maxUs } = getThrottleConfig();
+        const steerCenter = parseInt(
+          document.getElementById("steerCenterInput")?.value ??
+            CONFIG.steerCenter ??
+            90,
+          10,
+        );
+        return {
+          type: "drive",
+          steering,
+          steer_center: steerCenter, // 连同舵机中值一起发给后端
+          throttle: normalized,
+          // 把前端设置面板里的电调行程一起发过去，方便后端动态适配
+          throttle_min_us: minUs,
+          throttle_center_us: centerUs,
+          throttle_max_us: maxUs,
+          throttle_us: normalizeThrottleToActual(normalized),
+        };
+      }
+
+      function renderGimbalKnob() {
+        const pad = document.getElementById("gimbalPad");
+        const knob = document.getElementById("gimbalKnob");
+        if (!pad || !knob) return;
+        const pan = parseInt(document.getElementById("pan").value, 10);
+        const tilt = parseInt(document.getElementById("tilt").value, 10);
+        const maxOffset = (pad.clientWidth - knob.clientWidth) / 2 - 6;
+        const x = ((pan - 90) / 90) * maxOffset;
+        const y = ((90 - tilt) / 90) * maxOffset;
+        knob.style.left = `calc(50% + ${x}px)`;
+        knob.style.top = `calc(50% + ${y}px)`;
+      }
+
+      function updateLabels() {
+        const steerHuman = parseInt(
+          document.getElementById("steerHuman").value,
+          10,
+        );
+        const throttle = parseInt(
+          document.getElementById("throttle").value,
+          10,
+        );
+        const pan = document.getElementById("pan").value;
+        const tilt = document.getElementById("tilt").value;
+        document.getElementById("steerHumanVal").textContent =
+          formatSteerText(steerHuman);
+        document.getElementById("throttleVal").textContent =
+          formatThrottleText(throttle);
+        document.getElementById("panVal").textContent = pan;
+        document.getElementById("tiltVal").textContent = tilt;
+        renderGimbalKnob();
+      }
+
+      function arm(enabled) {
+        send({ type: "arm", enabled });
+      }
+      function estop() {
+        centerThrottleUI();
+        updateLabels();
+        send({ type: "estop" });
+      }
+      function clearEstop() {
+        centerThrottleUI();
+        updateLabels();
+        send({ type: "clear_estop" });
+      }
+
+      function sendDriveNow() {
+        if (gamepadEnabled) return;
+        const steerHuman = parseInt(
+          document.getElementById("steerHuman").value,
+          10,
+        );
+        const steering = humanToServo(steerHuman);
+        const throttleNormalized = parseInt(
+          document.getElementById("throttle").value,
+          10,
+        );
+        send(buildDrivePayload(steering, throttleNormalized));
+        document.getElementById("stSteering").textContent = steering;
+        document.getElementById("stThrottle").textContent =
+          `${throttleNormalized}% / ${normalizeThrottleToActual(throttleNormalized)}us`;
+      }
+
+      function sendGimbalNow() {
+        const pan = parseInt(document.getElementById("pan").value, 10);
+        const tilt = parseInt(document.getElementById("tilt").value, 10);
+        send({ type: "gimbal", pan: tilt, tilt: pan });
+      }
+      // ================= UI 与通信节流 (Throttling) =================
+      // 为什么需要节流？因为用户拖拽滑块时，浏览器每秒可能触发几十上百次事件。
+      // 如果全部用 WebSocket 发送，会造成网络拥堵和后端处理卡顿。
+      function throttleFn(fn, interval = 80) {
+        let lastTime = 0;
+        let timer = null;
+        return function (...args) {
+          const now = Date.now();
+          const remain = interval - (now - lastTime);
+          if (remain <= 0) {
+            if (timer) {
+              clearTimeout(timer);
+              timer = null;
+            }
+            lastTime = now;
+            fn.apply(this, args);
+          } else {
+            // 保证最后停止拖拽的那一次精准位置一定会被发送
+            if (timer) clearTimeout(timer);
+            timer = setTimeout(() => {
+              lastTime = Date.now();
+              timer = null;
+              fn.apply(this, args);
+            }, remain);
+          }
+        };
+      }
+      // 将方向和云台的发送频率限制在约 12.5 帧/秒
+      const sendDriveThrottled = throttleFn(() => {
+        updateLabels();
+        sendDriveNow();
+      }, 80);
+
+      const sendGimbalThrottled = throttleFn(() => {
+        updateLabels();
+        sendGimbalNow();
+      }, 80);
+      // ================= 死人开关机制 (Deadman Switch) =================
+      // 网页端操控时，用户手指松开滑块/屏幕时，方向和油门必须自动回中！
+      function resetSteeringToCenter() {
+        if (gamepadEnabled) return; // 如果在使用手柄则跳过，因为手柄摇杆本身有弹簧回中
+        const steer = document.getElementById("steerHuman");
+        if (!steer) return;
+        if (parseInt(steer.value, 10) === 0) return;
+        steer.value = 0;
+        updateLabels();
+        sendDriveNow();
+      }
+
+      function resetThrottleToCenter() {
+        if (gamepadEnabled) return;
+        const throttle = document.getElementById("throttle");
+        if (!throttle) return;
+        if (parseInt(throttle.value, 10) === 0) return;
+        throttle.value = 0;
+        updateLabels();
+        sendDriveNow();
+      }
+
+      function bindDriveControls() {
+        // 绑定事件：拖拽中触发节流发送，释放时触发自动回中发送
+        const throttle = document.getElementById("throttle");
+        const steer = document.getElementById("steerHuman");
+        throttle.addEventListener("input", sendDriveThrottled);
+        throttle.addEventListener("change", sendDriveNow);
+        steer.addEventListener("input", sendDriveThrottled);
+        steer.addEventListener("change", sendDriveNow);
+
+        const throttleReleaseEvents = [
+          "mouseup",
+          "touchend",
+          "pointerup",
+          "touchcancel",
+        ];
+        throttleReleaseEvents.forEach((evt) => {
+          throttle.addEventListener(evt, resetThrottleToCenter);
+        });
+        // 这里兼顾了鼠标(mouse)和触摸屏(touch)
+        const steerReleaseEvents = [
+          "mouseup",
+          "touchend",
+          "pointerup",
+          "touchcancel",
+        ];
+        steerReleaseEvents.forEach((evt) => {
+          steer.addEventListener(evt, resetSteeringToCenter);
+        });
+
+        window.addEventListener("mouseup", () => {
+          resetSteeringToCenter();
+          resetThrottleToCenter();
+        });
+        window.addEventListener(
+          "touchend",
+          () => {
+            resetSteeringToCenter();
+            resetThrottleToCenter();
+          },
+          { passive: true },
+        );
+        window.addEventListener("pointerup", () => {
+          resetSteeringToCenter();
+          resetThrottleToCenter();
+        });
+      }
+
+      function bindGimbalPad() {
+        const pad = document.getElementById("gimbalPad");
+        const knob = document.getElementById("gimbalKnob");
+        const pan = document.getElementById("pan");
+        const tilt = document.getElementById("tilt");
+        const centerBtn = document.getElementById("gimbalCenterBtn");
+        let dragging = false;
+
+        function setFromClient(clientX, clientY) {
+          const rect = pad.getBoundingClientRect();
+          const centerX = rect.left + rect.width / 2;
+          const centerY = rect.top + rect.height / 2;
+          const maxOffset = (pad.clientWidth - knob.clientWidth) / 2 - 6;
+
+          let dx = clientX - centerX;
+          let dy = clientY - centerY;
+          const distance = Math.hypot(dx, dy);
+          if (distance > maxOffset) {
+            const scale = maxOffset / distance;
+            dx *= scale;
+            dy *= scale;
+          }
+
+          pan.value = Math.max(
+            0,
+            Math.min(180, Math.round(90 + (dx / maxOffset) * 90)),
+          );
+          tilt.value = Math.max(
+            0,
+            Math.min(180, Math.round(90 - (dy / maxOffset) * 90)),
+          );
+          renderGimbalKnob();
+          sendGimbalThrottled();
+        }
+
+        function start(clientX, clientY) {
+          dragging = true;
+          setFromClient(clientX, clientY);
+        }
+
+        function move(clientX, clientY) {
+          if (!dragging) return;
+          setFromClient(clientX, clientY);
+        }
+
+        function end() {
+          if (!dragging) return;
+          dragging = false;
+          sendGimbalNow();
+        }
+
+        pad.addEventListener("mousedown", (e) => start(e.clientX, e.clientY));
+        window.addEventListener("mousemove", (e) => move(e.clientX, e.clientY));
+        window.addEventListener("mouseup", end);
+
+        pad.addEventListener(
+          "touchstart",
+          (e) => {
+            const t = e.touches[0];
+            start(t.clientX, t.clientY);
+          },
+          { passive: true },
+        );
+
+        window.addEventListener(
+          "touchmove",
+          (e) => {
+            const t = e.touches[0];
+            if (t) move(t.clientX, t.clientY);
+          },
+          { passive: true },
+        );
+        window.addEventListener("touchend", end);
+
+        centerBtn.addEventListener("click", () => {
+          pan.value = 90;
+          tilt.value = 90;
+          updateLabels();
+          sendGimbalNow();
+        });
+      }
+
+      function makeWidgetDraggable(id, storageKey) {
+        const el = document.getElementById(id);
+        if (!el) return;
+        const handle = el.querySelector(".widget-title") || el;
+
+        const saved = localStorage.getItem(storageKey);
+        if (saved) {
+          try {
+            const pos = JSON.parse(saved);
+            el.style.left = `${pos.left}px`;
+            el.style.top = `${pos.top}px`;
+            el.style.right = "auto";
+            el.style.bottom = "auto";
+          } catch (_) {}
+        }
+
+        let startX = 0;
+        let startY = 0;
+        let originLeft = 0;
+        let originTop = 0;
+        let dragging = false;
+
+        function begin(clientX, clientY) {
+          const rect = el.getBoundingClientRect();
+          dragging = true;
+          startX = clientX;
+          startY = clientY;
+          originLeft = rect.left;
+          originTop = rect.top;
+          el.style.left = `${originLeft}px`;
+          el.style.top = `${originTop}px`;
+          el.style.right = "auto";
+          el.style.bottom = "auto";
+          handle.classList.add("dragging");
+        }
+
+        function move(clientX, clientY) {
+          if (!dragging) return;
+          const dx = clientX - startX;
+          const dy = clientY - startY;
+          el.style.left = `${originLeft + dx}px`;
+          el.style.top = `${originTop + dy}px`;
+        }
+
+        function end() {
+          if (!dragging) return;
+          dragging = false;
+          handle.classList.remove("dragging");
+          localStorage.setItem(
+            storageKey,
+            JSON.stringify({
+              left: parseFloat(el.style.left),
+              top: parseFloat(el.style.top),
+            }),
+          );
+        }
+
+        handle.addEventListener("mousedown", (e) =>
+          begin(e.clientX, e.clientY),
+        );
+        window.addEventListener("mousemove", (e) => move(e.clientX, e.clientY));
+        window.addEventListener("mouseup", end);
+        handle.addEventListener(
+          "touchstart",
+          (e) => {
+            const t = e.touches[0];
+            begin(t.clientX, t.clientY);
+          },
+          { passive: true },
+        );
+        window.addEventListener(
+          "touchmove",
+          (e) => {
+            const t = e.touches[0];
+            if (t) move(t.clientX, t.clientY);
+          },
+          { passive: true },
+        );
+        window.addEventListener("touchend", end);
+      }
+
+      function updateAudioButton() {
+        const btn = document.getElementById("audioToggleBtn");
+        btn.textContent = remoteAudioEnabled ? "关闭声音" : "打开声音";
+      }
+
+      function applyRemoteAudioState() {
+        const video = document.getElementById("videoElement");
+        video.muted = !remoteAudioEnabled;
+        video.volume = remoteAudioEnabled ? 1.0 : 0.0;
+        updateAudioButton();
+      }
+
+      function toggleRemoteAudio() {
+        remoteAudioEnabled = !remoteAudioEnabled;
+        applyRemoteAudioState();
+        const video = document.getElementById("videoElement");
+        if (remoteAudioEnabled) {
+          video.play().catch((err) => log("打开声音失败: " + err.message));
+        }
+      }
+
+      async function waitIceGatheringComplete(pc) {
+        if (pc.iceGatheringState === "complete") return;
+        await new Promise((resolve) => {
+          function checkState() {
+            if (pc.iceGatheringState === "complete") {
+              pc.removeEventListener("icegatheringstatechange", checkState);
+              resolve();
+            }
+          }
+          pc.addEventListener("icegatheringstatechange", checkState);
+          setTimeout(() => {
+            pc.removeEventListener("icegatheringstatechange", checkState);
+            resolve();
+          }, 3000);
+        });
+      }
+
+      function connectWS() {
+        try {
+          if (ws) ws.close();
+        } catch (_) {}
+        ws = new WebSocket(getWsUrl());
+
+        ws.onopen = () => {
+          setWsState("已连接");
+          log("WebSocket 已连接: " + getWsUrl());
+        };
+
+        ws.onmessage = (event) => {
+          try {
+            const data = JSON.parse(event.data);
+            if (data.type === "telemetry") {
+              document.getElementById("stArmed").textContent = data.armed;
+              document.getElementById("stEstop").textContent = data.estop;
+              if (typeof data.throttle !== "undefined")
+                document.getElementById("stThrottle").textContent =
+                  data.throttle;
+              if (typeof data.steering !== "undefined")
+                document.getElementById("stSteering").textContent =
+                  data.steering;
+            } else {
+              log(JSON.stringify(data));
+            }
+          } catch (err) {
+            log("WebSocket 消息解析失败: " + err.message + " " + event.data);
+          }
+        };
+
+        ws.onclose = () => {
+          setWsState("已断开");
+          log("WebSocket 已断开，3秒后重连");
+          setTimeout(connectWS, 3000);
+        };
+
+        ws.onerror = () => {
+          log("WebSocket 错误");
+        };
+      }
+      // ================= WebRTC 图传模块 (WHEP) =================
+      //切换摄像头
+      async function toggleCamera() {
+        if (!CONFIG.streamPath2) {
+          log("未配置副摄像头路径，无法切换");
+          return;
+        }
+
+        // 切换状态
+        activeCamera = activeCamera === 1 ? 2 : 1;
+
+        // 更新 UI 按钮文字
+        document.getElementById("switchCamBtn").textContent =
+          activeCamera === 1 ? "摄像头: 主" : "摄像头: 副";
+        document.getElementById("switchCamBtn").className =
+          activeCamera === 1 ? "secondary" : "warn"; // 切换时变个颜色提示
+
+        log(`正在切换至摄像头 ${activeCamera}...`);
+
+        // 【核心动作】：先彻底停止当前的播放器，等待 300 毫秒释放资源后，重新启动
+        await stopViewer(true);
+        setTimeout(() => {
+          startViewer();
+        }, 300);
+      }
+      async function startViewer() {
+        if (viewerPc) {
+          log("播放器已启动");
+          return;
+        }
+        try {
+          setPlayerState("连接中");
+          log("开始建立 WHEP 播放连接: " + getWhepUrl());
+          const video = document.getElementById("videoElement");
+          remoteStream = new MediaStream();
+          video.srcObject = remoteStream;
+          applyRemoteAudioState();
+          // 1. 创建 RTC 连接实例
+          viewerPc = new RTCPeerConnection({ iceServers: [] });
+          viewerPc.addTransceiver("video", { direction: "recvonly" });
+          viewerPc.addTransceiver("audio", { direction: "recvonly" });
+          // 2. 当接收到流时，绑定到 HTML 的 video 标签上
+          viewerPc.ontrack = (event) => {
+            remoteStream.addTrack(event.track);
+            video.play().catch((err) => log("播放启动失败: " + err.message));
+          };
+
+          viewerPc.onconnectionstatechange = () => {
+            if (!viewerPc) return;
+            log("播放器连接状态: " + viewerPc.connectionState);
+            if (viewerPc.connectionState === "connected")
+              setPlayerState("已连接");
+            if (
+              ["failed", "disconnected", "closed"].includes(
+                viewerPc.connectionState,
+              )
+            ) {
+              setPlayerState(viewerPc.connectionState);
+            }
+          };
+          // 3. WebRTC 握手：本地生成 SDP Offer，收集 ICE 候选项
+          const offer = await viewerPc.createOffer();
+          await viewerPc.setLocalDescription(offer);
+          await waitIceGatheringComplete(viewerPc);
+          // 4. 将 SDP Offer 发给后端的 WHEP 媒体服务器 (如 MediaMTX)
+          const res = await fetch(getWhepUrl(), {
+            method: "POST",
+            headers: { "Content-Type": "application/sdp" },
+            body: viewerPc.localDescription.sdp,
+          });
+          if (!res.ok) throw new Error(`WHEP POST failed: ${res.status}`);
+
+          viewerSessionUrl = getAbsoluteUrl(res.headers.get("Location"));
+          // 5. 将媒体服务器返回的 SDP Answer 设置在本地，完成协商，视频开始播放
+          const answerSdp = await res.text();
+          await viewerPc.setRemoteDescription({
+            type: "answer",
+            sdp: answerSdp,
+          });
+
+          setPlayerState("已启动");
+          log("WHEP 播放已启动");
+        } catch (err) {
+          log("播放器启动失败: " + err.message);
+          setPlayerState("启动失败");
+          await stopViewer(false);
+        }
+      }
+
+      async function stopViewer(resetState = true) {
+        try {
+          if (viewerPc) {
+            viewerPc.close();
+            viewerPc = null;
+          }
+          const video = document.getElementById("videoElement");
+          if (video.srcObject) {
+            video.srcObject.getTracks().forEach((t) => t.stop());
+            video.srcObject = null;
+          }
+          remoteStream = null;
+          if (viewerSessionUrl) {
+            try {
+              await fetch(viewerSessionUrl, { method: "DELETE" });
+            } catch (_) {}
+            viewerSessionUrl = null;
+          }
+          if (resetState) setPlayerState("未启动");
+        } catch (err) {
+          log("播放器停止异常: " + err.message);
+        }
+      }
+
+      async function reconnectAll() {
+        await stopViewer();
+        connectWS();
+        setTimeout(() => {
+          startViewer();
+        }, 600);
+      }
+      // ================= WebRTC 语音模块 (WHIP) =================
+      // 用户按住按钮，将本地麦克风数据推流到小车
+      async function startTalk() {
+        if (talkPc) return;
+        try {
+          log("申请麦克风权限...");
+          // 申请浏览器麦克风权限
+          talkStream = await navigator.mediaDevices.getUserMedia({
+            audio: true,
+          });
+          talkPc = new RTCPeerConnection();
+          talkStream
+            .getTracks()
+            .forEach((track) => talkPc.addTrack(track, talkStream));
+          // WebRTC 握手过程与上面 WHEP 类似，将我们的麦克风音频作为 SDP Offer 发给服务端
+          const offer = await talkPc.createOffer();
+          await talkPc.setLocalDescription(offer);
+
+          const res = await fetch(getTalkUrl(), {
+            method: "POST",
+            headers: { "Content-Type": "application/sdp" },
+            body: offer.sdp,
+          });
+          if (!res.ok) throw new Error("WHIP POST failed: " + res.status);
+
+          talkSessionUrl = getAbsoluteUrl(res.headers.get("Location"));
+          const answer = await res.text();
+          await talkPc.setRemoteDescription({ type: "answer", sdp: answer });
+          log("对讲已开始");
+          /* ... 握手完成 */
+        } catch (err) {
+          log("对讲启动失败: " + err.message); /* 处理错误 */
+          await stopTalk();
+        }
+      }
+
+      async function stopTalk() {
+        try {
+          if (talkPc) {
+            talkPc.close();
+            talkPc = null;
+          }
+          if (talkStream) {
+            talkStream.getTracks().forEach((t) => t.stop());
+            talkStream = null;
+          }
+          // 不再主动 DELETE，会话交给服务端自行回收
+          if (talkSessionUrl) {
+            talkSessionUrl = null;
+          }
+          log("对讲已停止");
+        } catch (err) {
+          log("对讲停止异常: " + err.message);
+        }
+      }
+
+      function fillConfigInputs() {
+        document.getElementById("mediaHostInput").value = CONFIG.mediaHost;
+        document.getElementById("mediaPortInput").value = CONFIG.mediaPort;
+        document.getElementById("streamPathInput").value = CONFIG.streamPath;
+        // 【新增】填充副摄路径到UI
+        if (document.getElementById("streamPath2Input")) {
+          document.getElementById("streamPath2Input").value =
+            CONFIG.streamPath2 ?? "";
+        }
+        document.getElementById("talkPathInput").value = CONFIG.talkPath;
+        document.getElementById("gamepadModeSelect").value =
+          CONFIG.gamepadMode || "sticks";
+        document.getElementById("steerAxisInput").value = CONFIG.steerAxis ?? 0;
+        document.getElementById("throttleAxisInput").value =
+          CONFIG.throttleAxis ?? 1;
+        document.getElementById("throttlePosBtnInput").value =
+          CONFIG.throttlePosBtn ?? 7;
+        document.getElementById("throttleNegBtnInput").value =
+          CONFIG.throttleNegBtn ?? 6;
+        document.getElementById("throttleMinUsInput").value =
+          CONFIG.throttleMinUs ?? 1400;
+        document.getElementById("throttleCenterUsInput").value =
+          CONFIG.throttleCenterUs ?? 1500;
+        document.getElementById("throttleMaxUsInput").value =
+          CONFIG.throttleMaxUs ?? 1600;
+        if (document.getElementById("steerCenterInput")) {
+          document.getElementById("steerCenterInput").value =
+            CONFIG.steerCenter ?? 90;
+        }
+        document.getElementById("panAxisInput").value = CONFIG.panAxis ?? 7;
+        document.getElementById("tiltAxisInput").value = CONFIG.tiltAxis ?? 8;
+        document.getElementById("tiltUpBtnInput").value = CONFIG.tiltUpBtn ?? 9;
+        document.getElementById("tiltDownBtnInput").value =
+          CONFIG.tiltDownBtn ?? 10;
+      }
+
+      function getLearnButtonLabel(target) {
+        const map = {
+          steerAxisInput: "学习方向轴",
+          throttleAxisInput: "学习油门轴",
+          throttlePosBtnInput: "学习前进按钮",
+          throttleNegBtnInput: "学习后退按钮",
+          panAxisInput: "学习云台左按钮",
+          tiltAxisInput: "学习云台右按钮",
+          tiltUpBtnInput: "学习云台上按钮",
+          tiltDownBtnInput: "学习云台下按钮",
+        };
+        return map[target] || "学习";
+      }
+
+      function refreshLearnButtons() {
+        document.querySelectorAll(".gp-learn-btn").forEach((btn) => {
+          const active = gamepadLearningTarget === btn.dataset.target;
+          btn.textContent = active
+            ? `等待输入：${getLearnButtonLabel(btn.dataset.target)}`
+            : getLearnButtonLabel(btn.dataset.target);
+          btn.className = active
+            ? "warn gp-learn-btn"
+            : "secondary gp-learn-btn";
+        });
+      }
+
+      function beginLearnMapping(target, kind) {
+        gamepadLearningTarget = target;
+        gamepadLearningKind = kind;
+        refreshLearnButtons();
+        log(`开始学习 ${getLearnButtonLabel(target)}，请立即操作手柄。`);
+      }
+
+      function finishLearnMapping(index, kind, rawValue) {
+        if (!gamepadLearningTarget) return;
+        const input = document.getElementById(gamepadLearningTarget);
+        if (!input) return;
+        input.value = index;
+        log(
+          `已学习 ${getLearnButtonLabel(gamepadLearningTarget)} = ${kind}[${index}]，触发值=${rawValue}`,
+        );
+        gamepadLearningTarget = null;
+        gamepadLearningKind = null;
+        refreshLearnButtons();
+      }
+
+      function updateGamepadDebugStatus() {
+        const gps = navigator.getGamepads ? navigator.getGamepads() : [];
+        const gp = gps && gps[0];
+        document.getElementById("gpConnectedText").textContent =
+          gp && gp.connected ? "已连接" : "未检测到手柄";
+        document.getElementById("gpNameText").textContent =
+          gp && gp.id ? gp.id : "-";
+      }
+
+      function renderGamepadDebug(gp) {
+        updateGamepadDebugStatus();
+        const output = document.getElementById("gpDebugOutput");
+        if (!gp || !gp.connected) {
+          output.textContent = "未检测到手柄，请连接后按任意键唤醒。";
+          return;
+        }
+
+        const axes = (gp.axes || []).map(
+          (v, i) => `axes[${i}] = ${Number(v).toFixed(3)}`,
+        );
+        const buttons = (gp.buttons || []).map((b, i) => {
+          const pressed = !!b.pressed;
+          const value =
+            typeof b.value === "number" ? b.value.toFixed(3) : "0.000";
+          return `buttons[${i}] = { pressed: ${pressed}, value: ${value} }`;
+        });
+
+        output.textContent = [
+          `id: ${gp.id}`,
+          `mapping: ${gp.mapping || "unknown"}`,
+          `timestamp: ${gp.timestamp}`,
+          "",
+          "[axes]",
+          ...axes,
+          "",
+          "[buttons]",
+          ...buttons,
+        ].join("\n");
+      }
+
+      function trackGamepadChanges(gp) {
+        if (!gp) return;
+
+        (gp.axes || []).forEach((v, i) => {
+          const value = Number(v.toFixed(3));
+          if (lastAxisSnapshot[i] !== value && Math.abs(value) > 0.08) {
+            document.getElementById("gpLastAxisText").textContent =
+              `axes[${i}] = ${value}`;
+            if (
+              gamepadLearningTarget &&
+              gamepadLearningKind === "axis" &&
+              Math.abs(value) > 0.35
+            ) {
+              finishLearnMapping(i, "axes", value);
+            }
+          }
+          lastAxisSnapshot[i] = value;
+        });
+
+        (gp.buttons || []).forEach((b, i) => {
+          const pressed = !!b.pressed;
+          const value =
+            typeof b.value === "number" ? Number(b.value.toFixed(3)) : 0;
+          const prevPressed = lastButtonSnapshot[i]?.pressed;
+          const prevValue = lastButtonSnapshot[i]?.value;
+          if (
+            (prevPressed !== pressed || prevValue !== value) &&
+            (pressed || value > 0.05)
+          ) {
+            document.getElementById("gpLastButtonText").textContent =
+              `buttons[${i}] = pressed:${pressed} value:${value}`;
+            if (
+              gamepadLearningTarget &&
+              gamepadLearningKind === "button" &&
+              (pressed || value > 0.5)
+            ) {
+              finishLearnMapping(i, "buttons", value);
+            }
+          }
+          lastButtonSnapshot[i] = { pressed, value };
+        });
+      }
+
+      function startGamepadDebugLoop() {
+        gamepadDebugEnabled = true;
+        updateGamepadDebugStatus();
+
+        function loop() {
+          if (!gamepadDebugEnabled) return;
+          const gps = navigator.getGamepads ? navigator.getGamepads() : [];
+          const gp = gps && gps[0];
+          if (gp && gp.connected) {
+            trackGamepadChanges(gp);
+            renderGamepadDebug(gp);
+          } else {
+            renderGamepadDebug(null);
+          }
+          requestAnimationFrame(loop);
+        }
+
+        requestAnimationFrame(loop);
+      }
+
+      function stopGamepadDebugLoop() {
+        gamepadDebugEnabled = false;
+        updateGamepadDebugStatus();
+      }
+
+      function updateGamepadButton() {
+        const btn = document.getElementById("gamepadBtn");
+        btn.textContent = gamepadEnabled ? "手柄控制：开" : "手柄控制：关";
+        btn.className = gamepadEnabled ? "warn" : "secondary";
+      }
+
+      function applyDeadzone(v, dz = GAMEPAD_DEADZONE) {
+        return Math.abs(v) < dz ? 0 : v;
+      }
+
+      function getGamepadMode() {
+        return document.getElementById("gamepadModeSelect").value || "sticks";
+      }
+
+      function readGamepadAxis(gp, index, fallback = 0) {
+        const value = gp.axes?.[index];
+        return typeof value === "number" ? value : fallback;
+      }
+
+      function readGamepadButtonValue(gp, index, fallback = 0) {
+        const value = gp.buttons?.[index]?.value;
+        return typeof value === "number" ? value : fallback;
+      }
+
+      // ================= Gamepad 手柄控制模块 =================
+      function mapGamepadToDrive(gp) {
+        // 核心：读取手柄按键并计算数据
+
+        // 读取转向轴（通常是左摇杆X轴），并通过 applyDeadzone 过滤掉细微抖动
+        const x = applyDeadzone(readGamepadAxis(gp, CONFIG.steerAxis ?? 0, 0));
+        let throttleValue = 0;
+        const mode = getGamepadMode();
+
+        if (mode === "triggers") {
+          // 扳机模式（类似于赛车游戏）：右扳机加速，左扳机减速/倒车
+          const pos = readGamepadButtonValue(gp, CONFIG.throttlePosBtn ?? 7, 0); // 读RT
+          const neg = readGamepadButtonValue(gp, CONFIG.throttleNegBtn ?? 6, 0); // 读LT
+          throttleValue = pos - neg;
+        } else {
+          // 摇杆模式：通过读取 Y 轴计算油门。Y 轴向上通常为负数，所以要加负号取反
+          throttleValue = -applyDeadzone(
+            readGamepadAxis(gp, CONFIG.throttleAxis ?? 1, 0),
+          );
+        }
+        // 映射到后端范围数据，现在改为基于配置的舵机中心动态计算！
+        const center = parseInt(
+          document.getElementById("steerCenterInput")?.value ??
+            CONFIG.steerCenter ??
+            90,
+          10,
+        );
+        // 限制手柄最大浮动幅度为左右各 60 度 (或者其他安全范围，配合后端软限位)
+        const steering = Math.max(
+          0,
+          Math.min(180, Math.round(center - x * 60)),
+        );
+        const throttle = Math.max(
+          -100,
+          Math.min(100, Math.round(throttleValue * 100)),
+        );
+        const steerHuman = Math.max(-100, Math.min(100, Math.round(x * 100)));
+        return { steering, throttle, steerHuman };
+      }
+
+      function mapGamepadToGimbal(gp) {
+        const panLeftBtn = readGamepadButtonValue(gp, CONFIG.panAxis ?? 7, 0);
+        const panRightBtn = readGamepadButtonValue(gp, CONFIG.tiltAxis ?? 8, 0);
+        const tiltUpBtn = readGamepadButtonValue(gp, CONFIG.tiltUpBtn ?? 9, 0);
+        const tiltDownBtn = readGamepadButtonValue(
+          gp,
+          CONFIG.tiltDownBtn ?? 10,
+          0,
+        );
+
+        const currentPan =
+          parseInt(document.getElementById("pan").value, 10) || 90;
+        const currentTilt =
+          parseInt(document.getElementById("tilt").value, 10) || 90;
+
+        const panDelta =
+          (panRightBtn > 0.5 ? 3 : 0) - (panLeftBtn > 0.5 ? 3 : 0);
+        const tiltDelta =
+          (tiltUpBtn > 0.5 ? 3 : 0) - (tiltDownBtn > 0.5 ? 3 : 0);
+
+        return {
+          pan: Math.max(0, Math.min(180, currentPan + panDelta)),
+          tilt: Math.max(0, Math.min(180, currentTilt + tiltDelta)),
+        };
+      }
+
+      function sendDriveFromGamepad(steering, throttle, steerHuman) {
+        send(buildDrivePayload(steering, throttle));
+        document.getElementById("steerHuman").value = steerHuman;
+        document.getElementById("throttle").value = throttle;
+        document.getElementById("stSteering").textContent = steering;
+        document.getElementById("stThrottle").textContent =
+          `${throttle}% / ${normalizeThrottleToActual(throttle)}us`;
+        updateLabels();
+      }
+
+      function sendGimbalFromGamepad(pan, tilt) {
+        document.getElementById("pan").value = pan;
+        document.getElementById("tilt").value = tilt;
+        updateLabels();
+        sendGimbalNow();
+      }
+
+      function startGamepadLoop() {
+        if (gamepadLoopRunning) return;
+        gamepadLoopRunning = true;
+        // 开启一个基于 requestAnimationFrame 的高性能轮询循环
+        function loop() {
+          if (!gamepadEnabled) {
+            gamepadLoopRunning = false;
+            return;
+          }
+
+          const gps = navigator.getGamepads ? navigator.getGamepads() : [];
+          const gp = gps && gps[0]; // 获取第一个手柄
+          if (gp && gp.connected) {
+            const now = Date.now();
+            // 限制发送频率，避免瞬间发送大量手柄数据阻塞 WebSocket
+            if (now - lastGamepadSendTime >= GAMEPAD_SEND_INTERVAL) {
+              const drive = mapGamepadToDrive(gp);
+              const gimbal = mapGamepadToGimbal(gp);
+              sendDriveFromGamepad(
+                drive.steering,
+                drive.throttle,
+                drive.steerHuman,
+              );
+              sendGimbalFromGamepad(gimbal.pan, gimbal.tilt);
+              lastGamepadSendTime = now;
+            }
+          }
+          // 递归调用下一帧
+          requestAnimationFrame(loop);
+        }
+
+        requestAnimationFrame(loop);
+      }
+
+      function toggleGamepadControl() {
+        gamepadEnabled = !gamepadEnabled;
+        updateGamepadButton();
+        if (gamepadEnabled) {
+          const gps = navigator.getGamepads ? navigator.getGamepads() : [];
+          if (!gps || !gps[0]) {
+            log("未检测到手柄，请先连接手柄并按任意键唤醒。");
+          }
+          log("已开启手柄控制");
+          startGamepadLoop();
+        } else {
+          log("已关闭手柄控制");
+        }
+      }
+
+      window.addEventListener("gamepadconnected", (e) => {
+        log(`检测到手柄连接: ${e.gamepad.id}`);
+        updateGamepadButton();
+        updateGamepadDebugStatus();
+        renderGamepadDebug(e.gamepad);
+      });
+
+      window.addEventListener("gamepaddisconnected", (e) => {
+        log(`手柄已断开: ${e.gamepad.id}`);
+        const gps = navigator.getGamepads ? navigator.getGamepads() : [];
+        if (!gps || !gps[0]) {
+          gamepadEnabled = false;
+          updateGamepadButton();
+        }
+        updateGamepadDebugStatus();
+        renderGamepadDebug(null);
+      });
+
+      function saveConfig() {
+        CONFIG = {
+          controlHost: document.getElementById("controlHostInput").value.trim(),
+          controlPort: document.getElementById("controlPortInput").value.trim(),
+          mediaHost: document.getElementById("mediaHostInput").value.trim(),
+          mediaPort: document.getElementById("mediaPortInput").value.trim(),
+          streamPath: document.getElementById("streamPathInput").value.trim(),
+          // 【新增】保存副摄路径
+          streamPath2:
+            document.getElementById("streamPath2Input")?.value.trim() || "",
+          talkPath: document.getElementById("talkPathInput").value.trim(),
+          gamepadMode:
+            document.getElementById("gamepadModeSelect").value || "sticks",
+          steerAxis:
+            parseInt(document.getElementById("steerAxisInput").value, 10) || 0,
+          throttleAxis:
+            parseInt(document.getElementById("throttleAxisInput").value, 10) ||
+            1,
+          throttlePosBtn:
+            parseInt(
+              document.getElementById("throttlePosBtnInput").value,
+              10,
+            ) || 7,
+          throttleNegBtn:
+            parseInt(
+              document.getElementById("throttleNegBtnInput").value,
+              10,
+            ) || 6,
+          throttleMinUs:
+            parseInt(document.getElementById("throttleMinUsInput").value, 10) ||
+            1400,
+          throttleCenterUs:
+            parseInt(
+              document.getElementById("throttleCenterUsInput").value,
+              10,
+            ) || 1500,
+          throttleMaxUs:
+            parseInt(document.getElementById("throttleMaxUsInput").value, 10) ||
+            1600,
+          steerCenter:
+            parseInt(document.getElementById("steerCenterInput")?.value, 10) ||
+            90,
+          panAxis:
+            parseInt(document.getElementById("panAxisInput").value, 10) || 7,
+          tiltAxis:
+            parseInt(document.getElementById("tiltAxisInput").value, 10) || 8,
+          tiltUpBtn:
+            parseInt(document.getElementById("tiltUpBtnInput").value, 10) || 9,
+          tiltDownBtn:
+            parseInt(document.getElementById("tiltDownBtnInput").value, 10) ||
+            10,
+        };
+        localStorage.setItem("rc-ui-config", JSON.stringify(CONFIG));
+        log("连接设置已保存，手柄映射已更新");
+      }
+
+      document.getElementById("configBtn").addEventListener("click", () => {
+        document.getElementById("configPanel").classList.toggle("show");
+      });
+      document
+        .getElementById("saveConfigBtn")
+        .addEventListener("click", saveConfig);
+      document
+        .getElementById("reconnectBtn")
+        .addEventListener("click", reconnectAll);
+      document.getElementById("toggleLogBtn").addEventListener("click", () => {
+        document.getElementById("log").classList.toggle("show");
+      });
+      document
+        .getElementById("gpStartDebugBtn")
+        .addEventListener("click", () => {
+          log("已开启手柄调试界面");
+          startGamepadDebugLoop();
+        });
+      document
+        .getElementById("gpStopDebugBtn")
+        .addEventListener("click", () => {
+          log("已停止手柄调试界面");
+          stopGamepadDebugLoop();
+          gamepadLearningTarget = null;
+          gamepadLearningKind = null;
+          refreshLearnButtons();
+        });
+      document.querySelectorAll(".gp-learn-btn").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          beginLearnMapping(btn.dataset.target, btn.dataset.kind);
+          if (!gamepadDebugEnabled) startGamepadDebugLoop();
+        });
+      });
+
+      const talkBtn = document.getElementById("talkBtn");
+      talkBtn.addEventListener("mousedown", startTalk);
+      talkBtn.addEventListener("mouseup", stopTalk);
+      talkBtn.addEventListener("mouseleave", stopTalk);
+      talkBtn.addEventListener(
+        "touchstart",
+        async (e) => {
+          e.preventDefault();
+          await startTalk();
+        },
+        { passive: false },
+      );
+      talkBtn.addEventListener(
+        "touchend",
+        async (e) => {
+          e.preventDefault();
+          await stopTalk();
+        },
+        { passive: false },
+      );
+      // ================= 香橙派远端音量控制 =================
+      const opiVolume = document.getElementById("opiVolume");
+
+      // 1. 初始化时读取本地存储的音量配置
+      if (CONFIG.opiVolume !== undefined) {
+        opiVolume.value = CONFIG.opiVolume;
+      }
+
+      // 2. 包装一个带节流的发送函数，防止拖动时 1 秒钟发几百个包导致网络卡顿
+      const sendVolumeThrottled = throttleFn(() => {
+        send({ type: "set_volume", volume: parseInt(opiVolume.value, 10) });
+      }, 100);
+
+      // 3. 拖动过程中实时发送
+      opiVolume.addEventListener("input", sendVolumeThrottled);
+
+      // 4. 松开鼠标/手指时，最后发送一次准确值，并保存到本地缓存
+      opiVolume.addEventListener("change", () => {
+        const finalVol = parseInt(opiVolume.value, 10);
+        send({ type: "set_volume", volume: finalVol });
+        CONFIG.opiVolume = finalVol;
+        localStorage.setItem("rc-ui-config", JSON.stringify(CONFIG));
+      });
+      // ================= 系统心跳保活 =================
+      // 每 500 毫秒向后端发送 ping 消息
+      // 作用 1：保持 WebSocket 连接不断开。
+      // 作用 2：后端 app.py 接收后会重置 watchdog(看门狗) 时间戳，避免触发 Failsafe 失控保护机制
+      setInterval(() => {
+        send({ type: "ping" });
+      }, 500);
+      // 初始化执行区...
+      fillConfigInputs();
+      updateLabels();
+      updateGamepadButton();
+      updateGamepadDebugStatus();
+      refreshLearnButtons();
+      renderGamepadDebug(null);
+      updateAudioButton();
+      applyRemoteAudioState();
+      bindDriveControls();
+      bindGimbalPad();
+      makeWidgetDraggable("throttleWidget", "ui-throttle-pos");
+      makeWidgetDraggable("steeringWidget", "ui-steering-pos");
+      makeWidgetDraggable("gimbalWidget", "ui-gimbal-pos");
+      connectWS();
+      startViewer();
+    </script>
+  </body>
+</html>

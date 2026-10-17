@@ -47,3 +47,6 @@ dev/img/*.jpeg
 dev/img/*.png
 dev/backup-*/
 dev/config/site.yaml
+
+# ===== 驾驶模式部署脚本的临时缓存（从车端拉下来的页面，用完即弃）=====
+dev/web/.car-index.*.html

@@ -14,8 +14,8 @@ import paramiko
 
 from remote_path import normalize_remote
 
-TUNNEL = dict(host="121.40.149.155", port=2222, user="root", pwd="orangepi")
-DIRECT = dict(host="10.68.1.43", port=22, user="root", pwd="orangepi")
+TUNNEL = dict(host="121.40.149.155", port=2222, user="root", pwd="orangepiSlsd583#123456")
+DIRECT = dict(host="10.68.1.43", port=22, user="root", pwd="orangepiSlsd583#123456")
 SERVER = dict(host="121.40.149.155", port=22, user="root", pwd="Lyk12345678@@")
 
 

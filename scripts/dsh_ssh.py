@@ -3,7 +3,7 @@ import paramiko
 
 HOST = "10.68.1.43"
 USER = "root"
-PWD = "orangepi"
+PWD = "orangepiSlsd583#123456"
 
 
 def main():

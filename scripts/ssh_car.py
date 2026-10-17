@@ -15,9 +15,9 @@ import sys
 import paramiko
 
 # 服务器转发(主): 公网服务器 → frp 隧道 → 小车 SSH
-TUNNEL = dict(host="121.40.149.155", port=2222, user="root", pwd="orangepi")
+TUNNEL = dict(host="121.40.149.155", port=2222, user="root", pwd="orangepiSlsd583#123456")
 # 热点直连(备): 手机热点局域网
-DIRECT = dict(host="10.68.1.43", port=22, user="root", pwd="orangepi")
+DIRECT = dict(host="10.68.1.43", port=22, user="root", pwd="orangepiSlsd583#123456")
 
 
 def main() -> None:

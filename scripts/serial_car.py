@@ -1,7 +1,7 @@
 """串口控制台助手 —— 通过 USB-TTL 串口登录小车并执行命令（免交互）。
 
 用途：当网络（WiFi/5G/隧道）都断了，用串口救场。小车调试串口是
-`serial-getty@ttyFIQ0`，波特率 **1500000**，登录 `root/orangepi`。
+`serial-getty@ttyFIQ0`，波特率 **1500000**，登录 `root`（口令见 `doc/远程连接与服务器手册.md` §0）。
 
 用法:
     python scripts/serial_car.py "hostname; ip -br a"          # 执行命令并回显
@@ -26,7 +26,7 @@ PROMPT_MARK = "<<<CAR_CMD_DONE>>>"
 DEFAULT_PORT = "COM8"
 DEFAULT_BAUD = 1500000
 USER = "root"
-PASSWORD = "orangepi"
+PASSWORD = "orangepiSlsd583#123456"
 
 
 class SerialConsole:

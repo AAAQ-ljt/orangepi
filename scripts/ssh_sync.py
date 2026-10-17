@@ -28,8 +28,8 @@ from typing import Dict, List, Tuple
 
 import paramiko
 
-TUNNEL = dict(host="121.40.149.155", port=2222, user="root", pwd="orangepi")
-DIRECT = dict(host="10.68.1.43", port=22, user="root", pwd="orangepi")
+TUNNEL = dict(host="121.40.149.155", port=2222, user="root", pwd="orangepiSlsd583#123456")
+DIRECT = dict(host="10.68.1.43", port=22, user="root", pwd="orangepiSlsd583#123456")
 
 EXCLUDE_DIRS = {"__pycache__", ".git", ".idea", ".vscode", "logs", "runs", "dataset", "datasets"}
 EXCLUDE_SUFFIXES = (".pyc", ".pyo", ".log", ".mp4", ".avi", ".pid")

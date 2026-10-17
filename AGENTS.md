@@ -2,7 +2,9 @@
 
 > 本文件是**所有 AI 助手（ZCode / Claude / 其他 agent）在本仓库工作时的第一读物**，等价于团队开发规范。
 > 人类队员也请先读这一份。原始的长版规范已合并进本文件（`doc/开发规范.md` 已删除）。
-> 最后更新：2026-10-17——**调试期"停车"落地三件事：停止文件 + 看门狗自保 + 按键自检**（这一轮不碰比赛规则，只解决"跑起来停不下来"）：① ★ **停止文件通道**（`lane_final_test.py --stop-file`，默认 `/dev/shm/lane_stop`）：**文件存在 = 安全停车**，主循环**每帧**查（两处检查点都改成 `stop_requested()`），走与 Ctrl+C **完全相同**的收尾链；**启动清残留、退出也清**；任何通道都能发（另一个会话 / 串口 / 网页终端 / AI 工具），不依赖 PTY、不依赖 PID、不依赖命令行特征。为什么：10-16 现场 7 趟日志零「收到信号」= 按键根本没到进程（Ctrl+C 只在"该进程就是这个终端的前台作业"时才是信号）→ 详情与判据见 §6 陷阱表。② ★ **看门狗自保**（`esc_watchdog.py`）：`start_new_session=True`（独立会话）+ **忽略 SIGINT/SIGHUP/SIGQUIT、只留 SIGTERM**（主控收尾用 terminate 收它）+ **输出重定向到自己的日志**（原来继承主控那条 `| tee` 管道，操作员一断线它下一次 print 就 BrokenPipeError 自杀）+ 循环体"绝不抛"。为什么：操作员按 Ctrl+C / 断线**不能再把安全网一起带走**（主循环卡在 I2C/写盘时，那 1 秒后写 1500us 是唯一的救命一手）。③ **启动自检行**：日志/session.json 记录 `tty/pgid/tpgid/keyboard_reaches`——一眼看出"这个窗口的 Ctrl+C 能不能到车"；`session.json.result.stopped_by` 记 `signal` / `stop-file`。④ 收尾链每步包 `_try()`：stdout 管道断了也不许跳过 `wd.stop()` 与 session.json 落盘。⑤ `stop_run.sh --file`（走停止文件通道）+ `--status` 显示停止文件状态；`lab_lane_test.sh` / 现场单 / report.md §6 / §1.1 的停车顺序同步改。测试：`test_lane_final_run` +3 例（停止文件生效/残留不清跑/关掉通道）、`test_esc_watchdog` +3 例（抗 INT+HUP 后仍触发 / TERM 仍能收 / 独立会话+自己的日志，Linux 门控、**车上必须跑一遍**）。本轮只落本地（车在充电、未同步）。
+> 2026-10-17——**电调反向/刹车：先定性再谈「刹车」**。用户问「为什么没有刹车、是不是电调不支持」→ 核查结论：**不是电调被证否，而是我们的代码从来没写过 <1500us**（`set_esc_percent(负值)` 支持反向到 `ESC_MIN_US=1400`，但 `planner.py:151` 只给 `cruise×scale ≥ 0`、`lane_final_test` 只写 1500/1560/1590+，全仓 grep 不到负值）；旁证：官方 2026 demo 把电机夹在 **[1500,2500]**、`SPEED_STOP 1640`（这批电调中位会漂）；2025 那套（另一台车、GPIO 直驱）注释写「11900 以上前传、以下后转」——上一代支持后退但不是同一通道。新工具 **`dev/scripts/diag/esc_probe.py`**（台架、四轮悬空、默认 dry-run、脉宽硬钳 [1300,1600]、走 MotorSession 安全信封 + 独立看门狗在位）：`--plan reverse/neutral/double/brake` 四段，判读三条（有没有反着转 / 上扫到哪档正转=死区 / 1600→1450 是刹停还是滑行）+ 新测 `test_esc_probe`(11)。文档同步：`doc/开发文档.md` §2.9 新节 + §2.3 措辞更正。
+> 最后更新：2026-10-17——**斑马线（P1-3）：检测 + 相位接入入口 `--zebra`（默认关）**：① 判据**不再是官方那条"连通域数 ≥4"**（实测**停车那一刻白条粘连、连通域只剩 3 个** → 恰好判否），换成**逐行白占比 + 连续行段**（`vision/zebra_detect.py`：`row_stats` → `detect_from_stats`）；闸门六道全在 `settings.ZEBRA_*`：横向开运算 25px / 行白占比≥0.15 / 连续≥3 行 / 跨度≥0.30×ROI宽 / 白像素≥1200 / **S≤35**。② ★ **两条实锤**：**(a) 画面顶部有一条"永久亮带"**（赛道尽头+白围栏/楼，行 0~75~99、单行白占比达 0.9、**每帧都在**）⇒ ROI 上沿定 **0.26**（裁剪后 y=100），开 ≤0.20 会**整片 855 帧每帧触发**；**(b) 阳光直晒的红跑道面**（`2.mp4` 后段 灰 p50 **213**、S p50 **47**）越过灰度阈值且跨度长 ⇒ 整片跑 **3573 帧命中 194/误触发 4** → 补 `ZEBRA_S_MAX=35`（打爆的白纸是中性色 S p50=5）后命中 **194→0**、正样本首尾**逐位不变**。③ **相位**（`lane_final_test.py --zebra`，默认关）：防抖 3 帧 + 发车后武装 → 慢行档转蠕速 1560 → **停车行断油 1500 + 非阻塞播报 + 停够 10s** → 回循迹（重挂载闩锁防二进宫）；**只接管车速**、方向盘仍归循迹；护栏/丢线停车优先（`self.stopped` 时绝不干预）。④ **验收**：正样本 `斑马线1016.mp4` **2 次触发/2 次断油/0 中止**、`e4569d…raw.mp4` 3 段真横道全检出；当前机位负样本 `2.mp4`(3573)/`锥桶1016`(2564)/`e844be`(95)/`1.mp4`(118) **全 0 触发**；`sub.mp4`/`10月11日*` 是**压低镜头前**的机位（地平线白建筑落进 ROI）→ 误触发，属机位档需另行定档。新增测试 `test_zebra_detect`(18) + `test_lane_final_zebra`(20)，**全套 25 文件全绿**。⑤ **未做完**：两个刹车行号（`zebra_slow_row`/`zebra_stop_row`）要**现场卷尺标定**（默认 240/330 = 手推视频落点；行→距离极度非线性 + 这车没有刹车）；"30cm 在横道哪一侧"待跟裁判确认（默认停在**之前**，确认在之后 → `--zebra-extra-creep-s 1~2`）；车上先验 `ffplay`+`aa.mp3`+喇叭；本轮**只落本地**未同步车端。
+> 2026-10-17（同日前一轮）——**调试期"停车"落地三件事：停止文件 + 看门狗自保 + 按键自检**（这一轮不碰比赛规则，只解决"跑起来停不下来"）：① ★ **停止文件通道**（`lane_final_test.py --stop-file`，默认 `/dev/shm/lane_stop`）：**文件存在 = 安全停车**，主循环**每帧**查（两处检查点都改成 `stop_requested()`），走与 Ctrl+C **完全相同**的收尾链；**启动清残留、退出也清**；任何通道都能发（另一个会话 / 串口 / 网页终端 / AI 工具），不依赖 PTY、不依赖 PID、不依赖命令行特征。为什么：10-16 现场 7 趟日志零「收到信号」= 按键根本没到进程（Ctrl+C 只在"该进程就是这个终端的前台作业"时才是信号）→ 详情与判据见 §6 陷阱表。② ★ **看门狗自保**（`esc_watchdog.py`）：`start_new_session=True`（独立会话）+ **忽略 SIGINT/SIGHUP/SIGQUIT、只留 SIGTERM**（主控收尾用 terminate 收它）+ **输出重定向到自己的日志**（原来继承主控那条 `| tee` 管道，操作员一断线它下一次 print 就 BrokenPipeError 自杀）+ 循环体"绝不抛"。为什么：操作员按 Ctrl+C / 断线**不能再把安全网一起带走**（主循环卡在 I2C/写盘时，那 1 秒后写 1500us 是唯一的救命一手）。③ **启动自检行**：日志/session.json 记录 `tty/pgid/tpgid/keyboard_reaches`——一眼看出"这个窗口的 Ctrl+C 能不能到车"；`session.json.result.stopped_by` 记 `signal` / `stop-file`。④ 收尾链每步包 `_try()`：stdout 管道断了也不许跳过 `wd.stop()` 与 session.json 落盘。⑤ `stop_run.sh --file`（走停止文件通道）+ `--status` 显示停止文件状态；`lab_lane_test.sh` / 现场单 / report.md §6 / §1.1 的停车顺序同步改。测试：`test_lane_final_run` +3 例（停止文件生效/残留不清跑/关掉通道）、`test_esc_watchdog` +3 例（抗 INT+HUP 后仍触发 / TERM 仍能收 / 独立会话+自己的日志，Linux 门控、**车上必须跑一遍**）。本轮只落本地（车在充电、未同步）。
 > 2026-10-16——**锥桶：口径更正 + "在车道线内"先验 + 定档工具 + 文档更正（闸门闩锁）**：① **09-07 那批蓝锥正样本作废**（镜头抬高时拍的、锥桶在画面中部，对现在的压低机位不作数）⇒ 据此算的"检出 85.3%/82.5%"同步作废；正样本改为**现场重拍**（手推车拍下摄锥桶视频）。② ★ **新增 `cone_in_lane` 先验（默认开）**：要**尽早**发现锥桶就必然在画面最上面几行找它，而那一带是"赛道尽头之外"的东西（塑料膜边/墙/树影/远处的人——**不是天空**，但同样蓝灰、HSV 与锥桶重叠）→ 先验要求**锥桶框顶/底两行都落在两条车道线之间、且当帧双侧读数**，入口在喂 3 帧防抖**之前**过滤（否则防抖数的是未过先验的原始检出）。实测：2.mp4 全片 3573 帧 ROI 0.05/0.15 时**远景误检 100% 被滤、触发 0**（旧值 5/3 次）；sub.mp4 滤 94%；1.mp4 只滤 6%（它的左线在画面外、车道带是猜的）→ 新工具 `scripts/diag/cone_calibrate.py --pos <锥桶视频> --neg <空赛道>` 给"带先验/不带先验"两列 + ROI 上沿扫档，**当天视频定档**。⑤ ★ **当天下午现场视频到手后已定稿**：`锥桶1016.mp4`（手推 2564 帧）里 7 段锥桶接近**全部检出**（首帧框顶 y≈50~72、h≈40，≈3.5m 外）、**全是真锥、无远景误触发**；上沿 0.20→**0.10**（早 ~0.5s/段）；空赛道 1014 帧目录/2.mp4/1.mp4 **0 触发**。⚠️ 手推会上浮摄像头上浮→顶部噪声；真跑车头更低→噪声更少但锥桶更晚入画，首次真跑存图复核。③ **绕行油门** `CONE_AVOID_US` 1548→**1575**（现场 A/B **1585/1580/1575/1570**，`--cone-speed-us`；巡航 1590+ 只降一两档）。④ **文档更正、代码不动**：入口闸门是**一次性闩锁，没有"再见板即停"**（板挡回去能停是靠丢线，会滑一段）；只有台架 `bench_test.py` 是"再见板→停"。锥桶相位照旧 `--cone`（默认关）。本轮仍只落本地（待同步车端）。
 > 2026-10-15 夜——**锥桶相位接入入口**（照 `doc/开发文档.md` §2.8 的固定流程，不新建脚本）：`scripts/lane_final_test.py` 加 `--cone`（**默认关**）= 复用 `vision/cone_detect.py` 检测器 + 用**目标点偏移**执行（PD 目标 = 车道中心 ∓ `CONE_AVOID_OFFSET_PX` 120px，到时归零 → 回正 → 反向 S 形），替代旧归档脚本的开环 ±20°；`CONE_GATE_ROI` 上沿按**裁剪后画面**定到 **0.20**（当时是唯一"空赛道零误检"的档；锥桶落点未量，见上一条更正）；离线验收 = `--frames <空赛道帧目录> --cone` 看汇总行「相位触发 0 次」；新测 `tests/test_lane_final_cone.py`（15 例）→ 本地 23 个测试文件全绿。⚠️ **ROI 是机位相关档**：压低前的 `sub.mp4`（地平线/远处楼栋入画）**87.7% 帧误检** → 动过镜头/换场地必须拿当天片段复跑这条命令。
 > 2026-10-15——**现场事故复盘 + 四块修复**（详见 `doc/开发文档.md` §7 的 2026-10-15 条目）：① **闸门误发车**（下摄压低不够时"车自己车盖的上沿"落进 `START_GATE_ROI`，那圈暗蓝灰像素面积 0.06~0.14 压着 0.06 阈值抖 → 两次没放板就发车）已修 = ROI 底边 0.95→0.80 + 面积路径**也要主导度≥35** + 画面裁剪 `FRAME_CROP_LINE_Y=384`；当场 30 次武装**零假报**。② **单侧垃圾读数**加两道护栏（单侧也过跳变门限、"回中位保速"加 1.2s 时限）。③ **★ 车停不下来（事故级）**：PCA9685 一直输出最后一次脉宽，相机 UVC 卡死/进程被杀时车会带着油门前冲、Ctrl+C 无效 → 新增**独立进程看门狗** `scripts/esc_watchdog.py`（1s 不喂心跳强写 1500us）+ 读帧挪 daemon 线程（卡死不再阻塞主循环）。④ **增益实测**：亮光下 `kp 0.10 + kd 0.50 @ 1585` 最稳、**kd ≥0.65 会 D 过载**、**暗光 16.6fps 是独立退化因素**。⑤ 日志增强：`session.json`（参数+停机原因）、`lane_ab_summary.py` / `cam_cv2_fps.py` / `car_test_sweep.sh`；现场单 `dev/doc/field-lane-ab-20261015.md`。
@@ -95,7 +97,7 @@
 | **P0-4** | 现场几何实测（赛道宽、停车区黄线、斑马线 30cm 停区、是否有编码器、红灯长等 vs 20s 判失败） | 🟡 10-10 操场执行（含官方口径核对） |
 | **P1-1** | 扫线 + 误差滤波 + PID（**入口 `scripts/lane_final_test.py`**（2026-10-14 最终版：脊搜索检测 + PD + 记录 + 安全，单文件自包含）；旧 `lane_ref_test.py` / `lane_official.py` / `centroid_follow.py` **已归档**；A 路径检测器 `lane_ref.py` 仍在用） | ✅ 代码级完成 + 1014 素材全片验证（双侧 82%/剔除末段 89%/丢失 0%/中心 p90 5.8px/单帧 10ms，报告 `lane_test/1014_lane_final/report.md`）；现场待办：静止自检标定 target_x + 实跑复验 |
 | **P1-2** | 距离估计与减速停准（框底边 → 地面坐标 → 速度曲线） | ⬜ |
-| **P1-3** | FSM 主体重构（斑马线 10s、红绿灯光电、锥桶绕行、停车五阶段） | 🟡 **锥桶 = 检测 + 相位都已进入口**（`lane_final_test.py --cone`，默认关；**检测档待现场锥桶视频重标** → `scripts/diag/cone_calibrate.py`，见 `doc/开发文档.md` §2.5）；斑马线/灯/停车待接 |
+| **P1-3** | FSM 主体重构（斑马线 10s、红绿灯光电、锥桶绕行、停车五阶段） | 🟡 **锥桶 = 检测 + 相位都已进入口**（`lane_final_test.py --cone`，默认关；检测档已按 10-16 现场锥桶视频定档 → `scripts/diag/cone_calibrate.py`，见 `doc/开发文档.md` §2.5）；**斑马线 = 检测 + 相位也已进入口**（`--zebra`，默认关；当前机位负样本零误检、正样本 2 次触发全中 → §2.3；**两个刹车行号待现场卷尺标定**）；灯/停车待接 |
 | **P1-4** | 停车：蓝板接地点 + IPM 判左右 → 五阶段入库 | ⬜ |
 | **P1-5** | 日志降频 + 语音播放非阻塞 | ✅ 已完成（`PRINT_EVERY_N` + `audio.py` 后台播放） |
 | **P2-*** | 阈值现场标定、双摄分时复用、性能优化、技术手册 | ⬜（语义分割轨已放弃，v11） |
@@ -176,9 +178,11 @@ cd dev && export PYTHONPATH=.
 
 # 单测（纯函数 + __main__ 风格，不需要 pytest）—— 直接全部跑一遍
 for t in tests/test_*.py; do "$PY" "$t" || echo "FAIL $t"; done
-# 当前 23 个文件：filters/pid/lane_arbiter/protocol/start_gate/control/elements/site_config/
+# 当前 26 个文件：filters/pid/lane_arbiter/protocol/start_gate/control/elements/site_config/
 #   camera_guard/rknn_detector/bench_logic/lane_ref/lane_final/lane_final_cone/lane_final_run/
-#   color_elements/cone_detect/imu/parking_logic/lane_rate/vision_replay/esc_watchdog + integration
+#   color_elements/cone_detect/zebra_detect/lane_final_zebra/**esc_probe**/imu/parking_logic/
+#   lane_rate/vision_replay/esc_watchdog + integration
+#   （zebra_detect / lane_final_zebra / esc_probe 2026-10-17 加）
 #   （lane_official / lane_ref_run 随旧脚本归档，2026-10-14；esc_watchdog 10-15、lane_final_cone 10-15 夜）
 "$PY" tests/test_integration.py        # 端到端：起控制端 + UDP 打假数据（dry-run）
 "$PY" tests/test_lane_ref_run.py       # 循迹：假摄像头跑完整状态机（自检→发车→跟线→丢线停车）
@@ -241,10 +245,29 @@ sudo python3 /root/dev/scripts/lane_final_test.py --calibrate --cone       # 静
 # 绕行油门现场 A/B 档：--cone-speed-us 1585 / 1580 / 1575 / 1570（默认 1575；巡航 1590+ 只降一两档）
 # 离线定档（拍完锥桶视频后，PC 上跑）：scripts/diag/cone_calibrate.py --pos <锥桶视频> --neg <空赛道帧目录>
 # 离线验收（空赛道零触发是门槛）：--frames <当天实拍帧目录> --cone → 看汇总行「相位触发 0 次」
+# 电调反向/刹车探针（台架专用，**四轮必须悬空**；默认 dry-run，加 --allow-motion 才写脉宽）
+python3 /root/dev/scripts/diag/esc_probe.py                     # 只看计划（安全）
+sudo python3 /root/dev/scripts/diag/esc_probe.py --allow-motion                 # 反向最小集（1500→1460…1300，档间回中位）
+sudo python3 /root/dev/scripts/diag/esc_probe.py --allow-motion --plan double   # 先刹再倒的「双踩」序列
+sudo python3 /root/dev/scripts/diag/esc_probe.py --allow-motion --plan brake    # 1600→1450 vs 1500 对照（看有没有主动刹车）
+# 判读三条：① 轮子有没有反着转、哪个脉宽开始反 ② 上扫到哪档正转（=死区，登记 1545） ③ 1600→1450 是立刻停还是滑很久
+# 日志 /root/dev/logs/esc_probe_*.log；脉宽硬钳 [1300,1600]、看门狗在位、任何退出路径回中位
+
+# 斑马线相位（--zebra，默认关；同样先只读档 → 再场地；doc §2.3 有完整三步）
+sudo python3 /root/dev/scripts/lane_final_test.py --no-motor --zebra        # 架空/场地：近边行读数 + 叠加图（三条横线=ROI 上沿/慢行档/停车行）
+sudo python3 /root/dev/scripts/lane_final_test.py --zebra                   # dry-run 下真跑相位机（不动电机；停车瞬间也能听播报）
+# ① 定检测档（拍完当天"横道视频+空赛道视频"后在 PC 上跑）：scripts/diag/zebra_calibrate.py --pos … --neg …
+# ② ★ 标停车行（把车摆到裁判认的位置、卷尺量车头距横道近边 20~25cm，再跑）：
+sudo python3 /root/dev/scripts/lane_final_test.py --calibrate --zebra --zebra-calib-write
+#   → 打印"近边行 中位 N"并写进 site.yaml 的 zebra_stop_row（下次运行自动生效）
+# ③ 验收：--video <当天横道视频> --zebra → 汇总行「相位触发 N 次」（N=横道条数）；
+#          --video <当天空赛道视频> --zebra → 「相位触发 0 次」
+# 扫档：--zebra-slow-row 280/240/200 + --zebra-stop-lead-px 0/-20（判定看"落点在 30cm 内且不压横道"与日志里的"行速率"）
 # ★ 想停车（2026-10-17 起，按顺序）：① touch /dev/shm/lane_stop（任何通道都能发；主循环每帧查）
 #   ② bash /root/dev/scripts/stop_run.sh（= 按 PID 发 TERM；--file 走停止文件通道）
 #   ③ Ctrl+C（只在你前台手敲的那个窗口里有效）④ 断电
 # ⚠️ **板挡回去不是闸门停车**（靠丢线、会滑一段，见 §1.1 第 8 条）
+# ⚠️ 斑马线停完 10s 会**自己继续走**（规则要求）；要它彻底停就走上一条的停车通道
 
 # 其它
 bash /root/dev/scripts/safe_pwm_init.sh            # 只确保 PCA9685 回到安全值
@@ -372,7 +395,7 @@ StartGateState(blocked: bool, armed: bool, released: bool, blue_ratio: float, ti
 | 用上届模型权重 | `dev/models/best11nseg.rknn` 类别与本届不符，只能验证工具链 |
 | 停车判定看"黄框是否可见" | 裁判放法不可预测；用**外框 + 蓝板接地点 + IPM** 的几何先验 |
 | 用 `cx < 图像宽/2` 判左右车位 | 车斜着进场时必错；要比 IPM 俯视图里 `board_x` 与外框中点 |
-| 停车/斑马线"看到就断油" | 会滑过停车点（压线 +10s、未停够 10s 再 +20s）；需要**距离估计 + 减速曲线** |
+| 停车/斑马线"看到就断油" | 会滑过停车点（压线 +10s、未停够 10s 再 +20s）；**2026-10-17 已落地**：斑马线相位 = 断油 → **按行号闭环**（慢行档转蠕速、停车行断油）→ 停够 10s + 播报（`lane_final_test.py --zebra`，片进 §2.3）；两个行号必须现场卷尺标定（默认 240/330 = 手推视频落点） |
 | 两个模型同时无脑调 RKNN | NPU 争抢导致总吞吐下降；先"单推理线程 + 任务队列"，必要时再 core mask 隔离 |
 | 主循环里 `cv::imwrite` / X11 `imshow` | 卡住控制回路 / headless 下直接崩；调试预览用开关控制 |
 | 依赖 `main.py --dry-run` 参数 | 该参数不存在，dry-run 是**默认行为** |
@@ -385,6 +408,11 @@ StartGateState(blocked: bool, armed: bool, released: bool, blue_ratio: float, ti
 | **画面底部角落的"蓝物"被当成要绕的锥桶** | 2026-10-16 实验室实测：底部蓝色地面/垫子（框底 384 = 贴着裁剪线）被判"在车道线内"→ 点着一次 3.2s 的 S 型。已加**"只绕前方锥桶"**闸门 `CONE_TRIGGER_MAX_BOTTOM_Y=300`（`--cone-max-bottom-y`：框底必须高于它才算"前方"；赛道实测接近段框底 90~226 不受影响）。⇒ 实验室里要把锥桶摆在**车前 2~3m** 才看得到触发（贴车头的那种不绕） |
 | **拿"09-07 锥桶数据集"标定现在的检测档** | 那批样本是**镜头抬高**时拍的（锥桶在画面中部）；现在的压低机位下**锥桶会出现在画面上部**——按它算出的 ROI/检出率（曾写进文档的"85.3%"）**全部作废**。正样本必须**现场重拍**（手推车、下摄原样） |
 | **以为"把蓝板挡回去 = 再见板即停"** | 入口 `lane_final_test.py` 的闸门是**一次性闩锁**：`allowed` 置位后不再调 `gate.update()`，**没有再见板即停**。现场"板挡回去能停"是**经由丢线**（读数失效 → 0.6s → 丢线停，还会滑一段），不覆盖"车已出线/相机被挡但还有垃圾读数"这类情形。要立刻停：Ctrl+C / 断电（台架 `bench_test.py` 才是"再见板→停"语义） |
+| **把「这车没有刹车」当成「电调不支持」** | 准确口径是「**跑车代码只走前进档**」：`pca9685.set_esc_percent(负值)` 能反向（最深 1400us），但 `planner` 只给 ≥0 油门、`lane_final_test` 只写 1500/1560/1590+，**全仓无一处写 <1500** ⇒ 刹车/倒车从来没被触发过，不能反推电调不支持。旁证：官方 2026 demo 把电机夹在 [1500,2500]（`SPEED_STOP 1640`，说明这批电调中位会漂）。要定性就上台架跑 `dev/scripts/diag/esc_probe.py`（四轮悬空；--plan reverse/neutral/double/brake）|
+| **拿「官方斑马线判据（连通域数 ≥4）」判近处横道** | **车靠近后 A4 白条会粘连成大块**——实测停车那一刻**连通域只剩 3 个** ⇒ 恰好判否（最需要位置读数时没读数）。B 路径改成**逐行白占比 + 连续行段**（`vision/zebra_detect.py`），并逐帧给出"近边行号"给刹停用 |
+| **斑马线 ROI 上沿开太浅 / 拿旧机位素材定档** | 画面顶部有一条"**永久亮带**"（赛道尽头+白围栏/楼，行 0~75~99、单行白占比达 0.9、**每帧都在**）⇒ 上沿 ≤0.20 会**整片 855 帧每帧触发**；压低镜头**之前**的 `sub.mp4`/`10月11日*` 把地平线白建筑整条放进 ROI（行 99~158）→ 也每帧命中。**换场地/动镜头必须用当天视频复跑** `scripts/diag/zebra_calibrate.py --pos <横道> --neg <空赛道>` |
+| **只测前 900 帧就宣布"空赛道零误检"** | `2.mp4` 的误检源在**后段**（一片阳光直晒的红跑道面，灰 p50 213、S p50 47）：采样前 900 帧时 0 触发，**整片 3573 帧跑出来命中 194/误触发 4**。⇒ 零误检验收必须**整片跑入口**（`--video <整段> --zebra`），别用采样/工具口径代替 |
+| **以为"停在横道 30cm 内"就只有一个姿势** | 规则图 9 把 30cm 红框画在横道**之后**（现场需复核）：默认按"停在**之前**（近边 30cm 内）"实现（= 10-16 手推视频的停法）；若现场确认要"压过横道停"，加 `--zebra-extra-creep-s 1~2` 即可（不用改代码） |
 | **在镜头上部 ~60px 那条"远景带"里找锥桶（且只靠 ROI 挡）** | 要**尽早**发现锥桶就必然在画面最上面几行找它，而那一带是"赛道尽头之外"的东西（塑料膜边/墙/树影/远处的人；**不是天空**，但同样蓝灰、HSV 与锥桶重叠：实测 S63/V190 vs S67/V213）。两道先验解决：**① ROI 上沿** + **② `cone_in_lane`（默认开）：锥桶框顶/底两行都要落在两条车道线之间、且当帧是双侧读数**，入口在喂 3 帧防抖**之前**过滤。实测过滤力：当前机位 2.mp4 全片 **100%**（ROI 0.05/0.15 时远景框全滤掉、触发 0）；旧机位 sub.mp4 94%；`1.mp4` 仅 6%（**它的左线在画面外 x=−39，车道带是猜的**）⇒ **不是银弹，用当天视频量**（`scripts/diag/cone_calibrate.py` 给"带先验/不带先验"两列） |
 
 ---
